@@ -5,7 +5,29 @@ agents, carries messages to them and their output back.
 
 Installing it is copying the file.
 
-## Install
+## Stand up a host
+
+On a mac or a linux machine that is signed in to tailscale, with `gh` signed
+in to read the releases:
+
+```sh
+AGENT_HOST_SERVICE_URL=https://… AGENT_HOST_TOKEN=… scripts/install-host.sh
+```
+
+It installs tmux if it is missing, makes sure the tailnet can reach the
+machine over ssh (and that nothing publishes it beyond the tailnet), downloads
+the release for this machine and checks it against `SHA256SUMS`, proves it
+with one beat, and only then installs it as a service that runs as you,
+survives logout and reboot, and restarts if it dies: a launchd daemon on a
+mac, a lingering systemd user unit on linux. Workers are attached with
+`ssh` over the tailnet and `tmux attach`; the host itself only calls out.
+
+Run it again to take a newer release (`--release TAG` for a given one,
+`--binary PATH` for a local build). `scripts/install-host.sh rollback` swaps
+back to the binary installed before, and `remove` takes agent-host and its
+config off the machine. The token lives only in the config file, mode 600.
+
+## Install by hand
 
 Each release carries one binary per target, and `SHA256SUMS`:
 
