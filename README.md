@@ -120,9 +120,9 @@ worktree cannot be made -- no checkout by that name, origin cannot be
 fetched, the branch is already checked out elsewhere -- the start fails with
 that reason and no agent runs.
 
-Every agent is started with the standing rules in `src/conduct.md` -- no
-pushing, merging or deploying, run the repository's own checks, ask when
-stuck -- and then its brief, exactly as placed. The prompt is kept at
+Every agent is started with the standing rules in `src/conduct.md` -- push
+its own branch and nothing else, never force, merge or deploy, run the
+repository's own checks, ask when stuck -- and then its brief, exactly as placed. The prompt is kept at
 `agents/<id>/prompt.md`.
 
 A workspace is kept when its agent ends, for inspection, and its worktree is

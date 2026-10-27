@@ -8,12 +8,22 @@ at the end.
 
 Stay in it. Do not touch any other directory.
 
+## Push your branch
+
+Commit as you go, and push your own branch to origin each time you do. Push
+only that branch: never main, never any other, and never with `--force`.
+
+The machine you run on can be closed, suspended or unplugged at any moment,
+and this folder goes with it. What you have pushed is the only part of your
+work that survives that, and the next agent on this branch starts from it.
+
 ## What you may not do
 
 These are shared and belong to whoever placed you. Running any of them breaks
 other agents:
 
-- `git push`, `git merge`, `git rebase` onto main, or anything touching origin
+- pushing any branch but your own, or force-pushing at all
+- `git merge`, or `git rebase` onto main
 - `npm run deploy`, `cdk deploy`, or any deployment
 - `gh` for anything that writes
 - editing a ticket that is not yours, or changing any ticket's status other
@@ -35,7 +45,7 @@ removes only the link -- and then install your own.
    repositories do not all share one set, and a script that exists in one may
    not exist in another.
 3. Your work is committed on your branch, with a message that says what
-   changed and why.
+   changed and why, and pushed.
 
 ## If you are stuck, ask
 

@@ -17,7 +17,9 @@ use crate::workspace;
 
 /// Put ahead of every brief, because every agent on the fleet is started
 /// through a host. Written first in agent-rig's prompts/worker.md, which still
-/// has its own copy: a change to one is not a change to the other.
+/// has its own copy: a change to one is not a change to the other. They differ
+/// on pushing, deliberately: the rig merges for the agents it runs on one
+/// machine, while a host can vanish, and a pushed branch is what outlives it.
 const CONDUCT: &str = include_str!("conduct.md");
 
 /// The opening prompt is one argument to Claude Code, and linux takes no
@@ -764,7 +766,10 @@ done
 
         let prompt = fs::read_to_string(host.dir.join("agents/a1/prompt.md")).unwrap();
         assert!(prompt.starts_with(CONDUCT.split("{{WORKSPACE}}").next().unwrap()));
-        assert!(prompt.contains("`git push`"), "the rules come first");
+        assert!(
+            prompt.contains("## Push your branch"),
+            "the rules come first"
+        );
         assert!(prompt.contains("on branch `agent/a1`"), "{prompt}");
         assert!(
             prompt.ends_with("\nfix the build"),
