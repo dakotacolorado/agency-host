@@ -6,7 +6,7 @@
 
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-use std::{fs, io};
+use std::{env, fs, io};
 
 use crate::agent::Entry;
 
@@ -51,14 +51,31 @@ impl Claude {
     /// has started, which is the whole point of running it here. Skipping
     /// permissions because nobody is watching for the prompt: an agent asking
     /// one would wait for ever, holding its run.
-    pub fn argv(&self, session: &str, instructions: &str) -> Vec<String> {
-        vec![
+    pub fn argv(&self, session: &str, instructions: Option<&str>) -> Vec<String> {
+        let mut argv = vec![
             self.program.clone(),
             "--dangerously-skip-permissions".into(),
             "--session-id".into(),
             session.into(),
-            instructions.into(),
-        ]
+        ];
+        argv.extend(instructions.map(String::from));
+        argv
+    }
+
+    /// tmux starts a session for a program that is not there and then quietly
+    /// ends it, so a start that cannot run is caught here, where it can still
+    /// be reported.
+    pub fn installed(&self) -> Result<(), String> {
+        let program = Path::new(&self.program);
+        let found = if self.program.contains('/') {
+            program.is_file()
+        } else {
+            env::var_os("PATH")
+                .is_some_and(|path| env::split_paths(&path).any(|dir| dir.join(program).is_file()))
+        };
+        found
+            .then_some(())
+            .ok_or_else(|| format!("{} is not installed on this host", self.program))
     }
 
     /// The tmux server keeps the environment it started with, which may

@@ -3,9 +3,11 @@
 //! host remembers nothing about them that tmux and the transcript do not hold.
 
 use serde::Serialize;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::PathBuf;
+use std::thread;
+use std::time::Duration;
 
 use crate::claude::{self, Claude};
 use crate::tmux::Tmux;
@@ -50,22 +52,38 @@ const RAW_LIMIT: u64 = 8 << 20;
 pub struct Agents {
     tmux: Tmux,
     claude: Claude,
+    /// Where each agent gets a folder of its own to start in.
+    home: PathBuf,
 }
 
+/// Between the key that stops a turn and the text that follows it: sent
+/// together, the terminal reads the two as one escape sequence, and the text
+/// lands while the turn is still stopping.
+const SETTLE: Duration = Duration::from_millis(500);
+
 impl Agents {
-    pub fn new(tmux: Tmux, claude: Claude) -> Self {
-        Agents { tmux, claude }
+    pub fn new(tmux: Tmux, claude: Claude, home: PathBuf) -> Self {
+        Agents { tmux, claude, home }
     }
 
-    /// Placing an agent is its own story; until it lands nothing but the tests
-    /// starts one.
-    #[cfg_attr(not(test), expect(dead_code))]
-    pub fn start(&self, id: &str, dir: &Path, instructions: &str) -> Result<(), String> {
-        self.claude.trust(dir)?;
+    /// Runs the agent in a session of its own, in a folder of its own, told
+    /// `instructions` if there are any and otherwise waiting to be told. A
+    /// start is sent again until it is reported, so one the host has already
+    /// done -- before a restart that lost the report -- is done, not repeated:
+    /// its session is still running, or it has run and left a transcript.
+    pub fn start(&self, id: &str, instructions: Option<&str>) -> Result<(), String> {
+        let session = claude::session_id(id);
+        if self.session(id).is_some() || self.claude.transcript(&session).is_some() {
+            return Ok(());
+        }
+        self.claude.installed()?;
+        let dir = self.home.join(id);
+        fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        self.claude.trust(&dir)?;
         self.tmux.start(
             id,
-            dir,
-            &self.claude.argv(&claude::session_id(id), instructions),
+            &dir,
+            &self.claude.argv(&session, instructions),
             &self.claude.env(),
         )
     }
@@ -74,19 +92,39 @@ impl Agents {
         self.tmux.sessions().into_iter().map(|(id, _)| id).collect()
     }
 
+    fn session(&self, id: &str) -> Option<String> {
+        self.tmux
+            .sessions()
+            .into_iter()
+            .find(|(tag, _)| tag == id)
+            .map(|(_, session)| session)
+    }
+
+    fn running(&self, id: &str) -> Result<String, String> {
+        self.session(id)
+            .ok_or_else(|| format!("no agent {id} on this host"))
+    }
+
     /// Types `text` into the agent's session now, whether it is working or
     /// waiting. Working, it takes the text at its next step rather than when it
     /// has finished; waiting on a question, the text is the answer and the same
     /// run goes on. There is one way in, whoever is speaking: a person, the
     /// agent above it, or an answer.
     pub fn say(&self, id: &str, text: &str) -> Result<(), String> {
-        let (_, session) = self
-            .tmux
-            .sessions()
-            .into_iter()
-            .find(|(tag, _)| tag == id)
-            .ok_or_else(|| format!("no agent {id} on this host"))?;
-        self.tmux.type_in(&session, text)
+        self.tmux.type_in(&self.running(id)?, text)
+    }
+
+    /// Stops the turn the agent is in, as Escape does for a person at its
+    /// terminal: the session and its conversation go on, waiting, and `text`
+    /// is what it is told next.
+    pub fn interrupt(&self, id: &str, text: Option<&str>) -> Result<(), String> {
+        let session = self.running(id)?;
+        self.tmux.press(&session, "Escape")?;
+        if let Some(text) = text {
+            thread::sleep(SETTLE);
+            self.tmux.type_in(&session, text)?;
+        }
+        Ok(())
     }
 
     /// What the agent has done since `from`, as much as fits in `budget` bytes
@@ -159,6 +197,24 @@ while IFS= read -r line; do
 done
 "#;
 
+    /// Stands in for Claude Code in a turn that runs until it is stopped: it
+    /// gives up its turn only on Escape, and then answers each line typed.
+    const BUSY_CLAUDE: &str = r#"#!/bin/sh
+dir="$CLAUDE_CONFIG_DIR/projects/-fake"; mkdir -p "$dir"; t="$dir/$3.jsonl"
+w() { printf '%s\n' "$1" >> "$t"; }
+stty -icanon -echo min 1
+w '{"type":"assistant","message":{"id":"m0","content":[{"type":"text","text":"working"}],"stop_reason":"tool_use"}}'
+[ "$(dd bs=1 count=1 2>/dev/null)" = "$(printf '\033')" ] || exit 65
+w '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}}'
+stty icanon
+n=0
+while IFS= read -r line; do
+  n=$((n+1))
+  w "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"$line\"}}"
+  w "{\"type\":\"assistant\",\"message\":{\"id\":\"m$n\",\"content\":[{\"type\":\"text\",\"text\":\"on $line\"}],\"stop_reason\":\"end_turn\"}}"
+done
+"#;
+
     struct Host {
         agents: Agents,
         dir: PathBuf,
@@ -174,7 +230,7 @@ done
     fn host(name: &str, program: &str) -> Host {
         let dir = std::env::temp_dir().join(format!("agent-host-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(dir.join("work")).unwrap();
+        fs::create_dir_all(&dir).unwrap();
         let fake = dir.join("claude");
         fs::write(&fake, program).unwrap();
         fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
@@ -186,6 +242,7 @@ done
                     Some(dir.join("state")),
                     "/nonexistent".into(),
                 ),
+                dir.join("agents"),
             ),
             dir,
         }
@@ -223,9 +280,7 @@ done
     fn an_agent_is_spoken_to_while_it_works_and_answered_in_the_same_run() {
         let host = host("session", FAKE_CLAUDE);
         let agents = &host.agents;
-        agents
-            .start("a1", &host.dir.join("work"), "fix the build")
-            .unwrap();
+        agents.start("a1", Some("fix the build")).unwrap();
         assert_eq!(agents.ids(), ["a1"]);
         let (mut seen, mut cursor) = (vec![], 0);
 
@@ -256,6 +311,99 @@ done
         });
         assert_eq!(seen[5..], [told("main"), said("on main"), Entry::Waiting]);
         assert_eq!(agents.ids(), ["a1"]);
+    }
+
+    #[test]
+    fn a_start_command_runs_the_agent_in_its_own_session_and_folder() {
+        let host = host("start", FAKE_CLAUDE);
+        let command: crate::beat::Command = serde_json::from_str(
+            r#"{"id":"c1","kind":"start","agentId":"a1","ticketId":null,"role":"worker","level":1,"createdBy":null}"#,
+        )
+        .unwrap();
+        let report = crate::beat::take(&command, &host.agents);
+        assert!(report.ok, "{report:?}");
+        assert_eq!(host.agents.ids(), ["a1"]);
+        assert!(host.dir.join("agents/a1").is_dir());
+        let (mut seen, mut cursor) = (vec![], 0);
+        read_until(&host.agents, "a1", &mut seen, &mut cursor, |s| {
+            s.contains(&said("step one"))
+        });
+        assert_eq!(seen[0], told(""), "started with nothing to do but wait");
+    }
+
+    #[test]
+    fn an_interrupt_stops_the_turn_and_the_session_goes_on() {
+        let host = host("interrupt", BUSY_CLAUDE);
+        let agents = &host.agents;
+        agents.start("a1", None).unwrap();
+        let (mut seen, mut cursor) = (vec![], 0);
+        read_until(agents, "a1", &mut seen, &mut cursor, |s| {
+            s.contains(&said("working"))
+        });
+
+        agents.interrupt("a1", Some("try the other way")).unwrap();
+        read_until(agents, "a1", &mut seen, &mut cursor, |s| {
+            s.contains(&Entry::Waiting)
+        });
+        assert_eq!(
+            seen,
+            [
+                said("working"),
+                told("[Request interrupted by user]"),
+                told("try the other way"),
+                said("on try the other way"),
+                Entry::Waiting
+            ]
+        );
+        assert_eq!(agents.ids(), ["a1"], "the session outlives the interrupt");
+    }
+
+    #[test]
+    fn a_start_already_done_is_not_done_again() {
+        let host = host("again", FAKE_CLAUDE);
+        host.agents.start("a1", Some("fix the build")).unwrap();
+        // A host that restarts has nothing but tmux and the transcripts.
+        let restarted = Agents::new(
+            Tmux::new(format!("agent-host-test-{}-again", std::process::id())),
+            Claude::new(
+                host.dir.join("claude").to_string_lossy(),
+                Some(host.dir.join("state")),
+                "/nonexistent".into(),
+            ),
+            host.dir.join("agents"),
+        );
+        restarted.start("a1", Some("fix the build")).unwrap();
+        assert_eq!(restarted.ids(), ["a1"]);
+
+        // One that has run and ended left its transcript behind.
+        let (mut seen, mut cursor) = (vec![], 0);
+        read_until(&restarted, "a1", &mut seen, &mut cursor, |s| !s.is_empty());
+        restarted.tmux.kill_server();
+        restarted.start("a1", Some("fix the build")).unwrap();
+        assert!(restarted.ids().is_empty(), "started a finished agent again");
+    }
+
+    #[test]
+    fn a_start_that_cannot_run_says_why() {
+        let host = host("missing", FAKE_CLAUDE);
+        let agents = Agents::new(
+            Tmux::new(format!("agent-host-test-{}-missing", std::process::id())),
+            Claude::new("/nonexistent/claude", None, "/nonexistent".into()),
+            host.dir.join("agents"),
+        );
+        let err = agents.start("a1", None).unwrap_err();
+        assert!(
+            err.contains("/nonexistent/claude is not installed"),
+            "{err}"
+        );
+        assert!(agents.ids().is_empty());
+    }
+
+    #[test]
+    fn an_interrupt_for_an_agent_not_here_says_so() {
+        let host = host("absent-interrupt", FAKE_CLAUDE);
+        let err = host.agents.interrupt("nobody", None).unwrap_err();
+        assert!(err.contains("no agent nobody"), "{err}");
     }
 
     #[test]
@@ -298,14 +446,15 @@ done
         let dir = std::env::temp_dir().join(format!("agent-host-real-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let tmux = Tmux::new(format!("agent-host-test-real-{}", std::process::id()));
-        let agents = Agents::new(tmux, Claude::from_env(|k| std::env::var(k).ok()));
+        let agents = Agents::new(tmux, Claude::from_env(|k| std::env::var(k).ok()), dir);
         let id = format!("real-{}", std::process::id());
         agents
             .start(
                 &id,
-                &dir,
-                "Run this shell command in the foreground: python3 -c \"import time; time.sleep(15)\". \
+                Some(
+                    "Run this shell command in the foreground: python3 -c \"import time; time.sleep(15)\". \
                  Then run: echo second. Then reply with one word: done.",
+                ),
             )
             .unwrap();
         let (mut seen, mut cursor) = (vec![], 0);
@@ -334,5 +483,64 @@ done
         assert!(seen[correction..]
             .iter()
             .any(|e| matches!(e, Entry::Ran { input, .. } if input.contains("third"))));
+    }
+
+    /// Interrupting Claude Code itself, mid-command, as the page does:
+    /// `cargo test -- --ignored real_claude`.
+    #[test]
+    #[ignore]
+    fn real_claude_interrupted() {
+        let dir = std::env::temp_dir().join(format!("agent-host-real-i-{}", std::process::id()));
+        let tmux = Tmux::new(format!("agent-host-test-real-i-{}", std::process::id()));
+        let agents = Agents::new(tmux, Claude::from_env(|k| std::env::var(k).ok()), dir);
+        let id = format!("real-i-{}", std::process::id());
+        agents.start(&id, None).unwrap();
+        thread::sleep(Duration::from_secs(5));
+        agents
+            .say(
+                &id,
+                "Run this shell command in the foreground: python3 -c \"import time; time.sleep(90)\". \
+                 Then reply with one word: slept.",
+            )
+            .unwrap();
+        let (mut seen, mut cursor) = (vec![], 0);
+        let started = Instant::now();
+        let mut interrupted = false;
+        let after = told("Never mind. Reply with one word: stopped.");
+        let answered = |s: &[Entry]| {
+            s.iter()
+                .position(|e| e == &after)
+                .is_some_and(|i| s[i..].contains(&Entry::Waiting))
+        };
+        while !answered(&seen) {
+            // Well inside the 90 seconds the command runs for, so it was cut
+            // off, not waited out.
+            assert!(
+                started.elapsed() < Duration::from_secs(60),
+                "gave up; read {seen:?}"
+            );
+            if !interrupted && seen.iter().any(|e| matches!(e, Entry::Ran { .. })) {
+                thread::sleep(Duration::from_secs(3));
+                agents
+                    .interrupt(&id, Some("Never mind. Reply with one word: stopped."))
+                    .unwrap();
+                interrupted = true;
+            }
+            if let Some(batch) = agents.read(&id, cursor, 1 << 16) {
+                cursor = batch.to;
+                seen.extend(batch.entries);
+            }
+            thread::sleep(Duration::from_millis(500));
+        }
+        let ids = agents.ids();
+        agents.tmux.kill_server();
+        eprintln!("{seen:#?}");
+        assert_eq!(ids, [id], "the session outlives the interrupt");
+        assert!(
+            seen.iter().any(
+                |e| matches!(e, Entry::Told { text } if text.starts_with("[Request interrupted"))
+            ),
+            "the turn was stopped"
+        );
     }
 }

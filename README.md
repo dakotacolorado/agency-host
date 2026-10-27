@@ -82,10 +82,22 @@ says `unknown`.
 ## Agents
 
 Each agent is a Claude Code session in tmux, on the host's own socket, so it
-keeps a terminal and can be spoken to while it works. A message is typed into
-the session at once; Claude Code takes it at its next step, or, if the agent
-has stopped to ask, as the answer, and the same run goes on. The host reads
-the session's transcript as it is written and sends it up on each beat.
+keeps a terminal and can be spoken to while it works. A `start` command runs
+one, named by the id the service gave it, in a folder of its own under
+`$XDG_DATA_HOME/agent-host/agents` (or `~/.local/share/agent-host/agents`); it
+waits there until it is told something. A start the host has already done --
+its session is running, or it has run and left a transcript -- is reported
+done and not repeated, so a host that restarts before reporting does not run
+the agent twice. Every running agent is listed on each beat.
+
+A message is typed into the session at once; Claude Code takes it at its next
+step, or, if the agent has stopped to ask, as the answer, and the same run goes
+on. An `interrupt` presses Escape in the session, which stops the turn the
+agent is in, mid-command if need be, without ending the session; any text it
+carries is typed in once the turn has stopped. The host reads the session's
+transcript as it is written and sends it up on each beat.
+
+A command kind the host does not handle is reported failed, naming the kind.
 
 To watch or talk to one directly on the machine:
 
@@ -100,7 +112,7 @@ The machine needs `tmux` and `claude` on its PATH, with Claude Code signed in.
 
 ```sh
 cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
-cargo test -- --ignored real_claude   # one real Claude Code session, end to end
+cargo test -- --ignored real_claude   # real Claude Code sessions, end to end
 ```
 
 The tests need `tmux`.

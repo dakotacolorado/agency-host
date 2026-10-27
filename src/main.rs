@@ -6,7 +6,7 @@ mod sys;
 mod tmux;
 
 use agent::Agents;
-use beat::{Beat, Client, Failure, Report, CONTRACT};
+use beat::{Beat, Client, Failure, Present, Report, CONTRACT};
 use std::collections::HashMap;
 use std::{env, path::PathBuf, process::ExitCode, thread::sleep, time::Duration};
 
@@ -89,9 +89,14 @@ fn main() -> ExitCode {
         config.host_id,
         config.service_url
     );
+    let Some(home) = config::agents_dir() else {
+        log!("agent-host: no HOME or XDG_DATA_HOME to keep agents' folders in");
+        return ExitCode::from(2);
+    };
     let agents = Agents::new(
         tmux::Tmux::new("agent-host"),
         claude::Claude::from_env(|k| env::var(k).ok()),
+        home,
     );
     run(&Client::new(&config), &agents, args.beats)
 }
@@ -107,8 +112,8 @@ fn run(client: &Client, agents: &Agents, limit: Option<u64>) -> ExitCode {
     let mut landed = 0;
     let mut failures = 0u32;
     loop {
-        let read: Vec<_> = agents
-            .ids()
+        let ids = agents.ids();
+        let read: Vec<_> = ids
             .iter()
             .filter_map(|id| {
                 agents.read(
@@ -121,7 +126,7 @@ fn run(client: &Client, agents: &Agents, limit: Option<u64>) -> ExitCode {
         let wait = match client.beat(&Beat {
             host_version: VERSION,
             host_commit: COMMIT,
-            agents: vec![],
+            agents: ids.into_iter().map(Present::running).collect(),
             reports: &reports,
             transcript: read.iter().filter(|b| !b.entries.is_empty()).collect(),
         }) {

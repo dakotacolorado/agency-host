@@ -116,7 +116,12 @@ impl Tmux {
             &["paste-buffer", "-p", "-d", "-b", &buffer, "-t", session],
             None,
         )?;
-        self.run(&["send-keys", "-t", session, "Enter"], None)?;
+        self.press(session, "Enter")
+    }
+
+    /// Presses one key in the session, named as `send-keys` names it.
+    pub fn press(&self, session: &str, key: &str) -> Result<(), String> {
+        self.run(&["send-keys", "-t", session, key], None)?;
         Ok(())
     }
 

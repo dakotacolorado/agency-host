@@ -23,6 +23,15 @@ pub fn default_path() -> Option<PathBuf> {
         .map(|dir| dir.join("agent-host").join("config.toml"))
 }
 
+/// Where agents' folders go: data, not configuration, and kept apart from any
+/// checkout a person works in on the same machine.
+pub fn agents_dir() -> Option<PathBuf> {
+    env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
+        .map(|dir| dir.join("agent-host").join("agents"))
+}
+
 /// Reads the file, then lets the environment override it. A file that was
 /// named explicitly must exist; the default one may be absent when the
 /// environment carries everything.
