@@ -11,6 +11,8 @@ use std::collections::HashMap;
 use std::{env, path::PathBuf, process::ExitCode, thread::sleep, time::Duration};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// A commit, or `dirty` or `unknown`; see build.rs.
+const COMMIT: &str = env!("AGENT_HOST_COMMIT");
 
 /// Bytes of transcript entries one agent may add to a beat. Transcripts are
 /// unbounded and bursty, and a beat grown until it fails loses liveness for
@@ -49,7 +51,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
                 );
             }
             "--version" => {
-                println!("agent-host {VERSION}");
+                println!("agent-host {VERSION} {COMMIT}");
                 std::process::exit(0);
             }
             "--help" | "-h" => {
@@ -79,7 +81,7 @@ fn main() -> ExitCode {
     };
     sys::ignore_hangup();
     log!(
-        "agent-host {VERSION} (contract {CONTRACT}): host {} beating to {}",
+        "agent-host {VERSION} {COMMIT} (contract {CONTRACT}): host {} beating to {}",
         config.host_id,
         config.service_url
     );
@@ -114,6 +116,7 @@ fn run(client: &Client, agents: &Agents, limit: Option<u64>) -> ExitCode {
             .collect();
         let wait = match client.beat(&Beat {
             host_version: VERSION,
+            host_commit: COMMIT,
             agents: vec![],
             reports: &reports,
             transcript: read.iter().filter(|b| !b.entries.is_empty()).collect(),

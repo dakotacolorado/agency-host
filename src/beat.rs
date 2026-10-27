@@ -13,6 +13,7 @@ pub const CONTRACT: u32 = 2;
 #[serde(rename_all = "camelCase")]
 pub struct Beat<'a> {
     pub host_version: &'a str,
+    pub host_commit: &'a str,
     pub agents: Vec<Value>,
     pub reports: &'a [Report],
     /// What agents have done since the last beat that landed, so a transcript
@@ -195,6 +196,7 @@ mod tests {
         }];
         let Ok(reply) = client(url).beat(&Beat {
             host_version: "9.9.9",
+            host_commit: "0123abc",
             agents: vec![],
             reports: &reports,
             transcript: vec![],
@@ -212,7 +214,7 @@ mod tests {
         let sent: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(
             sent,
-            serde_json::json!({"hostVersion":"9.9.9","agents":[],"reports":[{"commandId":"c0","ok":true}]})
+            serde_json::json!({"hostVersion":"9.9.9","hostCommit":"0123abc","agents":[],"reports":[{"commandId":"c0","ok":true}]})
         );
         assert_eq!(reply.come_back_in, Some(3.0));
         assert_eq!(reply.commands[0].id, "c1");
@@ -226,6 +228,7 @@ mod tests {
         );
         match client(url).beat(&Beat {
             host_version: "0.1.0",
+            host_commit: "dirty",
             agents: vec![],
             reports: &[],
             transcript: vec![],
@@ -240,6 +243,7 @@ mod tests {
         let (url, _) = serve_once("403 Forbidden", r#"{"error":"not this host"}"#);
         match client(url).beat(&Beat {
             host_version: "0.1.0",
+            host_commit: "dirty",
             agents: vec![],
             reports: &[],
             transcript: vec![],
@@ -255,6 +259,7 @@ mod tests {
         assert!(matches!(
             client(url).beat(&Beat {
                 host_version: "0.1.0",
+                host_commit: "dirty",
                 agents: vec![],
                 reports: &[],
                 transcript: vec![],
@@ -286,6 +291,7 @@ mod tests {
         assert!(client(url)
             .beat(&Beat {
                 host_version: "9.9.9",
+                host_commit: "0123abc",
                 agents: vec![],
                 reports: &[],
                 transcript: vec![&batch],

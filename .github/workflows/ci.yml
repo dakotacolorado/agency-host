@@ -71,12 +71,19 @@ jobs:
           else
             otool -L "$bin" | tail -n +2 | tee /dev/stderr | grep -v '^[[:space:]]*/usr/lib/' && exit 1 || true
           fi
+      # What a host reports is what it was released as: the commit this run
+      # checked out, which the release is tagged at. Searching the file covers
+      # the targets this runner cannot execute.
+      - name: Names the commit it was built from
+        run: grep -aq "$GITHUB_SHA" target/${{ matrix.target }}/release/agent-host
       - name: Runs on a bare machine
         if: matrix.target == 'x86_64-unknown-linux-musl'
-        run: docker run --rm -v "$PWD/target/${{ matrix.target }}/release:/b:ro" busybox /b/agent-host --version
+        run: |
+          docker run --rm -v "$PWD/target/${{ matrix.target }}/release:/b:ro" busybox /b/agent-host --version \
+            | tee /dev/stderr | grep -qx "agent-host .* $GITHUB_SHA"
       - name: Runs here
         if: matrix.target == 'aarch64-apple-darwin'
-        run: target/${{ matrix.target }}/release/agent-host --version
+        run: target/${{ matrix.target }}/release/agent-host --version | tee /dev/stderr | grep -qx "agent-host .* $GITHUB_SHA"
 
       - run: cp target/${{ matrix.target }}/release/agent-host agent-host-${{ matrix.target }}
       - uses: actions/upload-artifact@v4
@@ -166,4 +173,4 @@ jobs:
           chmod +x dist/agent-host-*
           (cd dist && sha256sum agent-host-* > SHA256SUMS)
           gh release create "$tag" dist/* --target "$GITHUB_SHA" --title "agent-host $tag" \
-            --notes "Install by copying the binary for this machine's target onto its PATH. See the README."
+            --notes "Built from $GITHUB_SHA, which \`agent-host --version\` names. Install by copying the binary for this machine's target onto its PATH. See the README."

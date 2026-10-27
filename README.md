@@ -67,6 +67,17 @@ AGENT_HOST_SERVICE_URL=https://beta… AGENT_HOST_TOKEN=… agent-host --beats 3
 `agent-host` runs until it is killed, and outlives the terminal that started
 it. A beat that fails is retried; a machine that sleeps simply beats late.
 
+Each beat carries the version and the commit the binary was built from, which
+`agent-host --version` also prints, so a machine can be asked directly:
+
+```sh
+$ agent-host --version
+agent-host 0.1.0 5812e39c0d…
+```
+
+A build from a tree with uncommitted changes says `dirty` instead of a commit,
+and one built without git says `unknown`.
+
 ## Agents
 
 Each agent is a Claude Code session in tmux, on the host's own socket, so it
