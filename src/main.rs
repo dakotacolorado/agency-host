@@ -1,3 +1,135 @@
-fn main() {
-    println!("agent-host");
+mod beat;
+mod config;
+mod sys;
+
+use beat::{Beat, Client, Failure, Report};
+use std::{env, path::PathBuf, process::ExitCode, thread::sleep, time::Duration};
+
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+const USAGE: &str = "usage: agent-host [--config PATH] [--beats N]
+
+  --config PATH  config file (default $XDG_CONFIG_HOME/agent-host/config.toml,
+                 or ~/.config/agent-host/config.toml); AGENT_HOST_CONFIG also names it
+  --beats N      stop after N beats, failing on the first one that does not land
+
+Settings, each overriding the file:
+  AGENT_HOST_SERVICE_URL  service_url  the agent-service to beat to
+  AGENT_HOST_TOKEN        token
+  AGENT_HOST_ID           host_id      defaults to the hostname";
+
+struct Args {
+    config: Option<PathBuf>,
+    beats: Option<u64>,
+}
+
+fn parse(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
+    let mut parsed = Args {
+        config: env::var_os("AGENT_HOST_CONFIG").map(PathBuf::from),
+        beats: None,
+    };
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--config" => parsed.config = Some(args.next().ok_or("--config needs a path")?.into()),
+            "--beats" => {
+                let n = args.next().ok_or("--beats needs a number")?;
+                parsed.beats = Some(
+                    n.parse()
+                        .map_err(|_| format!("--beats {n}: not a number"))?,
+                );
+            }
+            "--version" => {
+                println!("agent-host {VERSION}");
+                std::process::exit(0);
+            }
+            "--help" | "-h" => {
+                println!("{USAGE}");
+                std::process::exit(0);
+            }
+            other => return Err(format!("unknown argument {other}\n\n{USAGE}")),
+        }
+    }
+    Ok(parsed)
+}
+
+fn main() -> ExitCode {
+    let args = match parse(env::args().skip(1)) {
+        Ok(args) => args,
+        Err(e) => {
+            log!("{e}");
+            return ExitCode::from(2);
+        }
+    };
+    let config = match config::load(args.config, |k| env::var(k).ok()) {
+        Ok(config) => config,
+        Err(e) => {
+            log!("agent-host: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    sys::ignore_hangup();
+    log!(
+        "agent-host {VERSION}: host {} beating to {}",
+        config.host_id,
+        config.service_url
+    );
+    run(&Client::new(&config), args.beats)
+}
+
+/// Assumes nothing survives between beats but what is in memory: the machine
+/// may sleep for weeks between two iterations, and the next beat is simply
+/// late. Reports that did not land are sent again on the next beat.
+fn run(client: &Client, limit: Option<u64>) -> ExitCode {
+    let mut reports: Vec<Report> = Vec::new();
+    let mut landed = 0;
+    let mut failures = 0u32;
+    loop {
+        let wait = match client.beat(&Beat {
+            host_version: VERSION,
+            agents: vec![],
+            reports: &reports,
+        }) {
+            Ok(reply) => {
+                landed += 1;
+                failures = 0;
+                reports = reply.commands.iter().map(beat::take).collect();
+                for (command, report) in reply.commands.iter().zip(&reports) {
+                    log!(
+                        "command {} ({}): {}",
+                        command.id,
+                        command.kind,
+                        report.error.as_deref().unwrap_or("done")
+                    );
+                }
+                if let Some(n) = limit.filter(|&n| landed >= n) {
+                    // One more beat carries the last commands' reports, which
+                    // would otherwise never leave.
+                    if reports.is_empty() || landed > n {
+                        return ExitCode::SUCCESS;
+                    }
+                    Duration::ZERO
+                } else {
+                    Duration::from_secs_f64(reply.come_back_in.unwrap_or(30.0).clamp(1.0, 300.0))
+                }
+            }
+            Err(failure) => {
+                let (message, wait) = match failure {
+                    Failure::Refused(code, body) => (
+                        format!("refused ({code}): {body}"),
+                        Duration::from_secs(600),
+                    ),
+                    Failure::Transient(e) => {
+                        failures += 1;
+                        (e, Duration::from_secs(2u64.pow(failures.min(6))))
+                    }
+                };
+                log!("beat failed: {message}");
+                if limit.is_some() {
+                    return ExitCode::FAILURE;
+                }
+                wait
+            }
+        };
+        sleep(wait);
+    }
 }
