@@ -3,12 +3,17 @@ use std::time::Duration;
 
 use crate::agent::{Agents, Batch};
 use crate::config::Config;
+use crate::machine::Sample;
 
 /// The agent-service host contract this beat body matches: `reports` arrived
-/// in 2 (see agent-service `contracts/`). Raise it only with the body.
-pub const CONTRACT: u32 = 2;
+/// in 2, `labels`, `sessions` and `samples` in 3, and `capacity` in 4 (see
+/// agent-service `contracts/`). Raise it only with the body.
+pub const CONTRACT: u32 = 4;
 
-#[derive(Debug, Serialize)]
+/// Every field but the agents and reports may be left out, and one left out
+/// keeps the value the service last had: a host that could not read something
+/// says nothing about it rather than sending a zero or an empty list.
+#[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Beat<'a> {
     pub host_version: &'a str,
@@ -19,6 +24,22 @@ pub struct Beat<'a> {
     /// can be read while the agent is still working.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub transcript: Vec<&'a Batch>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub labels: Option<&'a [String]>,
+    /// The tmux sessions a person has open on the machine. Agents run on the
+    /// host's own server and are listed in `agents`, never here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sessions: Option<Vec<Session>>,
+    /// Samples taken since the last beat that landed.
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    pub samples: &'a [Sample],
+}
+
+#[derive(Debug, PartialEq, Serialize)]
+pub struct Session {
+    pub name: String,
 }
 
 /// An agent whose session is running here, by the id the service gave it.
@@ -80,8 +101,9 @@ struct Unsupported {
 pub enum Failure {
     /// The service no longer accepts the contract this host speaks.
     Unsupported { minimum: u32, error: String },
-    /// The service understood the beat and refused this host: it is too old,
-    /// or not allowed. Retrying soon will not change the answer.
+    /// The service refused the beat or this host: it is too old, not allowed,
+    /// or configured with something the service cannot take, such as a label
+    /// it cannot match on. Retrying soon will not change the answer.
     Refused(u16, String),
     /// Anything that might be different on the next try: no network, a
     /// suspended laptop waking, a service mid-deploy.
@@ -116,7 +138,7 @@ impl Client {
             Ok(response) => response
                 .into_json()
                 .map_err(|e| Failure::Transient(format!("unreadable reply: {e}"))),
-            Err(ureq::Error::Status(code @ (401 | 403 | 410 | 426), response)) => {
+            Err(ureq::Error::Status(code @ (400 | 401 | 403 | 410 | 426), response)) => {
                 let body = response.into_string().unwrap_or_default();
                 Err(match serde_json::from_str::<Unsupported>(&body) {
                     Ok(Unsupported { error, minimum }) if code == 426 => {
@@ -205,6 +227,8 @@ mod tests {
             service_url: url,
             token: "secret".into(),
             host_id: "studio".into(),
+            capacity: None,
+            labels: None,
         })
     }
 
@@ -224,7 +248,7 @@ mod tests {
             host_commit: "0123abc",
             agents: vec![Present::running("a1".into())],
             reports: &reports,
-            transcript: vec![],
+            ..Default::default()
         }) else {
             panic!("beat failed")
         };
@@ -259,9 +283,7 @@ mod tests {
         match client(url).beat(&Beat {
             host_version: "0.1.0",
             host_commit: "dirty",
-            agents: vec![],
-            reports: &[],
-            transcript: vec![],
+            ..Default::default()
         }) {
             Err(Failure::Unsupported { minimum: 3, error }) => assert!(error.contains("Upgrade")),
             _ => panic!("expected an unsupported contract"),
@@ -274,9 +296,7 @@ mod tests {
         match client(url).beat(&Beat {
             host_version: "0.1.0",
             host_commit: "dirty",
-            agents: vec![],
-            reports: &[],
-            transcript: vec![],
+            ..Default::default()
         }) {
             Err(Failure::Refused(403, body)) => assert!(body.contains("not this host")),
             _ => panic!("expected a refusal"),
@@ -290,9 +310,7 @@ mod tests {
             client(url).beat(&Beat {
                 host_version: "0.1.0",
                 host_commit: "dirty",
-                agents: vec![],
-                reports: &[],
-                transcript: vec![],
+                ..Default::default()
             }),
             Err(Failure::Transient(_))
         ));
@@ -323,9 +341,8 @@ mod tests {
             .beat(&Beat {
                 host_version: "9.9.9",
                 host_commit: "0123abc",
-                agents: vec![],
-                reports: &[],
                 transcript: vec![&batch],
+                ..Default::default()
             })
             .is_ok());
         let (_, body) = server.join().unwrap();
@@ -336,6 +353,78 @@ mod tests {
                 {"kind":"said","text":"hi"},{"kind":"waiting"}
             ]}])
         );
+    }
+
+    #[test]
+    fn a_beat_says_what_the_host_will_run_and_how_loaded_it_is() {
+        let (url, server) = serve_once("200 OK", "{}");
+        let labels = ["macos".to_string(), "repo:agent-service".to_string()];
+        let samples = [Sample {
+            at: "2026-10-27T12:00:00.000Z".into(),
+            cpu: 0.25,
+            memory_used: 3,
+            memory_total: 8,
+            disk_used: 40,
+            disk_total: 100,
+        }];
+        assert!(client(url)
+            .beat(&Beat {
+                host_version: "9.9.9",
+                host_commit: "0123abc",
+                capacity: Some(2),
+                labels: Some(&labels),
+                sessions: Some(vec![Session {
+                    name: "dotfiles".into(),
+                }]),
+                samples: &samples,
+                ..Default::default()
+            })
+            .is_ok());
+        let (_, body) = server.join().unwrap();
+        let sent: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(sent["capacity"], 2);
+        assert_eq!(
+            sent["labels"],
+            serde_json::json!(["macos", "repo:agent-service"])
+        );
+        assert_eq!(sent["sessions"], serde_json::json!([{"name":"dotfiles"}]));
+        assert_eq!(
+            sent["samples"],
+            serde_json::json!([{"at":"2026-10-27T12:00:00.000Z","cpu":0.25,
+                "memoryUsed":3,"memoryTotal":8,"diskUsed":40,"diskTotal":100}])
+        );
+    }
+
+    #[test]
+    fn what_was_read_as_none_is_sent_as_none() {
+        let (url, server) = serve_once("200 OK", "{}");
+        assert!(client(url)
+            .beat(&Beat {
+                capacity: Some(0),
+                labels: Some(&[]),
+                sessions: Some(vec![]),
+                ..Default::default()
+            })
+            .is_ok());
+        let (_, body) = server.join().unwrap();
+        let sent: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(sent["capacity"], 0);
+        assert_eq!(sent["labels"], serde_json::json!([]));
+        assert_eq!(sent["sessions"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn a_label_the_service_refuses_is_reported_with_its_reason() {
+        let reason = r#"{"error":"labels.0: Invalid string: must match pattern /^[a-z0-9][a-z0-9:._-]{0,63}$/"}"#;
+        let (url, _) = serve_once("400 Bad Request", reason);
+        let labels = ["GPU".to_string()];
+        match client(url).beat(&Beat {
+            labels: Some(&labels),
+            ..Default::default()
+        }) {
+            Err(Failure::Refused(400, body)) => assert_eq!(body, reason),
+            _ => panic!("expected a refusal"),
+        }
     }
 
     #[test]

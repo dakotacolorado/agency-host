@@ -11,7 +11,7 @@ struct Run {
     home: PathBuf,
 }
 
-fn install_host(name: &str, args: &[&str], service_url: &str) -> Run {
+fn install_host(name: &str, args: &[&str], service_url: &str, env: &[(&str, &str)]) -> Run {
     let home = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     let _ = fs::remove_dir_all(&home);
     fs::create_dir_all(&home).unwrap();
@@ -25,6 +25,7 @@ fn install_host(name: &str, args: &[&str], service_url: &str) -> Run {
         .env_remove("XDG_CONFIG_HOME")
         .env("AGENT_HOST_SERVICE_URL", service_url)
         .env("AGENT_HOST_TOKEN", "secret-token")
+        .envs(env.iter().copied())
         .output()
         .unwrap();
     Run {
@@ -41,7 +42,7 @@ fn is_empty(dir: &Path) -> bool {
 
 #[test]
 fn refuses_a_fleet_api_not_over_https() {
-    let run = install_host("plain-http", &[], "http://fleet.example");
+    let run = install_host("plain-http", &[], "http://fleet.example", &[]);
     assert!(!run.ok, "{}", run.output);
     assert!(run.output.contains("over https only"), "{}", run.output);
     assert!(!run.output.contains("secret-token"), "{}", run.output);
@@ -50,12 +51,25 @@ fn refuses_a_fleet_api_not_over_https() {
 
 #[test]
 fn has_nothing_to_roll_back_to_before_a_second_install() {
-    let run = install_host("no-previous", &["rollback"], "https://fleet.example");
+    let run = install_host("no-previous", &["rollback"], "https://fleet.example", &[]);
     assert!(!run.ok, "{}", run.output);
     assert!(
         run.output.contains("nothing to roll back to"),
         "{}",
         run.output
     );
+    assert!(is_empty(&run.home), "wrote into {}", run.home.display());
+}
+
+#[test]
+fn refuses_a_capacity_that_is_not_a_number() {
+    let run = install_host(
+        "capacity-not-a-number",
+        &[],
+        "https://fleet.example",
+        &[("AGENT_HOST_CAPACITY", "lots")],
+    );
+    assert!(!run.ok, "{}", run.output);
+    assert!(run.output.contains("not 'lots'"), "{}", run.output);
     assert!(is_empty(&run.home), "wrote into {}", run.home.display());
 }

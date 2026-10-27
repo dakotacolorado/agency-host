@@ -53,7 +53,17 @@ A file, `~/.config/agent-host/config.toml` unless `--config` or
 service_url = "https://…"   # AGENT_HOST_SERVICE_URL
 token = "…"                 # AGENT_HOST_TOKEN
 host_id = "studio"          # AGENT_HOST_ID; defaults to the hostname
+capacity = 2                # AGENT_HOST_CAPACITY
+labels = ["macos", "repo:agent-service"]  # AGENT_HOST_LABELS, comma-separated
 ```
+
+`capacity` is how many agents this host will run at once, and `labels` what
+work it can be matched to. Both are the owner's to say: a host with no
+capacity still beats, but the service places nothing on it. A label the
+service cannot match on is refused with the pattern it must match, and the
+host logs that refusal and waits rather than beating without it.
+`install-host.sh` takes both from the same variables, and keeps the ones an
+earlier install wrote.
 
 Which service a host beats to is only this, so the same binary tries a change
 against beta before any machine is asked to take it:
@@ -66,6 +76,12 @@ AGENT_HOST_SERVICE_URL=https://beta… AGENT_HOST_TOKEN=… agent-host --beats 3
 
 `agent-host` runs until it is killed, and outlives the terminal that started
 it. A beat that fails is retried; a machine that sleeps simply beats late.
+
+Each beat also carries how loaded the machine is -- cpu, memory, and the disk
+agents work on -- and the tmux sessions a person has open on it, which are
+not agents: agents run on the host's own tmux server and are listed apart. A
+reading the host cannot take is left out, never sent as zero, and the service
+keeps the last one it had.
 
 Each beat carries the version and the commit the binary was built from, which
 `agent-host --version` also prints, so a machine can be asked directly:

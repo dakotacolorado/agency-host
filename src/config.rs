@@ -6,6 +6,13 @@ pub struct Config {
     pub service_url: String,
     pub token: String,
     pub host_id: String,
+    /// How many agents this host will run at once. Unset, the beat leaves it
+    /// out and the service places nothing here: room is the owner's to state,
+    /// not the host's to deduce from the machine.
+    pub capacity: Option<u32>,
+    /// What work this host can be matched to, as its owner names it. Checked
+    /// by the service, whose refusal names the pattern a label must match.
+    pub labels: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -14,6 +21,8 @@ struct File {
     service_url: Option<String>,
     token: Option<String>,
     host_id: Option<String>,
+    capacity: Option<u32>,
+    labels: Option<Vec<String>>,
 }
 
 pub fn default_path() -> Option<PathBuf> {
@@ -58,10 +67,23 @@ fn from_parts(file: File, var: impl Fn(&str) -> Option<String>) -> Result<Config
     let host_id = pick("AGENT_HOST_ID", file.host_id)
         .or_else(crate::sys::hostname)
         .ok_or("no host id: set host_id in the config file or AGENT_HOST_ID")?;
+    let capacity = match var("AGENT_HOST_CAPACITY").filter(|v| !v.is_empty()) {
+        Some(n) => Some(
+            n.parse()
+                .map_err(|_| format!("AGENT_HOST_CAPACITY {n}: not a number"))?,
+        ),
+        None => file.capacity,
+    };
+    let labels = var("AGENT_HOST_LABELS")
+        .filter(|v| !v.is_empty())
+        .map(|v| v.split(',').map(|l| l.trim().to_string()).collect())
+        .or(file.labels);
     Ok(Config {
         service_url: service_url.trim_end_matches('/').to_string(),
         token,
         host_id,
+        capacity,
+        labels,
     })
 }
 
@@ -85,7 +107,10 @@ mod tests {
     #[test]
     fn reads_the_file() {
         let config = from_parts(
-            file("service_url = \"https://beta.example/\"\ntoken = \"t\"\nhost_id = \"studio\""),
+            file(
+                "service_url = \"https://beta.example/\"\ntoken = \"t\"\nhost_id = \"studio\"\n\
+                 capacity = 2\nlabels = [\"macos\", \"repo:agent-service\"]",
+            ),
             env(&[]),
         )
         .unwrap();
@@ -95,8 +120,48 @@ mod tests {
                 service_url: "https://beta.example".into(),
                 token: "t".into(),
                 host_id: "studio".into(),
+                capacity: Some(2),
+                labels: Some(vec!["macos".into(), "repo:agent-service".into()]),
             }
         );
+    }
+
+    #[test]
+    fn capacity_and_labels_are_left_unset_rather_than_guessed() {
+        let config = from_parts(
+            file("service_url = \"https://x\"\ntoken = \"t\"\nhost_id = \"a\""),
+            env(&[]),
+        )
+        .unwrap();
+        assert_eq!(config.capacity, None);
+        assert_eq!(config.labels, None);
+    }
+
+    #[test]
+    fn the_environment_names_capacity_and_labels() {
+        let config = from_parts(
+            file("service_url = \"https://x\"\ntoken = \"t\"\nhost_id = \"a\"\ncapacity = 1"),
+            env(&[
+                ("AGENT_HOST_CAPACITY", "3"),
+                ("AGENT_HOST_LABELS", "linux, power:mains"),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(config.capacity, Some(3));
+        assert_eq!(
+            config.labels,
+            Some(vec!["linux".into(), "power:mains".into()])
+        );
+    }
+
+    #[test]
+    fn a_capacity_that_is_not_a_number_is_named() {
+        let err = from_parts(
+            file("service_url = \"https://x\"\ntoken = \"t\"\nhost_id = \"a\""),
+            env(&[("AGENT_HOST_CAPACITY", "lots")]),
+        )
+        .unwrap_err();
+        assert!(err.contains("AGENT_HOST_CAPACITY lots"), "{err}");
     }
 
     #[test]

@@ -5,6 +5,8 @@
 # The service url and token come from AGENT_HOST_SERVICE_URL and
 # AGENT_HOST_TOKEN, else the config file an earlier install wrote, else a
 # prompt. The token is written to that file alone, readable by this user alone.
+# Capacity and labels come from the environment, else that file; there is no
+# prompt for them, since a host with neither still beats, and is offered nothing.
 set -eu
 
 usage="usage: install-host.sh [install] [--release TAG | --binary PATH]
@@ -16,7 +18,9 @@ usage="usage: install-host.sh [install] [--release TAG | --binary PATH]
 
   AGENT_HOST_SERVICE_URL  the fleet api, https only
   AGENT_HOST_TOKEN        its token
-  AGENT_HOST_ID           this host's name (default: the hostname)"
+  AGENT_HOST_ID           this host's name (default: the hostname)
+  AGENT_HOST_CAPACITY     how many agents it will run (unset: none are placed here)
+  AGENT_HOST_LABELS       what it can run, comma-separated, such as repo:agent-service"
 
 repo=dakotacolorado/agent-host
 label=com.dakotacolorado.agent-host
@@ -54,6 +58,11 @@ from_config() {
   if [ -f "$config" ]; then sed -n "s/^$1 *= *\"\(.*\)\"\$/\1/p" "$config" | head -1; fi
 }
 
+# A line as it stands, for the settings that are not strings.
+config_line() {
+  if [ -f "$config" ]; then grep "^$1 *=" "$config" | head -1; fi
+}
+
 ask() {
   [ -t 0 ] || die "no $1: set $2"
   printf '%s: ' "$1" >&2
@@ -82,6 +91,15 @@ settings() {
   host_id=${AGENT_HOST_ID:-$(from_config host_id)}
   # Written into TOML strings without escaping.
   case $url$token$host_id in *[\"\\]*) die "the url, token and host id cannot hold a quote or a backslash" ;; esac
+  capacity=${AGENT_HOST_CAPACITY:-$(config_line capacity | sed 's/^[^=]*= *//')}
+  case $capacity in *[!0-9]*) die "the capacity is a whole number of agents, not '$capacity'" ;; esac
+  [ -n "$capacity" ] || say "no capacity: set AGENT_HOST_CAPACITY, or no agent will be placed on this host"
+  if [ -n "${AGENT_HOST_LABELS:-}" ]; then
+    case $AGENT_HOST_LABELS in *[\"\\]*) die "labels cannot hold a quote or a backslash" ;; esac
+    labels="labels = [\"$(echo "$AGENT_HOST_LABELS" | sed 's/ *, */", "/g')\"]"
+  else
+    labels=$(config_line labels)
+  fi
 }
 
 tailscale_cli() {
@@ -155,6 +173,8 @@ write_config() {
     umask 077
     printf 'service_url = "%s"\ntoken = "%s"\n' "$url" "$token"
     if [ -n "$host_id" ]; then printf 'host_id = "%s"\n' "$host_id"; fi
+    if [ -n "$capacity" ]; then printf 'capacity = %s\n' "$capacity"; fi
+    if [ -n "$labels" ]; then printf '%s\n' "$labels"; fi
   ) > "$1"
 }
 

@@ -2,11 +2,14 @@ mod agent;
 mod beat;
 mod claude;
 mod config;
+mod machine;
 mod sys;
 mod tmux;
 
 use agent::Agents;
-use beat::{Beat, Client, Failure, Present, Report, CONTRACT};
+use beat::{Beat, Client, Failure, Present, Report, Session, CONTRACT};
+use config::Config;
+use machine::{Meter, Sample};
 use std::collections::HashMap;
 use std::{env, path::PathBuf, process::ExitCode, thread::sleep, time::Duration};
 
@@ -19,6 +22,10 @@ const COMMIT: &str = env!("AGENT_HOST_COMMIT");
 /// the sake of logs; what does not fit goes on the next beat.
 const TRANSCRIPT_PER_AGENT: usize = 32 << 10;
 
+/// Samples kept while beats are failing, the most a beat may carry. A host
+/// cut off for longer loses its oldest, which a chart of load can spare.
+const SAMPLES_KEPT: usize = 1000;
+
 const USAGE: &str = "usage: agent-host [--config PATH] [--beats N]
 
   --config PATH  config file (default $XDG_CONFIG_HOME/agent-host/config.toml,
@@ -28,7 +35,9 @@ const USAGE: &str = "usage: agent-host [--config PATH] [--beats N]
 Settings, each overriding the file:
   AGENT_HOST_SERVICE_URL  service_url  the agent-service to beat to
   AGENT_HOST_TOKEN        token
-  AGENT_HOST_ID           host_id      defaults to the hostname";
+  AGENT_HOST_ID           host_id      defaults to the hostname
+  AGENT_HOST_CAPACITY     capacity     how many agents this host will run; unset, none are placed here
+  AGENT_HOST_LABELS       labels       what it can run, comma-separated (a list in the file)";
 
 struct Args {
     config: Option<PathBuf>,
@@ -89,16 +98,30 @@ fn main() -> ExitCode {
         config.host_id,
         config.service_url
     );
+    match config.capacity {
+        Some(n) => log!(
+            "will run {n} agents, labelled {}",
+            config.labels.as_deref().unwrap_or_default().join(", ")
+        ),
+        None => log!("no capacity set: the service will place no agent here until one is"),
+    }
     let Some(home) = config::agents_dir() else {
         log!("agent-host: no HOME or XDG_DATA_HOME to keep agents' folders in");
         return ExitCode::from(2);
     };
+    let mut meter = Meter::new(home.clone());
     let agents = Agents::new(
         tmux::Tmux::new("agent-host"),
         claude::Claude::from_env(|k| env::var(k).ok()),
         home,
     );
-    run(&Client::new(&config), &agents, args.beats)
+    run(
+        &Client::new(&config),
+        &config,
+        &agents,
+        &mut meter,
+        args.beats,
+    )
 }
 
 /// Assumes nothing survives between beats but what is in memory: the machine
@@ -106,8 +129,16 @@ fn main() -> ExitCode {
 /// late. Reports and transcript that did not land are sent again on the next
 /// beat. A host that restarts sends each transcript again from its start; the
 /// cursors on each batch say it is the same.
-fn run(client: &Client, agents: &Agents, limit: Option<u64>) -> ExitCode {
+fn run(
+    client: &Client,
+    config: &Config,
+    agents: &Agents,
+    meter: &mut Meter,
+    limit: Option<u64>,
+) -> ExitCode {
+    let persons = tmux::Tmux::persons();
     let mut reports: Vec<Report> = Vec::new();
+    let mut samples: Vec<Sample> = Vec::new();
     let mut cursors: HashMap<String, u64> = HashMap::new();
     let mut landed = 0;
     let mut failures = 0u32;
@@ -123,16 +154,29 @@ fn run(client: &Client, agents: &Agents, limit: Option<u64>) -> ExitCode {
                 )
             })
             .collect();
+        if let Some(sample) = meter.sample() {
+            if samples.len() == SAMPLES_KEPT {
+                samples.remove(0);
+            }
+            samples.push(sample);
+        }
         let wait = match client.beat(&Beat {
             host_version: VERSION,
             host_commit: COMMIT,
             agents: ids.into_iter().map(Present::running).collect(),
             reports: &reports,
             transcript: read.iter().filter(|b| !b.entries.is_empty()).collect(),
+            capacity: config.capacity,
+            labels: config.labels.as_deref(),
+            sessions: persons
+                .names()
+                .map(|names| names.into_iter().map(|name| Session { name }).collect()),
+            samples: &samples,
         }) {
             Ok(reply) => {
                 landed += 1;
                 failures = 0;
+                samples.clear();
                 for batch in &read {
                     cursors.insert(batch.agent_id.clone(), batch.to);
                 }

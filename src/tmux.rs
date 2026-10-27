@@ -10,7 +10,8 @@ use std::process::{Command, Stdio};
 /// from any a person runs on the same machine. A person attaches with
 /// `tmux -L <socket> attach -t <agent>`.
 pub struct Tmux {
-    socket: String,
+    /// None is the server a person gets from a bare `tmux`.
+    socket: Option<String>,
 }
 
 /// The session option that names the agent a session runs, so a session is
@@ -20,14 +21,21 @@ const TAG: &str = "@agent";
 impl Tmux {
     pub fn new(socket: impl Into<String>) -> Self {
         Tmux {
-            socket: socket.into(),
+            socket: Some(socket.into()),
         }
     }
 
+    /// The server a person's own sessions run on, which the host only lists.
+    pub fn persons() -> Self {
+        Tmux { socket: None }
+    }
+
     fn run(&self, args: &[&str], input: Option<&str>) -> Result<String, String> {
-        let mut child = Command::new("tmux")
-            .arg("-L")
-            .arg(&self.socket)
+        let mut command = Command::new("tmux");
+        if let Some(socket) = &self.socket {
+            command.arg("-L").arg(socket);
+        }
+        let mut child = command
             .args(args)
             .stdin(if input.is_some() {
                 Stdio::piped()
@@ -106,6 +114,22 @@ impl Tmux {
             .collect()
     }
 
+    /// The name of every session on this server, or None when tmux could not
+    /// be asked. A server that is not running has no sessions, which is an
+    /// answer, not a failure to read one.
+    pub fn names(&self) -> Option<Vec<String>> {
+        match self.run(&["list-sessions", "-F", "#{session_name}"], None) {
+            Ok(out) => Some(out.lines().map(str::to_string).collect()),
+            Err(e)
+                if e.contains("no server running")
+                    || (e.contains("error connecting to") && e.contains("No such file")) =>
+            {
+                Some(vec![])
+            }
+            Err(_) => None,
+        }
+    }
+
     /// Types `text` into the session as one paste, then presses Enter. Pasted
     /// rather than typed so that a newline inside the text does not send what
     /// comes before it on its own.
@@ -128,5 +152,26 @@ impl Tmux {
     #[cfg(test)]
     pub fn kill_server(&self) {
         let _ = self.run(&["kill-server"], None);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_server_not_running_has_no_sessions() {
+        let tmux = Tmux::new(format!("agent-host-test-{}-names-none", std::process::id()));
+        assert_eq!(tmux.names(), Some(vec![]));
+    }
+
+    #[test]
+    fn every_session_is_named() {
+        let tmux = Tmux::new(format!("agent-host-test-{}-names", std::process::id()));
+        let argv = ["sleep".to_string(), "30".to_string()];
+        tmux.start("a.1", Path::new("/"), &argv, &[]).unwrap();
+        let names = tmux.names();
+        tmux.kill_server();
+        assert_eq!(names, Some(vec!["a_1".to_string()]));
     }
 }
