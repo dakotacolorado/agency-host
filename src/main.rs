@@ -17,7 +17,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// A commit, or `dirty` or `unknown`; see build.rs.
 const COMMIT: &str = env!("AGENT_HOST_COMMIT");
 
-/// Bytes of transcript entries one agent may add to a beat. Transcripts are
+/// Bytes of transcript lines one agent may add to a beat. Transcripts are
 /// unbounded and bursty, and a beat grown until it fails loses liveness for
 /// the sake of logs; what does not fit goes on the next beat.
 const TRANSCRIPT_PER_AGENT: usize = 32 << 10;
@@ -128,7 +128,7 @@ fn main() -> ExitCode {
 /// may sleep for weeks between two iterations, and the next beat is simply
 /// late. Reports and transcript that did not land are sent again on the next
 /// beat. A host that restarts sends each transcript again from its start; the
-/// cursors on each batch say it is the same.
+/// `seq` on each line says it is the same.
 fn run(
     client: &Client,
     config: &Config,
@@ -139,19 +139,17 @@ fn run(
     let persons = tmux::Tmux::persons();
     let mut reports: Vec<Report> = Vec::new();
     let mut samples: Vec<Sample> = Vec::new();
-    let mut cursors: HashMap<String, u64> = HashMap::new();
+    let mut cursors: HashMap<String, agent::Cursor> = HashMap::new();
     let mut landed = 0;
     let mut failures = 0u32;
     loop {
-        let ids = agents.ids();
-        let read: Vec<_> = ids
-            .iter()
-            .filter_map(|id| {
-                agents.read(
-                    id,
-                    cursors.get(id).copied().unwrap_or(0),
-                    TRANSCRIPT_PER_AGENT,
-                )
+        let read: Vec<_> = agents
+            .ids()
+            .into_iter()
+            .map(|id| {
+                let from = cursors.get(&id).copied().unwrap_or_default();
+                let batch = agents.read(&id, from, TRANSCRIPT_PER_AGENT);
+                (id, batch)
             })
             .collect();
         if let Some(sample) = meter.sample() {
@@ -163,9 +161,13 @@ fn run(
         let wait = match client.beat(&Beat {
             host_version: VERSION,
             host_commit: COMMIT,
-            agents: ids.into_iter().map(Present::running).collect(),
+            agents: read
+                .iter()
+                .map(|(id, batch)| {
+                    Present::running(id.clone(), batch.as_ref().map_or(&[], |b| &b.lines))
+                })
+                .collect(),
             reports: &reports,
-            transcript: read.iter().filter(|b| !b.entries.is_empty()).collect(),
             capacity: config.capacity,
             labels: config.labels.as_deref(),
             sessions: persons
@@ -177,8 +179,10 @@ fn run(
                 landed += 1;
                 failures = 0;
                 samples.clear();
-                for batch in &read {
-                    cursors.insert(batch.agent_id.clone(), batch.to);
+                for (id, batch) in &read {
+                    if let Some(batch) = batch {
+                        cursors.insert(id.clone(), batch.next);
+                    }
                 }
                 reports = reply
                     .commands

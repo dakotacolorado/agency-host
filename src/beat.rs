@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-use crate::agent::{Agents, Batch};
+use crate::agent::{Agents, Line};
 use crate::config::Config;
 use crate::machine::Sample;
 
@@ -18,12 +18,8 @@ pub const CONTRACT: u32 = 4;
 pub struct Beat<'a> {
     pub host_version: &'a str,
     pub host_commit: &'a str,
-    pub agents: Vec<Present>,
+    pub agents: Vec<Present<'a>>,
     pub reports: &'a [Report],
-    /// What agents have done since the last beat that landed, so a transcript
-    /// can be read while the agent is still working.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub transcript: Vec<&'a Batch>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capacity: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -46,16 +42,21 @@ pub struct Session {
 /// Always `working`: whether one that has stopped has finished or is asking is
 /// not something its transcript says, so the host does not guess.
 #[derive(Debug, Serialize)]
-pub struct Present {
+pub struct Present<'a> {
     pub id: String,
     pub state: &'static str,
+    /// What it has done since the last beat that landed, so a transcript can
+    /// be read while the agent is still working.
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    pub transcript: &'a [Line],
 }
 
-impl Present {
-    pub fn running(id: String) -> Self {
+impl<'a> Present<'a> {
+    pub fn running(id: String, transcript: &'a [Line]) -> Self {
         Present {
             id,
             state: "working",
+            transcript,
         }
     }
 }
@@ -246,7 +247,7 @@ mod tests {
         let Ok(reply) = client(url).beat(&Beat {
             host_version: "9.9.9",
             host_commit: "0123abc",
-            agents: vec![Present::running("a1".into())],
+            agents: vec![Present::running("a1".into(), &[])],
             reports: &reports,
             ..Default::default()
         }) else {
@@ -326,32 +327,35 @@ mod tests {
     }
 
     #[test]
-    fn a_beat_carries_what_agents_did() {
+    fn a_beat_carries_what_agents_did_in_each_agents_report() {
         let (url, server) = serve_once("200 OK", "{}");
-        let batch = Batch {
-            agent_id: "a1".into(),
-            from: 0,
-            to: 120,
-            entries: vec![
-                crate::agent::Entry::Said { text: "hi".into() },
-                crate::agent::Entry::Waiting,
-            ],
-        };
+        let lines = [Line {
+            seq: 0,
+            at: "2026-10-27T12:00:00.000Z".into(),
+            from: "agent",
+            text: "hi".into(),
+        }];
         assert!(client(url)
             .beat(&Beat {
                 host_version: "9.9.9",
                 host_commit: "0123abc",
-                transcript: vec![&batch],
+                agents: vec![
+                    Present::running("a1".into(), &lines),
+                    Present::running("a2".into(), &[])
+                ],
                 ..Default::default()
             })
             .is_ok());
         let (_, body) = server.join().unwrap();
         let sent: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(
-            sent["transcript"],
-            serde_json::json!([{"agentId":"a1","from":0,"to":120,"entries":[
-                {"kind":"said","text":"hi"},{"kind":"waiting"}
-            ]}])
+            sent["agents"],
+            serde_json::json!([
+                {"id":"a1","state":"working","transcript":[
+                    {"seq":0,"at":"2026-10-27T12:00:00.000Z","from":"agent","text":"hi"}
+                ]},
+                {"id":"a2","state":"working"}
+            ])
         );
     }
 

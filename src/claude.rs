@@ -185,72 +185,57 @@ pub fn session_id(agent: &str) -> String {
     )
 }
 
-/// Reads transcript lines in order. One assistant message is written as a line
-/// per block, each carrying the message's stop reason, so the reader remembers
-/// which message it last saw stop.
-#[derive(Default)]
-pub struct Reader {
-    stopped: Option<String>,
-}
-
-impl Reader {
-    pub fn line(&mut self, line: &str) -> Vec<Entry> {
-        let Ok(v) = serde_json::from_str::<Value>(line) else {
-            return vec![];
-        };
-        // A subagent's own conversation, and lines Claude Code adds for itself.
-        if v["isSidechain"] == true || v["isMeta"] == true {
-            return vec![];
-        }
-        let message = &v["message"];
-        match v["type"].as_str() {
-            Some("user") => match &message["content"] {
-                Value::String(text) => vec![Entry::Told { text: cut(text) }],
-                // Tool results come back as the user's turn; they are the
-                // agent's own work, not something said to it.
-                Value::Array(blocks) => blocks
-                    .iter()
-                    .filter(|b| b["type"] == "text")
-                    .filter_map(|b| b["text"].as_str())
-                    .map(|text| Entry::Told { text: cut(text) })
-                    .collect(),
-                _ => vec![],
-            },
-            // What was typed while the agent worked, delivered at its next step.
-            Some("attachment") if v["attachment"]["type"] == "queued_command" => v["attachment"]
-                ["prompt"]
-                .as_str()
-                .map(|text| Entry::Told { text: cut(text) })
-                .into_iter()
-                .collect(),
-            Some("assistant") => {
-                let mut entries: Vec<Entry> = message["content"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|b| match b["type"].as_str() {
-                        Some("text") => Some(Entry::Said {
-                            text: cut(b["text"].as_str()?),
-                        }),
-                        Some("tool_use") => Some(Entry::Ran {
-                            tool: b["name"].as_str()?.into(),
-                            input: cut(&b["input"].to_string()),
-                        }),
-                        _ => None,
-                    })
-                    .collect();
-                if message["stop_reason"] == "end_turn" {
-                    let id = message["id"].as_str().map(String::from);
-                    if id.is_none() || id != self.stopped {
-                        entries.push(Entry::Waiting);
-                        self.stopped = id;
-                    }
-                }
-                entries
-            }
-            _ => vec![],
-        }
+/// What one transcript line says, and when Claude Code wrote it. A line of a
+/// kind not read here says nothing, and the lines after it are read as usual.
+pub fn read(line: &str) -> (Option<String>, Vec<Entry>) {
+    let Ok(v) = serde_json::from_str::<Value>(line) else {
+        return (None, vec![]);
+    };
+    let at = v["timestamp"].as_str().map(String::from);
+    // A subagent's own conversation, and lines Claude Code adds for itself.
+    if v["isSidechain"] == true || v["isMeta"] == true {
+        return (at, vec![]);
     }
+    let message = &v["message"];
+    let entries = match v["type"].as_str() {
+        Some("user") => match &message["content"] {
+            Value::String(text) => vec![Entry::Told { text: cut(text) }],
+            // Tool results come back as the user's turn; they are the
+            // agent's own work, not something said to it.
+            Value::Array(blocks) => blocks
+                .iter()
+                .filter(|b| b["type"] == "text")
+                .filter_map(|b| b["text"].as_str())
+                .map(|text| Entry::Told { text: cut(text) })
+                .collect(),
+            _ => vec![],
+        },
+        // What was typed while the agent worked, delivered at its next step.
+        Some("attachment") if v["attachment"]["type"] == "queued_command" => v["attachment"]
+            ["prompt"]
+            .as_str()
+            .map(|text| Entry::Told { text: cut(text) })
+            .into_iter()
+            .collect(),
+        // One message is written as a line per block.
+        Some("assistant") => message["content"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|b| match b["type"].as_str() {
+                Some("text") => Some(Entry::Said {
+                    text: cut(b["text"].as_str()?),
+                }),
+                Some("tool_use") => Some(Entry::Ran {
+                    tool: b["name"].as_str()?.into(),
+                    input: cut(&b["input"].to_string()),
+                }),
+                _ => None,
+            })
+            .collect(),
+        _ => vec![],
+    };
+    (at, entries)
 }
 
 fn cut(text: &str) -> String {
@@ -265,12 +250,8 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn read(lines: &[Value]) -> Vec<Entry> {
-        let mut reader = Reader::default();
-        lines
-            .iter()
-            .flat_map(|l| reader.line(&l.to_string()))
-            .collect()
+    fn read_all(lines: &[Value]) -> Vec<Entry> {
+        lines.iter().flat_map(|l| read(&l.to_string()).1).collect()
     }
 
     fn told(text: &str) -> Entry {
@@ -285,7 +266,7 @@ mod tests {
 
     #[test]
     fn reads_what_the_agent_was_told_and_what_it_said_and_did() {
-        let entries = read(&[
+        let entries = read_all(&[
             json!({"type":"user","message":{"role":"user","content":"Run the tests."}}),
             json!({"type":"assistant","message":{"id":"m1","content":[{"type":"thinking","thinking":""}],"stop_reason":"tool_use"}}),
             json!({"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"Running them."}],"stop_reason":"tool_use"}}),
@@ -307,7 +288,7 @@ mod tests {
 
     #[test]
     fn a_message_typed_while_it_worked_is_read_as_told() {
-        let entries = read(&[json!({
+        let entries = read_all(&[json!({
             "type":"attachment",
             "attachment":{"type":"queued_command","prompt":"Correction: echo third.\nAlso say hi.","commandMode":"prompt"}
         })]);
@@ -315,42 +296,45 @@ mod tests {
     }
 
     #[test]
-    fn stopping_is_read_once_per_message() {
-        let entries = read(&[
-            json!({"type":"assistant","message":{"id":"m2","content":[{"type":"thinking","thinking":""}],"stop_reason":"end_turn"}}),
-            json!({"type":"assistant","message":{"id":"m2","content":[{"type":"text","text":"Which branch?"}],"stop_reason":"end_turn"}}),
+    fn a_turn_is_read_after_lines_of_kinds_it_does_not_know() {
+        let entries = read_all(&[
+            json!({"type":"last-prompt","lastPrompt":"Say hello."}),
+            json!({"type":"permission-mode","permissionMode":"bypassPermissions"}),
+            json!({"type":"some-kind-not-yet-invented","x":1}),
             json!({"type":"system","subtype":"turn_duration","durationMs":1}),
             json!({"type":"user","message":{"role":"user","content":"main"}}),
+            json!({"type":"api-request-blob","blob":"..."}),
+            json!({"type":"assistant","message":{"id":"m3","content":[{"type":"thinking","thinking":""}],"stop_reason":"end_turn"}}),
             json!({"type":"assistant","message":{"id":"m3","content":[{"type":"text","text":"Done."}],"stop_reason":"end_turn"}}),
         ]);
+        assert_eq!(entries, [told("main"), said("Done.")]);
+    }
+
+    #[test]
+    fn a_line_says_when_it_was_written() {
+        let line = json!({"type":"user","timestamp":"2026-10-27T13:34:52.123Z","message":{"content":"hi"}});
         assert_eq!(
-            entries,
-            [
-                Entry::Waiting,
-                said("Which branch?"),
-                told("main"),
-                said("Done."),
-                Entry::Waiting
-            ]
+            read(&line.to_string()),
+            (Some("2026-10-27T13:34:52.123Z".into()), vec![told("hi")])
         );
     }
 
     #[test]
     fn leaves_out_what_was_not_said_in_this_conversation() {
-        let entries = read(&[
+        let entries = read_all(&[
             json!({"type":"user","isSidechain":true,"message":{"content":"a subagent's prompt"}}),
             json!({"type":"user","isMeta":true,"message":{"content":"<local-command-caveat>"}}),
             json!({"type":"attachment","attachment":{"type":"date","date":"2026-10-27"}}),
             json!({"type":"file-history-snapshot"}),
         ]);
         assert_eq!(entries, []);
-        assert_eq!(Reader::default().line("not json {"), []);
+        assert_eq!(read("not json {"), (None, vec![]));
     }
 
     #[test]
     fn a_long_text_is_cut() {
         let long = "é".repeat(LONGEST + 10);
-        let Entry::Said { text } = &read(&[json!({
+        let Entry::Said { text } = &read_all(&[json!({
             "type":"assistant","message":{"id":"m","content":[{"type":"text","text":long}],"stop_reason":"tool_use"}
         })])[0] else {
             panic!()

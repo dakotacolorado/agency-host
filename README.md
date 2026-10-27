@@ -111,7 +111,10 @@ step, or, if the agent has stopped to ask, as the answer, and the same run goes
 on. An `interrupt` presses Escape in the session, which stops the turn the
 agent is in, mid-command if need be, without ending the session; any text it
 carries is typed in once the turn has stopped. The host reads the session's
-transcript as it is written and sends it up on each beat.
+transcript as it is written and sends it up on each beat, in that agent's
+report: what it was told, what it said and what it ran, numbered from the
+transcript's start, so a host that restarts sends the same lines again under
+the same numbers and the service keeps each once.
 
 A command kind the host does not handle is reported failed, naming the kind.
 

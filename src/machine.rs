@@ -274,6 +274,11 @@ fn memory() -> Option<(u64, u64)> {
     Some(((pages * page as u64).min(total), total))
 }
 
+/// Now, as the service's `date-time` reads it.
+pub fn now() -> String {
+    rfc3339(SystemTime::now())
+}
+
 /// UTC to the millisecond, as the service's `date-time` reads it.
 fn rfc3339(t: SystemTime) -> String {
     let d = t.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default();
