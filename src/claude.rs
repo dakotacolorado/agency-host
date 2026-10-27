@@ -51,15 +51,25 @@ impl Claude {
     /// has started, which is the whole point of running it here. Skipping
     /// permissions because nobody is watching for the prompt: an agent asking
     /// one would wait for ever, holding its run.
-    pub fn argv(&self, session: &str, instructions: Option<&str>) -> Vec<String> {
-        let mut argv = vec![
-            self.program.clone(),
-            "--dangerously-skip-permissions".into(),
-            "--session-id".into(),
-            session.into(),
-        ];
-        argv.extend(instructions.map(String::from));
-        argv
+    ///
+    /// The opening prompt is read from `prompt` as the session starts, since
+    /// tmux refuses a command longer than a few kilobytes and a brief may be
+    /// far longer. It is still one argument, never shell syntax: a quoted
+    /// substitution is not read again.
+    pub fn argv(&self, session: &str, prompt: &Path) -> Vec<String> {
+        [
+            "sh",
+            "-c",
+            r#"p=$1; shift; exec "$@" "$(cat -- "$p")""#,
+            "sh",
+            &prompt.to_string_lossy(),
+            &self.program,
+            "--dangerously-skip-permissions",
+            "--session-id",
+            session,
+        ]
+        .map(String::from)
+        .to_vec()
     }
 
     /// tmux starts a session for a program that is not there and then quietly

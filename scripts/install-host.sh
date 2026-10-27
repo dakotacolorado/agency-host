@@ -5,8 +5,9 @@
 # The service url and token come from AGENT_HOST_SERVICE_URL and
 # AGENT_HOST_TOKEN, else the config file an earlier install wrote, else a
 # prompt. The token is written to that file alone, readable by this user alone.
-# Capacity and labels come from the environment, else that file; there is no
-# prompt for them, since a host with neither still beats, and is offered nothing.
+# Capacity, labels and repositories come from the environment, else that file;
+# there is no prompt for them, since a host with none still beats, and is
+# offered nothing.
 set -eu
 
 usage="usage: install-host.sh [install] [--release TAG | --binary PATH]
@@ -20,7 +21,8 @@ usage="usage: install-host.sh [install] [--release TAG | --binary PATH]
   AGENT_HOST_TOKEN        its token
   AGENT_HOST_ID           this host's name (default: the hostname)
   AGENT_HOST_CAPACITY     how many agents it will run (unset: none are placed here)
-  AGENT_HOST_LABELS       what it can run, comma-separated, such as repo:agent-service"
+  AGENT_HOST_LABELS       what it can run, comma-separated, such as repo:agent-service
+  AGENT_HOST_REPOSITORIES the checkouts agents get worktrees of, as name=/path,..."
 
 repo=dakotacolorado/agent-host
 label=com.dakotacolorado.agent-host
@@ -100,6 +102,16 @@ settings() {
   else
     labels=$(config_line labels)
   fi
+  if [ -n "${AGENT_HOST_REPOSITORIES:-}" ]; then
+    case $AGENT_HOST_REPOSITORIES in *[\"\\]*) die "repositories cannot hold a quote or a backslash" ;; esac
+    pairs=$(echo "$AGENT_HOST_REPOSITORIES" | tr ',' '\n' |
+      sed -n 's/^ *\([A-Za-z0-9][A-Za-z0-9._-]*\) *= *\(\/.*[^ ]\) *$/"\1" = "\2"/p' | paste -sd, -)
+    [ "$(echo "$pairs" | tr ',' '\n' | grep -c .)" = "$(echo "$AGENT_HOST_REPOSITORIES" | tr ',' '\n' | grep -c .)" ] ||
+      die "repositories are name=/absolute/path, comma-separated, not '$AGENT_HOST_REPOSITORIES'"
+    repositories="repositories = { $pairs }"
+  else
+    repositories=$(config_line repositories)
+  fi
 }
 
 tailscale_cli() {
@@ -175,6 +187,7 @@ write_config() {
     if [ -n "$host_id" ]; then printf 'host_id = "%s"\n' "$host_id"; fi
     if [ -n "$capacity" ]; then printf 'capacity = %s\n' "$capacity"; fi
     if [ -n "$labels" ]; then printf '%s\n' "$labels"; fi
+    if [ -n "$repositories" ]; then printf '%s\n' "$repositories"; fi
   ) > "$1"
 }
 

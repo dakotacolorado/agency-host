@@ -55,6 +55,8 @@ token = "…"                 # AGENT_HOST_TOKEN
 host_id = "studio"          # AGENT_HOST_ID; defaults to the hostname
 capacity = 2                # AGENT_HOST_CAPACITY
 labels = ["macos", "repo:agent-service"]  # AGENT_HOST_LABELS, comma-separated
+repositories = { agent-service = "/Users/me/src/agent-service" }
+                            # AGENT_HOST_REPOSITORIES, as name=/path,...
 ```
 
 `capacity` is how many agents this host will run at once, and `labels` what
@@ -62,8 +64,10 @@ work it can be matched to. Both are the owner's to say: a host with no
 capacity still beats, but the service places nothing on it. A label the
 service cannot match on is refused with the pattern it must match, and the
 host logs that refusal and waits rather than beating without it.
-`install-host.sh` takes both from the same variables, and keeps the ones an
-earlier install wrote.
+`repositories` are the checkouts on this machine that agents can be given a
+worktree of, by the name a placement uses; listing one is not advertising it,
+which is a `repo:` label's job. `install-host.sh` takes all three from the
+same variables, and keeps the ones an earlier install wrote.
 
 Which service a host beats to is only this, so the same binary tries a change
 against beta before any machine is asked to take it:
@@ -100,11 +104,31 @@ says `unknown`.
 Each agent is a Claude Code session in tmux, on the host's own socket, so it
 keeps a terminal and can be spoken to while it works. A `start` command runs
 one, named by the id the service gave it, in a folder of its own under
-`$XDG_DATA_HOME/agent-host/agents` (or `~/.local/share/agent-host/agents`); it
-waits there until it is told something. A start the host has already done --
+`$XDG_DATA_HOME/agent-host/agents` (or `~/.local/share/agent-host/agents`). A start the host has already done --
 its session is running, or it has run and left a transcript -- is reported
 done and not repeated, so a host that restarts before reporting does not run
 the agent twice. Every running agent is listed on each beat.
+
+An agent placed for a repository starts in a git worktree of this host's
+checkout of it, at `agents/<id>/<repository>`, on the branch the placement
+named -- taken from origin when it has been pushed there -- or else on
+`agent/<id>`. git will not check one branch out in two worktrees, so two
+agents on one host never share a tree, and the person's checkout is never the
+one an agent works in. `node_modules` is linked from the checkout when it has
+one and left absent when it has not; the host never installs into it. If the
+worktree cannot be made -- no checkout by that name, origin cannot be
+fetched, the branch is already checked out elsewhere -- the start fails with
+that reason and no agent runs.
+
+Every agent is started with the standing rules in `src/conduct.md` -- no
+pushing, merging or deploying, run the repository's own checks, ask when
+stuck -- and then its brief, exactly as placed. The prompt is kept at
+`agents/<id>/prompt.md`.
+
+A workspace is kept when its agent ends, for inspection, and its worktree is
+locked so that `git worktree prune` in the checkout cannot take it by
+accident. Removing one is deliberate:
+`git -C <checkout> worktree remove --force --force <workspace>`.
 
 A message is typed into the session at once; Claude Code takes it at its next
 step, or, if the agent has stopped to ask, as the answer, and the same run goes

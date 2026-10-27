@@ -5,6 +5,7 @@ mod config;
 mod machine;
 mod sys;
 mod tmux;
+mod workspace;
 
 use agent::Agents;
 use beat::{Beat, Client, Failure, Present, Report, Session, CONTRACT};
@@ -37,7 +38,9 @@ Settings, each overriding the file:
   AGENT_HOST_TOKEN        token
   AGENT_HOST_ID           host_id      defaults to the hostname
   AGENT_HOST_CAPACITY     capacity     how many agents this host will run; unset, none are placed here
-  AGENT_HOST_LABELS       labels       what it can run, comma-separated (a list in the file)";
+  AGENT_HOST_LABELS       labels       what it can run, comma-separated (a list in the file)
+  AGENT_HOST_REPOSITORIES repositories the checkouts an agent can be given a worktree of,
+                                       as name=/path,... (a table in the file)";
 
 struct Args {
     config: Option<PathBuf>,
@@ -114,6 +117,7 @@ fn main() -> ExitCode {
         tmux::Tmux::new("agent-host"),
         claude::Claude::from_env(|k| env::var(k).ok()),
         home,
+        config.repositories.clone(),
     );
     run(
         &Client::new(&config),

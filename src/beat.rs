@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-use crate::agent::{Agents, Line};
+use crate::agent::{Agents, Line, Placement};
 use crate::config::Config;
 use crate::machine::Sample;
 
@@ -82,6 +82,10 @@ pub struct Command {
     /// carried the same way.
     pub agent_id: Option<String>,
     pub text: Option<String>,
+    /// For `start`: what the work is and where it is done, as placed.
+    pub repository: Option<String>,
+    pub branch: Option<String>,
+    pub brief: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -165,7 +169,16 @@ pub fn take(command: &Command, agents: &Agents) -> Report {
     let text = command.text.as_deref();
     let error = match (command.kind.as_str(), agent) {
         ("ping", _) => None,
-        ("start", Some(agent)) => agents.start(agent, text).err(),
+        ("start", Some(agent)) => agents
+            .start(
+                agent,
+                &Placement {
+                    repository: command.repository.as_deref(),
+                    branch: command.branch.as_deref(),
+                    brief: command.brief.as_deref(),
+                },
+            )
+            .err(),
         ("interrupt", Some(agent)) => agents.interrupt(agent, text).err(),
         ("message", Some(agent)) => match text {
             Some(text) => agents.say(agent, text).err(),
@@ -230,6 +243,7 @@ mod tests {
             host_id: "studio".into(),
             capacity: None,
             labels: None,
+            repositories: Default::default(),
         })
     }
 
@@ -323,6 +337,7 @@ mod tests {
             crate::tmux::Tmux::new(format!("agent-host-test-{}-none", std::process::id())),
             crate::claude::Claude::new("/nonexistent/claude", None, "/nonexistent".into()),
             "/nonexistent".into(),
+            Default::default(),
         )
     }
 

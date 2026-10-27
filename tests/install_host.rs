@@ -73,3 +73,19 @@ fn refuses_a_capacity_that_is_not_a_number() {
     assert!(run.output.contains("not 'lots'"), "{}", run.output);
     assert!(is_empty(&run.home), "wrote into {}", run.home.display());
 }
+
+#[test]
+fn refuses_a_repository_that_is_not_an_absolute_path() {
+    let run = install_host(
+        "repository-relative",
+        &[],
+        "https://fleet.example",
+        &[(
+            "AGENT_HOST_REPOSITORIES",
+            "widgets=/src/widgets,gadgets=src/gadgets",
+        )],
+    );
+    assert!(!run.ok, "{}", run.output);
+    assert!(run.output.contains("name=/absolute/path"), "{}", run.output);
+    assert!(is_empty(&run.home), "wrote into {}", run.home.display());
+}

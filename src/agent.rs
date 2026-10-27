@@ -3,6 +3,7 @@
 //! host remembers nothing about them that tmux and the transcript do not hold.
 
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::PathBuf;
@@ -12,6 +13,25 @@ use std::time::Duration;
 use crate::claude::{self, Claude};
 use crate::machine;
 use crate::tmux::Tmux;
+use crate::workspace;
+
+/// Put ahead of every brief, because every agent on the fleet is started
+/// through a host. Written first in agent-rig's prompts/worker.md, which still
+/// has its own copy: a change to one is not a change to the other.
+const CONDUCT: &str = include_str!("conduct.md");
+
+/// The opening prompt is one argument to Claude Code, and linux takes no
+/// single argument longer than this.
+const LONGEST_PROMPT: usize = 128 << 10;
+
+/// What a `start` says of the work, exactly as it was placed.
+#[derive(Debug, Default)]
+pub struct Placement<'a> {
+    /// A checkout this host has, by the name its config gives it.
+    pub repository: Option<&'a str>,
+    pub branch: Option<&'a str>,
+    pub brief: Option<&'a str>,
+}
 
 /// One step of an agent's conversation, as its transcript says it.
 #[derive(Debug, Clone, PartialEq)]
@@ -85,6 +105,7 @@ pub struct Agents {
     claude: Claude,
     /// Where each agent gets a folder of its own to start in.
     home: PathBuf,
+    repositories: BTreeMap<String, PathBuf>,
 }
 
 /// Between the key that stops a turn and the text that follows it: sent
@@ -93,28 +114,85 @@ pub struct Agents {
 const SETTLE: Duration = Duration::from_millis(500);
 
 impl Agents {
-    pub fn new(tmux: Tmux, claude: Claude, home: PathBuf) -> Self {
-        Agents { tmux, claude, home }
+    pub fn new(
+        tmux: Tmux,
+        claude: Claude,
+        home: PathBuf,
+        repositories: BTreeMap<String, PathBuf>,
+    ) -> Self {
+        Agents {
+            tmux,
+            claude,
+            home,
+            repositories,
+        }
     }
 
     /// Runs the agent in a session of its own, in a folder of its own, told
-    /// `instructions` if there are any and otherwise waiting to be told. A
-    /// start is sent again until it is reported, so one the host has already
+    /// the standing rules and then its brief, or, with no brief, to wait to be
+    /// told. Placed for a repository, the folder holds a worktree of it, and a
+    /// worktree that cannot be made fails the start: an agent started without
+    /// the code it was placed for would spend its run finding that out.
+    ///
+    /// A start is sent again until it is reported, so one the host has already
     /// done -- before a restart that lost the report -- is done, not repeated:
     /// its session is still running, or it has run and left a transcript.
-    pub fn start(&self, id: &str, instructions: Option<&str>) -> Result<(), String> {
+    pub fn start(&self, id: &str, placement: &Placement) -> Result<(), String> {
         let session = claude::session_id(id);
         if self.session(id).is_some() || self.claude.transcript(&session).is_some() {
             return Ok(());
         }
         self.claude.installed()?;
-        let dir = self.home.join(id);
-        fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let home = self.home.join(id);
+        fs::create_dir_all(&home).map_err(|e| format!("{}: {e}", home.display()))?;
+        let (dir, workspace) = match (placement.repository, placement.branch) {
+            (None, None) => (
+                home.clone(),
+                format!(
+                    "You are in `{}`, a folder of your own with no code in it: the work you \
+                     were placed for named no repository.",
+                    home.display()
+                ),
+            ),
+            (None, Some(branch)) => {
+                return Err(format!(
+                    "branch {branch} was named with no repository to be on"
+                ))
+            }
+            (Some(name), branch) => {
+                let checkout = self.repositories.get(name).ok_or_else(|| {
+                    format!(
+                        "this host has no checkout of {name}: its config names none by that name"
+                    )
+                })?;
+                let ws = workspace::prepare(id, checkout, &home.join(name), branch)?;
+                let line = format!(
+                    "You are in `{}`, a git worktree of {name} on branch `{}`, made for you \
+                     alone: no other agent works in this tree.",
+                    ws.dir.display(),
+                    ws.branch
+                );
+                (ws.dir, line)
+            }
+        };
+        let prompt = CONDUCT.replace("{{WORKSPACE}}", &workspace)
+            + placement
+                .brief
+                .unwrap_or("Nothing has been asked of you yet. Wait to be told what the work is.");
+        if prompt.len() > LONGEST_PROMPT {
+            return Err(format!(
+                "the brief and the rules ahead of it come to {} bytes, more than the {LONGEST_PROMPT} \
+                 one argument can carry",
+                prompt.len()
+            ));
+        }
+        let file = home.join("prompt.md");
+        fs::write(&file, &prompt).map_err(|e| format!("{}: {e}", file.display()))?;
         self.claude.trust(&dir)?;
         self.tmux.start(
             id,
             &dir,
-            &self.claude.argv(&session, instructions),
+            &self.claude.argv(&session, &file),
             &self.claude.env(),
         )
     }
@@ -236,8 +314,9 @@ mod tests {
     const FAKE_CLAUDE: &str = r#"#!/bin/sh
 [ "$1 $2" = "--dangerously-skip-permissions --session-id" ] || exit 64
 dir="$CLAUDE_CONFIG_DIR/projects/-fake"; mkdir -p "$dir"; t="$dir/$3.jsonl"
+pwd > "$dir/$3.cwd"
 w() { printf '%s\n' "$1" >> "$t"; }
-w "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"$4\"}}"
+w "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"$(printf '%s\n' "$4" | tail -n 1)\"}}"
 w '{"type":"assistant","message":{"id":"m0","content":[{"type":"text","text":"step one"}],"stop_reason":"tool_use"}}'
 sleep 1
 IFS= read -r line
@@ -282,6 +361,10 @@ done
     }
 
     fn host(name: &str, program: &str) -> Host {
+        host_with(name, program, BTreeMap::new())
+    }
+
+    fn host_with(name: &str, program: &str, repositories: BTreeMap<String, PathBuf>) -> Host {
         let dir = std::env::temp_dir().join(format!("agent-host-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
@@ -297,8 +380,16 @@ done
                     "/nonexistent".into(),
                 ),
                 dir.join("agents"),
+                repositories,
             ),
             dir,
+        }
+    }
+
+    fn brief(text: &str) -> Placement<'_> {
+        Placement {
+            brief: Some(text),
+            ..Default::default()
         }
     }
 
@@ -345,7 +436,7 @@ done
     fn an_agent_is_spoken_to_while_it_works_and_answered_in_the_same_run() {
         let host = host("session", FAKE_CLAUDE);
         let agents = &host.agents;
-        agents.start("a1", Some("fix the build")).unwrap();
+        agents.start("a1", &brief("fix the build")).unwrap();
         assert_eq!(agents.ids(), ["a1"]);
         let (mut seen, mut cursor) = (vec![], Cursor::default());
 
@@ -389,14 +480,18 @@ done
         read_until(&host.agents, "a1", &mut seen, &mut cursor, |s| {
             s.contains(&said("step one"))
         });
-        assert_eq!(seen[0], told(""), "started with nothing to do but wait");
+        assert_eq!(
+            seen[0],
+            told("Nothing has been asked of you yet. Wait to be told what the work is."),
+            "started with nothing to do but wait"
+        );
     }
 
     #[test]
     fn an_interrupt_stops_the_turn_and_the_session_goes_on() {
         let host = host("interrupt", BUSY_CLAUDE);
         let agents = &host.agents;
-        agents.start("a1", None).unwrap();
+        agents.start("a1", &Placement::default()).unwrap();
         let (mut seen, mut cursor) = (vec![], Cursor::default());
         read_until(agents, "a1", &mut seen, &mut cursor, |s| {
             s.contains(&said("working"))
@@ -421,7 +516,7 @@ done
     #[test]
     fn a_start_already_done_is_not_done_again() {
         let host = host("again", FAKE_CLAUDE);
-        host.agents.start("a1", Some("fix the build")).unwrap();
+        host.agents.start("a1", &brief("fix the build")).unwrap();
         // A host that restarts has nothing but tmux and the transcripts.
         let restarted = Agents::new(
             Tmux::new(format!("agent-host-test-{}-again", std::process::id())),
@@ -431,15 +526,16 @@ done
                 "/nonexistent".into(),
             ),
             host.dir.join("agents"),
+            BTreeMap::new(),
         );
-        restarted.start("a1", Some("fix the build")).unwrap();
+        restarted.start("a1", &brief("fix the build")).unwrap();
         assert_eq!(restarted.ids(), ["a1"]);
 
         // One that has run and ended left its transcript behind.
         let (mut seen, mut cursor) = (vec![], Cursor::default());
         read_until(&restarted, "a1", &mut seen, &mut cursor, |s| !s.is_empty());
         restarted.tmux.kill_server();
-        restarted.start("a1", Some("fix the build")).unwrap();
+        restarted.start("a1", &brief("fix the build")).unwrap();
         assert!(restarted.ids().is_empty(), "started a finished agent again");
     }
 
@@ -450,8 +546,9 @@ done
             Tmux::new(format!("agent-host-test-{}-missing", std::process::id())),
             Claude::new("/nonexistent/claude", None, "/nonexistent".into()),
             host.dir.join("agents"),
+            BTreeMap::new(),
         );
-        let err = agents.start("a1", None).unwrap_err();
+        let err = agents.start("a1", &Placement::default()).unwrap_err();
         assert!(
             err.contains("/nonexistent/claude is not installed"),
             "{err}"
@@ -619,6 +716,136 @@ done
         assert!(instant(&machine::now()));
     }
 
+    fn repo_host(name: &str) -> (Host, crate::workspace::tests::Repo) {
+        let repo = crate::workspace::tests::repo(&format!("agent-{name}"));
+        let repositories = BTreeMap::from([("widgets".to_string(), repo.checkout.clone())]);
+        (host_with(name, FAKE_CLAUDE, repositories), repo)
+    }
+
+    /// Where the stand-in for Claude Code found itself started.
+    fn cwd(host: &Host, id: &str) -> PathBuf {
+        let file = host.dir.join(format!(
+            "state/projects/-fake/{}.cwd",
+            claude::session_id(id)
+        ));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !file.exists() {
+            assert!(Instant::now() < deadline, "never started");
+            thread::sleep(Duration::from_millis(50));
+        }
+        PathBuf::from(fs::read_to_string(file).unwrap().trim())
+    }
+
+    #[test]
+    fn an_agent_placed_for_a_repository_starts_in_a_worktree_of_its_own() {
+        let (host, _repo) = repo_host("worktree");
+        let placed = |text| Placement {
+            repository: Some("widgets"),
+            brief: Some(text),
+            ..Default::default()
+        };
+        host.agents.start("a1", &placed("fix the build")).unwrap();
+        host.agents.start("a2", &placed("write the docs")).unwrap();
+
+        let (one, two) = (cwd(&host, "a1"), cwd(&host, "a2"));
+        assert_ne!(one, two, "two agents, two trees");
+        for (id, dir) in [("a1", &one), ("a2", &two)] {
+            assert!(dir.join("README").is_file(), "the code is there");
+            let branch = std::process::Command::new("git")
+                .args(["branch", "--show-current"])
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&branch.stdout).trim(),
+                format!("agent/{id}")
+            );
+        }
+
+        let prompt = fs::read_to_string(host.dir.join("agents/a1/prompt.md")).unwrap();
+        assert!(prompt.starts_with(CONDUCT.split("{{WORKSPACE}}").next().unwrap()));
+        assert!(prompt.contains("`git push`"), "the rules come first");
+        assert!(prompt.contains("on branch `agent/a1`"), "{prompt}");
+        assert!(
+            prompt.ends_with("\nfix the build"),
+            "and the brief after them, as placed"
+        );
+        let (mut seen, mut cursor) = (vec![], Cursor::default());
+        read_until(&host.agents, "a1", &mut seen, &mut cursor, |s| {
+            !s.is_empty()
+        });
+        assert_eq!(seen[0], told("fix the build"));
+    }
+
+    #[test]
+    fn a_brief_too_long_for_tmux_reaches_the_agent_whole() {
+        let (host, _repo) = repo_host("long");
+        let long = "x".repeat(60 << 10) + "\nthe end";
+        host.agents
+            .start(
+                "a1",
+                &Placement {
+                    repository: Some("widgets"),
+                    brief: Some(&long),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let (mut seen, mut cursor) = (vec![], Cursor::default());
+        read_until(&host.agents, "a1", &mut seen, &mut cursor, |s| {
+            !s.is_empty()
+        });
+        assert_eq!(seen[0], told("the end"));
+    }
+
+    #[test]
+    fn a_workspace_that_cannot_be_made_fails_the_start_and_runs_nothing() {
+        let (host, repo) = repo_host("unprepared");
+        let err = host
+            .agents
+            .start(
+                "a1",
+                &Placement {
+                    repository: Some("gadgets"),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(err.contains("no checkout of gadgets"), "{err}");
+
+        crate::workspace::tests::sh(&repo.checkout, "git remote set-url origin /nonexistent");
+        let err = host
+            .agents
+            .start(
+                "a2",
+                &Placement {
+                    repository: Some("widgets"),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(err.contains("could not fetch from origin"), "{err}");
+
+        let err = host
+            .agents
+            .start(
+                "a3",
+                &Placement {
+                    branch: Some("feat/x"),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(err.contains("no repository"), "{err}");
+
+        let err = host
+            .agents
+            .start("a4", &brief(&"x".repeat(LONGEST_PROMPT)))
+            .unwrap_err();
+        assert!(err.contains("more than"), "{err}");
+        assert!(host.agents.ids().is_empty(), "no agent was started anyway");
+    }
+
     /// Against Claude Code itself, which costs a real session:
     /// `cargo test -- --ignored real_claude`.
     #[test]
@@ -627,12 +854,17 @@ done
         let dir = std::env::temp_dir().join(format!("agent-host-real-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let tmux = Tmux::new(format!("agent-host-test-real-{}", std::process::id()));
-        let agents = Agents::new(tmux, Claude::from_env(|k| std::env::var(k).ok()), dir);
+        let agents = Agents::new(
+            tmux,
+            Claude::from_env(|k| std::env::var(k).ok()),
+            dir,
+            BTreeMap::new(),
+        );
         let id = format!("real-{}", std::process::id());
         agents
             .start(
                 &id,
-                Some(
+                &brief(
                     "Run this shell command in the foreground: python3 -c \"import time; time.sleep(15)\". \
                  Then run: echo second. Then reply with one word: done.",
                 ),
@@ -669,6 +901,65 @@ done
         assert!(ran_third(&seen).unwrap() > correction);
     }
 
+    /// Claude Code itself, placed for a repository, reading what only that
+    /// repository holds: `cargo test -- --ignored real_claude`.
+    #[test]
+    #[ignore]
+    fn real_claude_sees_its_repository() {
+        let repo = crate::workspace::tests::repo("real");
+        crate::workspace::tests::sh(
+            &repo.checkout,
+            "echo 'The password is periwinkle.' > SECRET && git add SECRET && git commit -qm secret \
+             && git push -q origin main",
+        );
+        let dir = repo.root.join("agents");
+        let tmux = Tmux::new(format!("agent-host-test-real-w-{}", std::process::id()));
+        let agents = Agents::new(
+            tmux,
+            Claude::from_env(|k| std::env::var(k).ok()),
+            dir.clone(),
+            BTreeMap::from([("widgets".to_string(), repo.checkout.clone())]),
+        );
+        let id = format!("real-w-{}", std::process::id());
+        agents
+            .start(
+                &id,
+                &Placement {
+                    repository: Some("widgets"),
+                    brief: Some(
+                        "Read the file SECRET in your working directory, and run `git branch \
+                         --show-current`. Then reply with one line: the password, a space, and \
+                         the branch.",
+                    ),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let (mut seen, mut cursor): (Seen, _) = (vec![], Cursor::default());
+        let deadline = Instant::now() + Duration::from_secs(180);
+        // Nothing says it has stopped, so it is done once it has said the
+        // answer: what only the repository holds, on its own branch.
+        let answered = |s: &Seen| {
+            s.iter().any(|(from, text)| {
+                *from == "agent"
+                    && text.contains("periwinkle")
+                    && text.contains(&format!("agent/{id}"))
+            })
+        };
+        while !answered(&seen) {
+            assert!(
+                Instant::now() < deadline,
+                "it never read the repository on its own branch; read {seen:?}"
+            );
+            if let Some(batch) = agents.read(&id, cursor, 1 << 16) {
+                take(&mut seen, &mut cursor, batch);
+            }
+            thread::sleep(Duration::from_millis(500));
+        }
+        agents.tmux.kill_server();
+        eprintln!("{seen:#?}");
+    }
+
     /// Interrupting Claude Code itself, mid-command, as the page does:
     /// `cargo test -- --ignored real_claude`.
     #[test]
@@ -676,9 +967,14 @@ done
     fn real_claude_interrupted() {
         let dir = std::env::temp_dir().join(format!("agent-host-real-i-{}", std::process::id()));
         let tmux = Tmux::new(format!("agent-host-test-real-i-{}", std::process::id()));
-        let agents = Agents::new(tmux, Claude::from_env(|k| std::env::var(k).ok()), dir);
+        let agents = Agents::new(
+            tmux,
+            Claude::from_env(|k| std::env::var(k).ok()),
+            dir,
+            BTreeMap::new(),
+        );
         let id = format!("real-i-{}", std::process::id());
-        agents.start(&id, None).unwrap();
+        agents.start(&id, &Placement::default()).unwrap();
         thread::sleep(Duration::from_secs(5));
         agents
             .say(
