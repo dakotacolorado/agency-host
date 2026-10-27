@@ -76,7 +76,8 @@ agent-host 0.1.0 5812e39c0d…
 ```
 
 A build from a tree with uncommitted changes says `dirty` instead of a commit,
-and one built without git says `unknown`.
+and one built without git, or from source its enclosing repo does not track,
+says `unknown`.
 
 ## Agents
 
