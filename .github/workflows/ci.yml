@@ -26,6 +26,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
+      # The session tests run a stand-in agent under real tmux, since tmux is
+      # what gives an agent the terminal it needs to be spoken to.
+      - run: command -v tmux || (sudo apt-get update -q && sudo apt-get install -y -q tmux)
       - run: cargo test --locked
 
   build:

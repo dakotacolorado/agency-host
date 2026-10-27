@@ -1,11 +1,21 @@
+mod agent;
 mod beat;
+mod claude;
 mod config;
 mod sys;
+mod tmux;
 
+use agent::Agents;
 use beat::{Beat, Client, Failure, Report, CONTRACT};
+use std::collections::HashMap;
 use std::{env, path::PathBuf, process::ExitCode, thread::sleep, time::Duration};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Bytes of transcript entries one agent may add to a beat. Transcripts are
+/// unbounded and bursty, and a beat grown until it fails loses liveness for
+/// the sake of logs; what does not fit goes on the next beat.
+const TRANSCRIPT_PER_AGENT: usize = 32 << 10;
 
 const USAGE: &str = "usage: agent-host [--config PATH] [--beats N]
 
@@ -73,26 +83,52 @@ fn main() -> ExitCode {
         config.host_id,
         config.service_url
     );
-    run(&Client::new(&config), args.beats)
+    let agents = Agents::new(
+        tmux::Tmux::new("agent-host"),
+        claude::Claude::from_env(|k| env::var(k).ok()),
+    );
+    run(&Client::new(&config), &agents, args.beats)
 }
 
 /// Assumes nothing survives between beats but what is in memory: the machine
 /// may sleep for weeks between two iterations, and the next beat is simply
-/// late. Reports that did not land are sent again on the next beat.
-fn run(client: &Client, limit: Option<u64>) -> ExitCode {
+/// late. Reports and transcript that did not land are sent again on the next
+/// beat. A host that restarts sends each transcript again from its start; the
+/// cursors on each batch say it is the same.
+fn run(client: &Client, agents: &Agents, limit: Option<u64>) -> ExitCode {
     let mut reports: Vec<Report> = Vec::new();
+    let mut cursors: HashMap<String, u64> = HashMap::new();
     let mut landed = 0;
     let mut failures = 0u32;
     loop {
+        let read: Vec<_> = agents
+            .ids()
+            .iter()
+            .filter_map(|id| {
+                agents.read(
+                    id,
+                    cursors.get(id).copied().unwrap_or(0),
+                    TRANSCRIPT_PER_AGENT,
+                )
+            })
+            .collect();
         let wait = match client.beat(&Beat {
             host_version: VERSION,
             agents: vec![],
             reports: &reports,
+            transcript: read.iter().filter(|b| !b.entries.is_empty()).collect(),
         }) {
             Ok(reply) => {
                 landed += 1;
                 failures = 0;
-                reports = reply.commands.iter().map(beat::take).collect();
+                for batch in &read {
+                    cursors.insert(batch.agent_id.clone(), batch.to);
+                }
+                reports = reply
+                    .commands
+                    .iter()
+                    .map(|command| beat::take(command, agents))
+                    .collect();
                 for (command, report) in reply.commands.iter().zip(&reports) {
                     log!(
                         "command {} ({}): {}",

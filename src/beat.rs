@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::time::Duration;
 
+use crate::agent::{Agents, Batch};
 use crate::config::Config;
 
 /// The agent-service host contract this beat body matches: `reports` arrived
@@ -14,6 +15,10 @@ pub struct Beat<'a> {
     pub host_version: &'a str,
     pub agents: Vec<Value>,
     pub reports: &'a [Report],
+    /// What agents have done since the last beat that landed, so a transcript
+    /// can be read while the agent is still working.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub transcript: Vec<&'a Batch>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -24,12 +29,18 @@ pub struct Reply {
     pub come_back_in: Option<f64>,
 }
 
-/// Only what routes a command; each kind's own fields arrive with the story
-/// that handles it.
+/// What routes a command, and the fields of each kind handled so far; the
+/// rest arrive with the stories that handle them.
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Command {
     pub id: String,
     pub kind: String,
+    /// `message`: which agent, and what to type to it. Who sent it is the
+    /// service's record, not the agent's: a person, the agent above, and an
+    /// answer to a question are all carried the same way.
+    pub agent_id: Option<String>,
+    pub text: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -104,13 +115,17 @@ impl Client {
     }
 }
 
-/// Placing, stopping and carrying messages are each their own story. Until a
-/// kind is handled, the host says so rather than dropping it, so the sender
-/// learns the command went nowhere. `ping` does nothing and succeeds, so a
-/// whole cycle can be proved before any real kind exists.
-pub fn take(command: &Command) -> Report {
+/// Placing and stopping are each their own story. Until a kind is handled, the
+/// host says so rather than dropping it, so the sender learns the command went
+/// nowhere. `ping` does nothing and succeeds, so a whole cycle can be proved
+/// before any real kind exists.
+pub fn take(command: &Command, agents: &Agents) -> Report {
     let error = match command.kind.as_str() {
         "ping" => None,
+        "message" => match (&command.agent_id, &command.text) {
+            (Some(agent), Some(text)) => agents.say(agent, text).err(),
+            _ => Some("a message needs an agentId and text".into()),
+        },
         kind => Some(format!("this host does not handle {kind:?} commands")),
     };
     Report {
@@ -182,6 +197,7 @@ mod tests {
             host_version: "9.9.9",
             agents: vec![],
             reports: &reports,
+            transcript: vec![],
         }) else {
             panic!("beat failed")
         };
@@ -212,6 +228,7 @@ mod tests {
             host_version: "0.1.0",
             agents: vec![],
             reports: &[],
+            transcript: vec![],
         }) {
             Err(Failure::Unsupported { minimum: 3, error }) => assert!(error.contains("Upgrade")),
             _ => panic!("expected an unsupported contract"),
@@ -225,6 +242,7 @@ mod tests {
             host_version: "0.1.0",
             agents: vec![],
             reports: &[],
+            transcript: vec![],
         }) {
             Err(Failure::Refused(403, body)) => assert!(body.contains("not this host")),
             _ => panic!("expected a refusal"),
@@ -238,16 +256,71 @@ mod tests {
             client(url).beat(&Beat {
                 host_version: "0.1.0",
                 agents: vec![],
-                reports: &[]
+                reports: &[],
+                transcript: vec![],
             }),
             Err(Failure::Transient(_))
         ));
     }
 
+    /// No tmux server answers on this socket, so the host has no agents.
+    fn no_agents() -> Agents {
+        Agents::new(
+            crate::tmux::Tmux::new(format!("agent-host-test-{}-none", std::process::id())),
+            crate::claude::Claude::new("claude", None, "/nonexistent".into()),
+        )
+    }
+
+    #[test]
+    fn a_beat_carries_what_agents_did() {
+        let (url, server) = serve_once("200 OK", "{}");
+        let batch = Batch {
+            agent_id: "a1".into(),
+            from: 0,
+            to: 120,
+            entries: vec![
+                crate::agent::Entry::Said { text: "hi".into() },
+                crate::agent::Entry::Waiting,
+            ],
+        };
+        assert!(client(url)
+            .beat(&Beat {
+                host_version: "9.9.9",
+                agents: vec![],
+                reports: &[],
+                transcript: vec![&batch],
+            })
+            .is_ok());
+        let (_, body) = server.join().unwrap();
+        let sent: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            sent["transcript"],
+            serde_json::json!([{"agentId":"a1","from":0,"to":120,"entries":[
+                {"kind":"said","text":"hi"},{"kind":"waiting"}
+            ]}])
+        );
+    }
+
+    #[test]
+    fn a_message_for_an_agent_not_here_is_reported() {
+        let command: Command =
+            serde_json::from_str(r#"{"id":"c1","kind":"message","agentId":"a9","text":"hi"}"#)
+                .unwrap();
+        let report = take(&command, &no_agents());
+        assert!(!report.ok);
+        assert!(report.error.unwrap().contains("no agent a9"));
+    }
+
+    #[test]
+    fn a_message_without_its_fields_is_refused() {
+        let command: Command = serde_json::from_str(r#"{"id":"c1","kind":"message"}"#).unwrap();
+        assert!(!take(&command, &no_agents()).ok);
+    }
+
     #[test]
     fn an_unhandled_command_is_reported_not_dropped() {
         let command: Command = serde_json::from_str(r#"{"id":"c1","kind":"stop"}"#).unwrap();
-        let report = take(&command);
+        let report = take(&command, &no_agents());
         assert_eq!(report.command_id, "c1");
         assert!(!report.ok);
     }
@@ -256,7 +329,7 @@ mod tests {
     fn a_ping_succeeds() {
         let command: Command = serde_json::from_str(r#"{"id":"c1","kind":"ping"}"#).unwrap();
         assert_eq!(
-            take(&command),
+            take(&command, &no_agents()),
             Report {
                 command_id: "c1".into(),
                 ok: true,

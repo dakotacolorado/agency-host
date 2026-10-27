@@ -67,11 +67,31 @@ AGENT_HOST_SERVICE_URL=https://beta… AGENT_HOST_TOKEN=… agent-host --beats 3
 `agent-host` runs until it is killed, and outlives the terminal that started
 it. A beat that fails is retried; a machine that sleeps simply beats late.
 
+## Agents
+
+Each agent is a Claude Code session in tmux, on the host's own socket, so it
+keeps a terminal and can be spoken to while it works. A message is typed into
+the session at once; Claude Code takes it at its next step, or, if the agent
+has stopped to ask, as the answer, and the same run goes on. The host reads
+the session's transcript as it is written and sends it up on each beat.
+
+To watch or talk to one directly on the machine:
+
+```sh
+tmux -L agent-host ls
+tmux -L agent-host attach -t <agent>
+```
+
+The machine needs `tmux` and `claude` on its PATH, with Claude Code signed in.
+
 ## Develop
 
 ```sh
 cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
+cargo test -- --ignored real_claude   # one real Claude Code session, end to end
 ```
+
+The tests need `tmux`.
 
 CI runs those, builds every target, runs the linux binary through a whole beat
 cycle against the beta service, and on a merge to main publishes the release.
