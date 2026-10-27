@@ -51,7 +51,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
                 );
             }
             "--version" => {
-                println!("agent-host {VERSION} {COMMIT}");
+                println!("agent-host {VERSION} {COMMIT} (contract {CONTRACT})");
                 std::process::exit(0);
             }
             "--help" | "-h" => {

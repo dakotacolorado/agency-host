@@ -230,6 +230,7 @@ install_host() {
   settings
   tailnet
   need_tmux
+  claude=$(command -v claude) || die "claude is not on the PATH: install Claude Code, sign in, and run this again"
   stage=$(mktemp -d)
   trap 'rm -rf "$stage"' EXIT
   fetch
@@ -245,7 +246,9 @@ install_host() {
   cp "$stage/agent-host" "$bin.new"
   mv "$bin.new" "$bin"
 
-  path="$(dirname "$(command -v tmux)"):/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+  # The service gets none of the login shell's PATH, and Claude Code installs
+  # itself to ~/.local/bin.
+  path="$(dirname "$claude"):$(dirname "$(command -v tmux)"):/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
   "service_$(echo "$os" | tr '[:upper:]' '[:lower:]')"
   say "$("$bin" --version) is running as a service, beating to $url"
   say "attach from the tailnet: ssh $(id -un)@$ip, then tmux attach"
