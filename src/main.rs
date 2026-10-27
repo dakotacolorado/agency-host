@@ -51,7 +51,11 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
                 );
             }
             "--version" => {
-                println!("agent-host {VERSION} {COMMIT} (contract {CONTRACT})");
+                // The commit goes last and stays last: two CI steps read this
+                // line with `grep -qx "agent-host .* $GITHUB_SHA"`, so anything
+                // added after the commit breaks the check that the binary on a
+                // bare machine is the one the workflow just built.
+                println!("agent-host {VERSION} (contract {CONTRACT}) {COMMIT}");
                 std::process::exit(0);
             }
             "--help" | "-h" => {
