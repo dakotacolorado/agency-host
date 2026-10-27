@@ -52,6 +52,10 @@ fn refuses_a_fleet_api_not_over_https() {
 fn has_nothing_to_roll_back_to_before_a_second_install() {
     let run = install_host("no-previous", &["rollback"], "https://fleet.example");
     assert!(!run.ok, "{}", run.output);
-    assert!(run.output.contains("nothing to roll back to"), "{}", run.output);
+    assert!(
+        run.output.contains("nothing to roll back to"),
+        "{}",
+        run.output
+    );
     assert!(is_empty(&run.home), "wrote into {}", run.home.display());
 }
