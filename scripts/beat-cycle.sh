@@ -4,16 +4,16 @@
 #
 #   AGENT_HOST_SERVICE_URL=… AGENT_HOST_TOKEN=… AGENT_HOST_ID=… beat-cycle.sh BINARY
 #
-# Writes proved=true|false to $GITHUB_OUTPUT. A service that does not serve the
-# beat yet is a dependency still to come, not a failure: it ends green with
-# proved=false, and nothing is released on it. Anything else that goes wrong
-# fails.
+# Writes proved=true|false to $GITHUB_OUTPUT. No service to beat against -- no
+# url, nothing answering at it, or no beat served there yet -- is a dependency
+# still to come, not a failure: it ends green with proved=false, and nothing is
+# released on it. Anything else that goes wrong fails.
 set -eu
 
 bin=$1
-url=${AGENT_HOST_SERVICE_URL%/}
+url=${AGENT_HOST_SERVICE_URL:-}
+url=${url%/}
 host=$AGENT_HOST_ID
-auth="Authorization: Bearer $AGENT_HOST_TOKEN"
 log=$(mktemp)
 
 proved() {
@@ -24,6 +24,13 @@ not_yet() {
   proved false
   exit 0
 }
+
+[ -n "$url" ] || not_yet "skipped: waiting for a beta service url to beat against; none was given"
+# Any HTTP answer at all, even an error, means something is there to beat.
+if [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$url/" || true)" = 000 ]; then
+  not_yet "skipped: waiting for the beta service at $url to answer; nothing did within 10s"
+fi
+auth="Authorization: Bearer $AGENT_HOST_TOKEN"
 
 if ! "$bin" --beats 1 2> "$log"; then
   cat "$log"

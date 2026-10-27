@@ -86,11 +86,11 @@ jobs:
   # halves agree, so this runs the artifact itself, not `cargo run`.
   integration:
     needs: build
-    # Skips rather than failing red until the OIDC role exists, and passes
-    # unproved while beta does not serve the beat yet (see scripts/beat-cycle.sh):
-    # red for a dependency still to come teaches people to ignore red. Either
-    # way release does not run.
-    if: vars.AWS_DEPLOY_ROLE != ''
+    # Whether this can prove anything depends on there being a beat endpoint to
+    # beat against, so that is what it asks: until beta exists, answers, and
+    # serves the beat, it passes unproved with a line naming what it waited for
+    # (see scripts/beat-cycle.sh). Red for a dependency still to come teaches
+    # people to ignore red. Either way release does not run.
     runs-on: ubuntu-latest
     outputs:
       proved: ${{ steps.cycle.outputs.proved }}
@@ -103,15 +103,31 @@ jobs:
         with:
           name: agent-host-x86_64-unknown-linux-musl
       - run: chmod +x agent-host-x86_64-unknown-linux-musl
-      - uses: aws-actions/configure-aws-credentials@v4
+      - if: vars.AWS_DEPLOY_ROLE != ''
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE }}
           aws-region: us-east-1
       - name: A whole beat cycle against beta
         id: cycle
+        env:
+          AWS_DEPLOY_ROLE: ${{ vars.AWS_DEPLOY_ROLE }}
         run: |
+          if [ -z "$AWS_DEPLOY_ROLE" ]; then
+            echo "::warning::skipped: waiting for vars.AWS_DEPLOY_ROLE to look up beta with; nothing will be released"
+            echo "proved=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # describe-stacks fails for a stack not deployed yet, and prints None
+          # for one without the output: both mean beta is still to come.
           AGENT_HOST_SERVICE_URL=$(aws cloudformation describe-stacks --stack-name AgentService-beta \
-            --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" --output text)
+            --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" --output text) || AGENT_HOST_SERVICE_URL=
+          [ "$AGENT_HOST_SERVICE_URL" = None ] && AGENT_HOST_SERVICE_URL=
+          if [ -z "$AGENT_HOST_SERVICE_URL" ]; then
+            echo "::warning::skipped: waiting for stack AgentService-beta with an ApiUrl output; nothing will be released"
+            echo "proved=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           AGENT_HOST_TOKEN=$(aws secretsmanager get-secret-value \
             --secret-id agent-service/beta/api-token --query SecretString --output text)
           echo "::add-mask::$AGENT_HOST_TOKEN"
