@@ -4,6 +4,10 @@ use std::time::Duration;
 
 use crate::config::Config;
 
+/// The agent-service host contract this beat body matches: `reports` arrived
+/// in 2 (see agent-service `contracts/`). Raise it only with the body.
+pub const CONTRACT: u32 = 2;
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Beat<'a> {
@@ -37,7 +41,15 @@ pub struct Report {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct Unsupported {
+    error: String,
+    minimum: u32,
+}
+
 pub enum Failure {
+    /// The service no longer accepts the contract this host speaks.
+    Unsupported { minimum: u32, error: String },
     /// The service understood the beat and refused this host: it is too old,
     /// or not allowed. Retrying soon will not change the answer.
     Refused(u16, String),
@@ -68,14 +80,21 @@ impl Client {
             .agent
             .post(&self.url)
             .set("Authorization", &self.authorization)
+            .set("fleet-contract", &CONTRACT.to_string())
             .send_json(beat);
         match response {
             Ok(response) => response
                 .into_json()
                 .map_err(|e| Failure::Transient(format!("unreadable reply: {e}"))),
-            Err(ureq::Error::Status(code @ (401 | 403 | 410 | 426), response)) => Err(
-                Failure::Refused(code, response.into_string().unwrap_or_default()),
-            ),
+            Err(ureq::Error::Status(code @ (401 | 403 | 410 | 426), response)) => {
+                let body = response.into_string().unwrap_or_default();
+                Err(match serde_json::from_str::<Unsupported>(&body) {
+                    Ok(Unsupported { error, minimum }) if code == 426 => {
+                        Failure::Unsupported { minimum, error }
+                    }
+                    _ => Failure::Refused(code, body),
+                })
+            }
             Err(ureq::Error::Status(code, response)) => Err(Failure::Transient(format!(
                 "{code} {}",
                 response.into_string().unwrap_or_default()
@@ -170,6 +189,10 @@ mod tests {
 
         assert!(head.starts_with("POST /fleet/hosts/studio/beat "), "{head}");
         assert!(head.contains("Authorization: Bearer secret"), "{head}");
+        assert!(
+            head.contains(&format!("fleet-contract: {CONTRACT}\r\n")),
+            "{head}"
+        );
         let sent: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(
             sent,
@@ -180,17 +203,30 @@ mod tests {
     }
 
     #[test]
-    fn an_old_host_is_refused_with_the_reason() {
+    fn an_unsupported_contract_is_refused_with_the_minimum() {
         let (url, _) = serve_once(
             "426 Upgrade Required",
-            r#"{"error":"host 0.1.0 is too old"}"#,
+            r#"{"error":"This host speaks contract 2, and the oldest this service accepts is 3. Upgrade agent-host.","minimum":3,"current":4}"#,
         );
         match client(url).beat(&Beat {
             host_version: "0.1.0",
             agents: vec![],
             reports: &[],
         }) {
-            Err(Failure::Refused(426, body)) => assert!(body.contains("too old")),
+            Err(Failure::Unsupported { minimum: 3, error }) => assert!(error.contains("Upgrade")),
+            _ => panic!("expected an unsupported contract"),
+        }
+    }
+
+    #[test]
+    fn any_other_refusal_keeps_the_reason() {
+        let (url, _) = serve_once("403 Forbidden", r#"{"error":"not this host"}"#);
+        match client(url).beat(&Beat {
+            host_version: "0.1.0",
+            agents: vec![],
+            reports: &[],
+        }) {
+            Err(Failure::Refused(403, body)) => assert!(body.contains("not this host")),
             _ => panic!("expected a refusal"),
         }
     }

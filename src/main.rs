@@ -2,7 +2,7 @@ mod beat;
 mod config;
 mod sys;
 
-use beat::{Beat, Client, Failure, Report};
+use beat::{Beat, Client, Failure, Report, CONTRACT};
 use std::{env, path::PathBuf, process::ExitCode, thread::sleep, time::Duration};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -69,7 +69,7 @@ fn main() -> ExitCode {
     };
     sys::ignore_hangup();
     log!(
-        "agent-host {VERSION}: host {} beating to {}",
+        "agent-host {VERSION} (contract {CONTRACT}): host {} beating to {}",
         config.host_id,
         config.service_url
     );
@@ -114,6 +114,12 @@ fn run(client: &Client, limit: Option<u64>) -> ExitCode {
             }
             Err(failure) => {
                 let (message, wait) = match failure {
+                    Failure::Unsupported { minimum, error } => (
+                        format!(
+                            "contract {CONTRACT} is unsupported, the service accepts {minimum} and up: {error}"
+                        ),
+                        Duration::from_secs(600),
+                    ),
                     Failure::Refused(code, body) => (
                         format!("refused ({code}): {body}"),
                         Duration::from_secs(600),
