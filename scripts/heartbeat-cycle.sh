@@ -1,21 +1,22 @@
 #!/bin/sh
-# Proves the built binary and the service agree on a whole beat cycle, with the
-# routes the service serves: the host registers by beating, a person places an
-# agent on it, the host takes the start from its next beat's reply, runs it and
-# reports it, a person stops it, and the host takes and reports the stop.
+# Proves the built binary and the service agree on a whole heartbeat cycle, with
+# the routes the service serves: the host registers by sending a heartbeat, a
+# person places an agent on it, the host takes the start from its next
+# heartbeat's reply, runs it and reports it, a person stops it, and the host
+# takes and reports the stop.
 #
-#   AGENT_HOST_SERVICE_URL=… AGENT_HOST_TOKEN=… AGENT_HOST_ID=… beat-cycle.sh BINARY
+#   AGENT_HOST_SERVICE_URL=… AGENT_HOST_TOKEN=… AGENT_HOST_ID=… heartbeat-cycle.sh BINARY
 #
-# Give it an id no run has beaten as before. Its agent is left stopped -- or,
+# Give it an id no run has used before. Its agent is left stopped -- or,
 # should the cycle break first, force-stopped -- so nothing it placed stays
 # active. The agent is a stand-in for Claude Code, under tmux on a
 # socket, config and folders of the run's own, so nothing a real host on the
 # same machine has is read or touched.
 #
-# Writes proved=true|false to $GITHUB_OUTPUT. No service to beat against -- no
-# url, nothing answering at it, or no beat served there yet -- is a dependency
-# still to come, not a failure: it ends green with proved=false, and nothing is
-# released on it. Anything else that goes wrong fails.
+# Writes proved=true|false to $GITHUB_OUTPUT. No service to send heartbeats to
+# -- no url, nothing answering at it, or no heartbeat served there yet -- is a
+# dependency still to come, not a failure: it ends green with proved=false, and
+# nothing is released on it. Anything else that goes wrong fails.
 set -eu
 
 bin=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
@@ -31,7 +32,7 @@ proved() {
   if [ -n "${GITHUB_OUTPUT:-}" ]; then echo "proved=$1" >> "$GITHUB_OUTPUT"; fi
 }
 not_yet() {
-  echo "::warning::$1; the beat cycle is unproved and nothing will be released"
+  echo "::warning::$1; the heartbeat cycle is unproved and nothing will be released"
   proved false
   exit 0
 }
@@ -40,8 +41,9 @@ fail() {
   exit 1
 }
 
-[ -n "$url" ] || not_yet "skipped: waiting for a beta service url to beat against; none was given"
-# Any HTTP answer at all, even an error, means something is there to beat.
+[ -n "$url" ] || not_yet "skipped: waiting for a beta service url to send heartbeats to; none was given"
+# Any HTTP answer at all, even an error, means something is there to send
+# heartbeats to.
 if [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$url/" || true)" = 000 ]; then
   not_yet "skipped: waiting for the beta service at $url to answer; nothing did within 10s"
 fi
@@ -77,29 +79,30 @@ cleanup() {
 }
 trap cleanup EXIT
 
-beat() {
-  if ! "$bin" --beats 1 2> "$log"; then
+heartbeat() {
+  if ! "$bin" --heartbeats 1 2> "$log"; then
     cat "$log"
-    grep -q '^beat failed: 404 ' "$log" && not_yet "the service does not serve POST /fleet/hosts/{id}/heartbeat yet"
-    fail "a beat did not land"
+    grep -q '^heartbeat failed: 404 ' "$log" && not_yet "the service does not serve POST /fleet/hosts/{id}/heartbeat yet"
+    fail "a heartbeat did not land"
   fi
   cat "$log"
 }
 
-beat
+heartbeat
 echo "registered $host"
 
 status=$(api POST /fleet/agents "{\"hostId\":\"$host\",\"workItemId\":null,\"role\":\"ci\",\
-\"createdBy\":null,\"brief\":\"A stand-in, placed by agent-host CI to prove a beat cycle.\"}")
+\"createdBy\":null,\"brief\":\"A stand-in, placed by agent-host CI to prove a heartbeat cycle.\"}")
 [ "$status" = 201 ] || fail "placing an agent on $host: $status $(cat "$out")"
 agent=$(jq -er .id "$out")
 echo "placed $agent"
 
-# One beat's reply carries the start, and the beat after it the report.
-beat
+# One heartbeat's reply carries the start, and the heartbeat after it the
+# report.
+heartbeat
 [ "$(api GET "/fleet/agents/$agent/commands")" = 200 ] || fail "listing $agent's commands: $(cat "$out")"
 start=$(jq -er '.commands[] | select(.command.kind == "start") | .command.id' "$out")
-grep -q "^command $start (start): done$" "$log" || fail "the host did not take start $start from its beat"
+grep -q "^command $start (start): done$" "$log" || fail "the host did not take start $start from its heartbeat"
 delivery=$(jq -r --arg id "$start" '.commands[] | select(.command.id == $id) | .delivery' "$out")
 [ "$delivery" = done ] || fail "start $start is $delivery, not done: $(cat "$out")"
 state=$(agent_is)
@@ -109,8 +112,8 @@ echo "started $agent: start $start reported done, and the agent is running"
 status=$(api POST "/fleet/agents/$agent/stop" '{}')
 [ "$status" = 202 ] || fail "stopping $agent: $status $(cat "$out")"
 stop=$(jq -er .command.id "$out")
-beat
-grep -q "^command $stop (stop): done$" "$log" || fail "the host did not take stop $stop from its beat"
+heartbeat
+grep -q "^command $stop (stop): done$" "$log" || fail "the host did not take stop $stop from its heartbeat"
 state=$(agent_is)
 [ "$state" = "stopped false" ] || fail "agent $agent is '$state' once stopped, not 'stopped false'"
 echo "stopped $agent: stop $stop reported done, and the agent is no longer active"

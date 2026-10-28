@@ -1,7 +1,7 @@
-//! A lead staffing its pod, end to end: this binary beats to the beta service,
-//! a person places a lead on it, and the lead -- Claude Code itself, with only
-//! the standing rules and its credential -- places one agent under itself.
-//! It costs real sessions and a beta host, so it is run by hand:
+//! A lead staffing its pod, end to end: this binary sends heartbeats to the
+//! beta service, a person places a lead on it, and the lead -- Claude Code
+//! itself, with only the standing rules and its credential -- places one agent
+//! under itself. It costs real sessions and a beta host, so it is run by hand:
 //! `cargo test -- --ignored real_claude`. The service is `FLEET_BETA_URL` and
 //! `FLEET_BETA_TOKEN`, or `~/.fleet-beta-url` and `~/.fleet-beta-token`.
 
@@ -132,7 +132,10 @@ fn real_claude_lead_places_one_agent_under_itself_on_beta() {
         .as_array()
         .is_some_and(|hosts| hosts.iter().any(|h| h["id"] == id.as_str()))
     {
-        assert!(Instant::now() < deadline, "host {id} never beat");
+        assert!(
+            Instant::now() < deadline,
+            "host {id} never sent a heartbeat"
+        );
         thread::sleep(Duration::from_secs(2));
     }
 

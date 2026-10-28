@@ -6,8 +6,8 @@
 # AGENT_HOST_TOKEN, else the config file an earlier install wrote, else a
 # prompt. The token is written to that file alone, readable by this user alone.
 # Capacity, labels and repositories come from the environment, else that file;
-# there is no prompt for them, since a host with none still beats, and is
-# offered nothing.
+# there is no prompt for them, since a host with none still sends heartbeats,
+# and is offered nothing.
 set -eu
 
 usage="usage: install-host.sh [install] [--release TAG | --binary PATH]
@@ -267,11 +267,11 @@ install_host() {
   stage=$(mktemp -d)
   trap 'rm -rf "$stage"' EXIT
   fetch
-  # One beat from the new binary before it replaces anything: a host that
+  # One heartbeat from the new binary before it replaces anything: a host that
   # cannot reach the fleet api is not ready, and the one running stays put.
   write_config "$stage/config.toml"
-  "$stage/agent-host" --config "$stage/config.toml" --beats 1 ||
-    die "the new binary could not beat to $url; nothing was replaced"
+  "$stage/agent-host" --config "$stage/config.toml" --heartbeats 1 ||
+    die "the new binary could not send a heartbeat to $url; nothing was replaced"
 
   mkdir -p "$(dirname "$bin")" "$(dirname "$previous")" "$(dirname "$config")"
   mv "$stage/config.toml" "$config"
@@ -283,7 +283,7 @@ install_host() {
   # itself to ~/.local/bin.
   path="$(dirname "$claude"):$(dirname "$(command -v tmux)"):/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
   "service_$(echo "$os" | tr '[:upper:]' '[:lower:]')"
-  say "$("$bin" --version) is running as a service, beating to $url"
+  say "$("$bin" --version) is running as a service, sending heartbeats to $url"
   say "attach from the tailnet: ssh $(id -un)@$ip, then tmux attach"
 }
 

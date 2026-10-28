@@ -5,11 +5,11 @@ use crate::agent::{Agents, Credential, Deliveries, Line, Placement};
 use crate::config::Config;
 use crate::machine::Sample;
 
-/// The agent-service host contract this beat body matches: `reports` arrived
-/// in 2, `labels`, `sessions` and `samples` in 3, and `capacity` in 4 (see
-/// agent-service `contracts/`). Raise it only with the body. At 5 the body is
-/// unchanged, and each `start` comes with the agent's credential. At 6 the
-/// beat is `heartbeat`, `reports` are `commandResults`, `sessions` are gone,
+/// The agent-service host contract this heartbeat body matches: `reports`
+/// arrived in 2, `labels`, `sessions` and `samples` in 3, and `capacity` in 4
+/// (see agent-service `contracts/`). Raise it only with the body. At 5 the body
+/// is unchanged, and each `start` comes with the agent's credential. At 6 the
+/// route is `heartbeat`, `reports` are `commandResults`, `sessions` are gone,
 /// the states are `running` and `waiting`, the reply says `heartbeatInterval`,
 /// and a `start` names its `workItemId`.
 pub const CONTRACT: u32 = 6;
@@ -19,7 +19,7 @@ pub const CONTRACT: u32 = 6;
 /// something says nothing about it rather than sending a zero or an empty list.
 #[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Beat<'a> {
+pub struct Heartbeat<'a> {
     pub host_version: &'a str,
     pub agents: Vec<Present<'a>>,
     pub command_results: &'a [Report],
@@ -27,7 +27,7 @@ pub struct Beat<'a> {
     pub capacity: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub labels: Option<&'a [String]>,
-    /// Samples taken since the last beat that landed.
+    /// Samples taken since the last heartbeat that landed.
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     pub samples: &'a [Sample],
 }
@@ -41,8 +41,8 @@ pub struct Beat<'a> {
 pub struct Present<'a> {
     pub id: String,
     pub state: &'static str,
-    /// What it has done since the last beat that landed, so a transcript can
-    /// be read while the agent is still working.
+    /// What it has done since the last heartbeat that landed, so a transcript
+    /// can be read while the agent is still working.
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     pub transcript: &'a [Line],
 }
@@ -114,9 +114,9 @@ struct Unsupported {
 pub enum Failure {
     /// The service no longer accepts the contract this host speaks.
     Unsupported { minimum: u32, error: String },
-    /// The service refused the beat or this host: it is too old, not allowed,
-    /// or configured with something the service cannot take, such as a label
-    /// it cannot match on. Retrying soon will not change the answer.
+    /// The service refused the heartbeat or this host: it is too old, not
+    /// allowed, or configured with something the service cannot take, such as a
+    /// label it cannot match on. Retrying soon will not change the answer.
     Refused(u16, String),
     /// Anything that might be different on the next try: no network, a
     /// suspended laptop waking, a service mid-deploy.
@@ -143,13 +143,13 @@ impl Client {
         }
     }
 
-    pub fn beat(&self, beat: &Beat) -> Result<Reply, Failure> {
+    pub fn heartbeat(&self, heartbeat: &Heartbeat) -> Result<Reply, Failure> {
         let response = self
             .agent
             .post(&self.url)
             .set("Authorization", &self.authorization)
             .set("fleet-contract", &CONTRACT.to_string())
-            .send_json(beat);
+            .send_json(heartbeat);
         match response {
             Ok(response) => response
                 .into_json()
@@ -273,13 +273,13 @@ mod tests {
             ok: true,
             error: None,
         }];
-        let Ok(reply) = client(url).beat(&Beat {
+        let Ok(reply) = client(url).heartbeat(&Heartbeat {
             host_version: "9.9.9",
             agents: vec![Present::running("a1".into(), false, &[])],
             command_results: &reports,
             ..Default::default()
         }) else {
-            panic!("beat failed")
+            panic!("heartbeat failed")
         };
         let (head, body) = server.join().unwrap();
 
@@ -311,7 +311,7 @@ mod tests {
             "426 Upgrade Required",
             r#"{"error":"This host speaks contract 2, and the oldest this service accepts is 3. Upgrade agent-host.","minimum":3,"current":4}"#,
         );
-        match client(url).beat(&Beat {
+        match client(url).heartbeat(&Heartbeat {
             host_version: "0.1.0",
             ..Default::default()
         }) {
@@ -323,7 +323,7 @@ mod tests {
     #[test]
     fn any_other_refusal_keeps_the_reason() {
         let (url, _) = serve_once("403 Forbidden", r#"{"error":"not this host"}"#);
-        match client(url).beat(&Beat {
+        match client(url).heartbeat(&Heartbeat {
             host_version: "0.1.0",
             ..Default::default()
         }) {
@@ -336,7 +336,7 @@ mod tests {
     fn a_service_error_is_worth_retrying() {
         let (url, _) = serve_once("503 Service Unavailable", "{}");
         assert!(matches!(
-            client(url).beat(&Beat {
+            client(url).heartbeat(&Heartbeat {
                 host_version: "0.1.0",
                 ..Default::default()
             }),
@@ -370,7 +370,7 @@ mod tests {
             text: "hi".into(),
         }];
         assert!(client(url)
-            .beat(&Beat {
+            .heartbeat(&Heartbeat {
                 host_version: "9.9.9",
                 agents: vec![
                     Present::running("a1".into(), false, &lines),
@@ -405,7 +405,7 @@ mod tests {
             disk_total: 100,
         }];
         assert!(client(url)
-            .beat(&Beat {
+            .heartbeat(&Heartbeat {
                 host_version: "9.9.9",
                 capacity: Some(2),
                 labels: Some(&labels),
@@ -431,7 +431,7 @@ mod tests {
     fn what_was_read_as_none_is_sent_as_none() {
         let (url, server) = serve_once("200 OK", "{}");
         assert!(client(url)
-            .beat(&Beat {
+            .heartbeat(&Heartbeat {
                 capacity: Some(0),
                 labels: Some(&[]),
                 ..Default::default()
@@ -448,7 +448,7 @@ mod tests {
         let reason = r#"{"error":"labels.0: Invalid string: must match pattern /^[a-z0-9][a-z0-9:._-]{0,63}$/"}"#;
         let (url, _) = serve_once("400 Bad Request", reason);
         let labels = ["GPU".to_string()];
-        match client(url).beat(&Beat {
+        match client(url).heartbeat(&Heartbeat {
             labels: Some(&labels),
             ..Default::default()
         }) {

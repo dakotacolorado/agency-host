@@ -1,5 +1,6 @@
-//! scripts/beat-cycle.sh must skip, not fail, when there is no beta service to
-//! beat against: CI went red once because it ran against a service not built yet.
+//! scripts/heartbeat-cycle.sh must skip, not fail, when there is no beta
+//! service to send heartbeats to: CI went red once because it ran against a
+//! service not built yet.
 
 use std::fs;
 use std::net::TcpListener;
@@ -12,7 +13,7 @@ struct Run {
     proved: String,
 }
 
-fn beat_cycle(name: &str, service_url: &str) -> Run {
+fn heartbeat_cycle(name: &str, service_url: &str) -> Run {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     fs::create_dir_all(&dir).unwrap();
     let github_output = dir.join("github-output");
@@ -20,7 +21,7 @@ fn beat_cycle(name: &str, service_url: &str) -> Run {
     let out = Command::new("sh")
         .arg(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/scripts/beat-cycle.sh"
+            "/scripts/heartbeat-cycle.sh"
         ))
         .arg(env!("CARGO_BIN_EXE_agent-host"))
         .env("AGENT_HOST_SERVICE_URL", service_url)
@@ -49,7 +50,7 @@ fn silent_url() -> String {
 
 #[test]
 fn skips_when_given_no_service() {
-    let run = beat_cycle("no-service", "");
+    let run = heartbeat_cycle("no-service", "");
     assert!(run.ok, "{}", run.output);
     assert_eq!(run.proved, "proved=false\n");
     assert!(
@@ -62,7 +63,7 @@ fn skips_when_given_no_service() {
 #[test]
 fn skips_when_the_service_does_not_answer() {
     let url = silent_url();
-    let run = beat_cycle("silent-service", &url);
+    let run = heartbeat_cycle("silent-service", &url);
     assert!(run.ok, "{}", run.output);
     assert_eq!(run.proved, "proved=false\n");
     assert!(
