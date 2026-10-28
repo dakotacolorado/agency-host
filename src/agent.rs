@@ -79,11 +79,13 @@ impl Entry {
 }
 
 /// How far into a transcript has been accounted for: the byte after the last
-/// whole line read, and the `seq` of the entry that comes next.
+/// whole line read, the `seq` of the entry that comes next, and whether, as
+/// of that line, the agent's last turn has ended with nothing said to it since.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Cursor {
     pub offset: u64,
     pub seq: u64,
+    pub waiting: bool,
 }
 
 /// The lines read from a transcript, and where the read after this one starts.
@@ -277,7 +279,7 @@ impl Agents {
                 Ok(n) if n > 0 && line.ends_with(b"\n") => {}
                 _ => return false,
             }
-            if found(&claude::read(&String::from_utf8_lossy(&line)).1) {
+            if found(&claude::read(&String::from_utf8_lossy(&line)).entries) {
                 return true;
             }
         }
@@ -315,7 +317,11 @@ impl Agents {
             }
             // Lossy, so a line that is not UTF-8 is passed over rather than
             // holding the cursor in front of it for ever.
-            let (at, entries) = claude::read(&String::from_utf8_lossy(&line));
+            let claude::Read {
+                at,
+                entries,
+                waiting,
+            } = claude::read(&String::from_utf8_lossy(&line));
             let at = at.filter(|at| instant(at)).unwrap_or_else(machine::now);
             let read: Vec<Line> = entries
                 .into_iter()
@@ -335,6 +341,7 @@ impl Agents {
             size += more;
             next.offset += line.len() as u64;
             next.seq += read.len() as u64;
+            next.waiting = waiting.unwrap_or(next.waiting);
             lines.extend(read);
         }
         (next.offset > from.offset).then_some(Batch { lines, next })
@@ -652,11 +659,13 @@ sleep 60
             s.contains(&said("step one"))
         });
         assert_eq!(seen, [told("fix the build"), said("step one")]);
+        assert!(!cursor.waiting, "mid-turn");
 
         agents.say("a1", "use the release branch").unwrap();
         read_until(agents, "a1", &mut seen, &mut cursor, |s| {
             s.contains(&said("which branch?"))
         });
+        assert!(cursor.waiting, "its turn ended on a question");
         assert_eq!(
             seen[2..],
             [told("use the release branch"), said("which branch?")],
@@ -926,6 +935,44 @@ sleep 60
         assert!(host.agents.read("a2", cursor, 1 << 16).is_none());
     }
 
+    #[test]
+    fn an_agent_whose_turn_ended_waits_until_it_is_told_something() {
+        let host = host("turns", FAKE_CLAUDE);
+        let path = transcript(&host, "a4");
+        let cursor = std::cell::Cell::new(Cursor::default());
+        let read = |lines: &[&str]| {
+            for line in lines {
+                append(&path, format!("{line}\n").as_bytes());
+            }
+            cursor.set(host.agents.read("a4", cursor.get(), 1 << 16).unwrap().next);
+            cursor.get().waiting
+        };
+        assert!(
+            !read(&[
+                r#"{"type":"user","message":{"role":"user","content":"fix the build"}}"#,
+                r#"{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","name":"Bash","input":{}}],"stop_reason":"tool_use"}}"#,
+                r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"ok"}]}}"#,
+            ]),
+            "mid-turn"
+        );
+        assert!(
+            read(&[
+                r#"{"type":"assistant","message":{"id":"m2","content":[{"type":"thinking","thinking":""}],"stop_reason":null}}"#,
+                r#"{"type":"assistant","message":{"id":"m2","content":[{"type":"text","text":"Which branch?"}],"stop_reason":"end_turn"}}"#,
+                r#"{"type":"system","subtype":"turn_duration","durationMs":1}"#,
+            ]),
+            "its turn ended and nothing has been said since"
+        );
+        assert!(
+            host.agents.read("a4", cursor.get(), 1 << 16).is_none(),
+            "nothing new: the beat keeps what the cursor says"
+        );
+        assert!(
+            !read(&[r#"{"type":"user","message":{"role":"user","content":"main"}}"#,]),
+            "told something, it is at work again"
+        );
+    }
+
     // The shape of a real Claude Code 2.1 transcript, which opens with lines
     // of its own bookkeeping before the first turn.
     #[test]
@@ -951,7 +998,8 @@ sleep 60
             nothing.next,
             Cursor {
                 offset: opening.len() as u64,
-                seq: 0
+                seq: 0,
+                waiting: false
             },
             "read to the end of the last whole line, and found nothing to say"
         );

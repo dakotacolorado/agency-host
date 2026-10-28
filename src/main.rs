@@ -165,7 +165,7 @@ fn run(
             .map(|id| {
                 let from = cursors.get(&id).copied().unwrap_or_default();
                 let batch = agents.read(&id, from, TRANSCRIPT_PER_AGENT);
-                (id, batch)
+                (id, from, batch)
             })
             .collect();
         if let Some(sample) = meter.sample() {
@@ -179,8 +179,9 @@ fn run(
             host_commit: COMMIT,
             agents: read
                 .iter()
-                .map(|(id, batch)| {
-                    Present::running(id.clone(), batch.as_ref().map_or(&[], |b| &b.lines))
+                .map(|(id, from, batch)| match batch {
+                    Some(batch) => Present::running(id.clone(), batch.next.waiting, &batch.lines),
+                    None => Present::running(id.clone(), from.waiting, &[]),
                 })
                 .collect(),
             reports: &reports,
@@ -195,7 +196,7 @@ fn run(
                 landed += 1;
                 failures = 0;
                 samples.clear();
-                for (id, batch) in &read {
+                for (id, _, batch) in &read {
                     if let Some(batch) = batch {
                         cursors.insert(id.clone(), batch.next);
                     }

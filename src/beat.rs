@@ -39,8 +39,10 @@ pub struct Session {
 }
 
 /// An agent whose session is running here, by the id the service gave it.
-/// Always `working`: whether one that has stopped has finished or is asking is
-/// not something its transcript says, so the host does not guess.
+/// `asking` when its last turn ended and nothing has been said to it since:
+/// it is waiting on someone, whether it ended on a question or on its work
+/// being done, which its transcript does not tell apart, so the host does not
+/// guess which. Otherwise `working`.
 #[derive(Debug, Serialize)]
 pub struct Present<'a> {
     pub id: String,
@@ -52,10 +54,10 @@ pub struct Present<'a> {
 }
 
 impl<'a> Present<'a> {
-    pub fn running(id: String, transcript: &'a [Line]) -> Self {
+    pub fn running(id: String, waiting: bool, transcript: &'a [Line]) -> Self {
         Present {
             id,
-            state: "working",
+            state: if waiting { "asking" } else { "working" },
             transcript,
         }
     }
@@ -272,7 +274,7 @@ mod tests {
         let Ok(reply) = client(url).beat(&Beat {
             host_version: "9.9.9",
             host_commit: "0123abc",
-            agents: vec![Present::running("a1".into(), &[])],
+            agents: vec![Present::running("a1".into(), false, &[])],
             reports: &reports,
             ..Default::default()
         }) else {
@@ -371,8 +373,8 @@ mod tests {
                 host_version: "9.9.9",
                 host_commit: "0123abc",
                 agents: vec![
-                    Present::running("a1".into(), &lines),
-                    Present::running("a2".into(), &[])
+                    Present::running("a1".into(), false, &lines),
+                    Present::running("a2".into(), true, &[])
                 ],
                 ..Default::default()
             })
@@ -385,7 +387,7 @@ mod tests {
                 {"id":"a1","state":"working","transcript":[
                     {"seq":0,"at":"2026-10-27T12:00:00.000Z","from":"agent","text":"hi"}
                 ]},
-                {"id":"a2","state":"working"}
+                {"id":"a2","state":"asking"}
             ])
         );
     }

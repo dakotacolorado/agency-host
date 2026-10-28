@@ -107,7 +107,10 @@ one, named by the id the service gave it, in a folder of its own under
 `$XDG_DATA_HOME/agent-host/agents` (or `~/.local/share/agent-host/agents`). A start the host has already done --
 its session is running, or it has run and left a transcript -- is reported
 done and not repeated, so a host that restarts before reporting does not run
-the agent twice. Every running agent is listed on each beat.
+the agent twice. Every running agent is listed on each beat: `asking` once its
+transcript shows its last turn ended and nothing said to it since -- it is
+waiting on someone, whether on a question or with its work done -- and
+`working` otherwise.
 
 An agent placed for a repository starts in a git worktree of this host's
 checkout of it, at `agents/<id>/<repository>`, on the branch the placement
