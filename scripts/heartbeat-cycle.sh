@@ -101,7 +101,7 @@ printf '#!/bin/sh\nexec sleep 600\n' > "$scratch/bin/claude"
 chmod +x "$scratch/bin/claude"
 export WORKER_HOST_CONFIG="$scratch/config.toml" WORKER_HOST_TMUX_SOCKET="$host" WORKER_HOST_CAPACITY=1
 export WORKER_HOST_WORKERS_DIR="$scratch/home/workers" TMUX_TMPDIR="$sockets" PATH="$scratch/bin:$PATH"
-unset WORKER_HOST_LABELS WORKER_HOST_REPOSITORIES
+unset WORKER_HOST_LABELS
 
 cleanup() {
   if [ -n "$running" ]; then kill "$running" 2> /dev/null || true; fi
@@ -128,7 +128,7 @@ heartbeat
 echo "registered $host"
 
 name=$(echo "ci-$host" | tr -c 'a-z0-9-\n' '-' | cut -c1-40)
-status=$(api POST /fleet/workers "{\"name\":\"$name\",\"role\":\"ci\",\"hostId\":\"$host\",\"repositories\":[]}")
+status=$(api POST /fleet/workers "{\"name\":\"$name\",\"hostId\":\"$host\"}")
 [ "$status" = 201 ] || fail "creating a worker on $host: $status $(cat "$out")"
 worker=$(jq -er '(.worker // .) | .id' "$out")
 echo "created $worker"
