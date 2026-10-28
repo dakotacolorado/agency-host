@@ -80,7 +80,7 @@ person did):
 
 ```sh
 curl -sS "$FLEET_URL/fleet/agents/$AGENT_ID" -H "Authorization: Bearer $FLEET_TOKEN"
-curl -sS "$FLEET_URL/fleet/hosts" -H "Authorization: Bearer $FLEET_TOKEN"   # where there is room
+curl -sS "$FLEET_URL/fleet/hosts" -H "Authorization: Bearer $FLEET_TOKEN"   # which are connected, with room
 ```
 
 To place an agent, as yourself. Its level follows from yours; you do not set
@@ -93,6 +93,9 @@ jq -n --arg me "$AGENT_ID" --arg host "<host id>" --arg item "<work item id>" \
   curl -sS -X POST "$FLEET_URL/fleet/agents" -H "Authorization: Bearer $FLEET_TOKEN" \
     -H 'Content-Type: application/json' --data-binary @-
 ```
+
+For a host with other labels, such as `gpu`, add them as `selector: ["gpu"]`;
+a checkout is asked for with `repository`, not a label.
 
 To message an agent -- one you placed, or the one that placed you. It is
 typed into its session, and its answer comes back into yours the same way:
@@ -119,8 +122,8 @@ curl -sS -X POST "$FLEET_URL/fleet/agents/<agent id>/stop" -H "Authorization: Be
   -H 'Content-Type: application/json' -d '{}'
 ```
 
-Force-stop only one whose host is lost, since that abandons it where it
-stands:
+Force-stop only one whose host is `lost`, since that leaves it where it
+stands and marks it `lost` without the host's word:
 
 ```sh
 curl -sS -X POST "$FLEET_URL/fleet/agents/<agent id>/stop" -H "Authorization: Bearer $FLEET_TOKEN" \

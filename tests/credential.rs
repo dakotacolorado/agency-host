@@ -181,7 +181,7 @@ fn an_agent_has_its_credential_in_its_environment_and_nowhere_else() {
     let requests = requests.lock().unwrap();
     assert!(requests
         .iter()
-        .all(|r| r.contains("fleet-contract: 6\r\n") && r.contains("Bearer the-hosts-own")));
+        .all(|r| r.contains("fleet-contract: 7\r\n") && r.contains("Bearer the-hosts-own")));
     let transcript: Vec<String> = requests
         .iter()
         .filter_map(|r| r.split_once("\r\n\r\n"))

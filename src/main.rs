@@ -180,7 +180,7 @@ fn run(
             samples.push(sample);
         }
         let wait = match client.heartbeat(&Heartbeat {
-            host_version: VERSION,
+            version: VERSION,
             agents: read
                 .iter()
                 .map(|(id, from, batch)| match batch {

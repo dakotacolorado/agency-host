@@ -11,8 +11,11 @@ use crate::machine::Sample;
 /// is unchanged, and each `start` comes with the agent's credential. At 6 the
 /// route is `heartbeat`, `reports` are `commandResults`, `sessions` are gone,
 /// the states are `running` and `waiting`, the reply says `heartbeatInterval`,
-/// and a `start` names its `workItemId`.
-pub const CONTRACT: u32 = 6;
+/// and a `start` names its `workItemId`. At 7 `hostVersion` is `version`; the
+/// service's own words change too (an agent force-stopped is `lost`, a host is
+/// `connected`, `disconnected` or `lost`, and a placement's labels are its
+/// `selector`), none of which a host sends.
+pub const CONTRACT: u32 = 7;
 
 /// Every field but the agents and command results may be left out, and one
 /// left out keeps the value the service last had: a host that could not read
@@ -20,7 +23,7 @@ pub const CONTRACT: u32 = 6;
 #[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Heartbeat<'a> {
-    pub host_version: &'a str,
+    pub version: &'a str,
     pub agents: Vec<Present<'a>>,
     pub command_results: &'a [Report],
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -274,7 +277,7 @@ mod tests {
             error: None,
         }];
         let Ok(reply) = client(url).heartbeat(&Heartbeat {
-            host_version: "9.9.9",
+            version: "9.9.9",
             agents: vec![Present::running("a1".into(), false, &[])],
             command_results: &reports,
             ..Default::default()
@@ -296,7 +299,7 @@ mod tests {
         assert_eq!(
             sent,
             serde_json::json!({
-                "hostVersion":"9.9.9",
+                "version":"9.9.9",
                 "agents":[{"id":"a1","state":"running"}],
                 "commandResults":[{"commandId":"c0","ok":true}]
             })
@@ -312,7 +315,7 @@ mod tests {
             r#"{"error":"This host speaks contract 2, and the oldest this service accepts is 3. Upgrade agent-host.","minimum":3,"current":4}"#,
         );
         match client(url).heartbeat(&Heartbeat {
-            host_version: "0.1.0",
+            version: "0.1.0",
             ..Default::default()
         }) {
             Err(Failure::Unsupported { minimum: 3, error }) => assert!(error.contains("Upgrade")),
@@ -324,7 +327,7 @@ mod tests {
     fn any_other_refusal_keeps_the_reason() {
         let (url, _) = serve_once("403 Forbidden", r#"{"error":"not this host"}"#);
         match client(url).heartbeat(&Heartbeat {
-            host_version: "0.1.0",
+            version: "0.1.0",
             ..Default::default()
         }) {
             Err(Failure::Refused(403, body)) => assert!(body.contains("not this host")),
@@ -337,7 +340,7 @@ mod tests {
         let (url, _) = serve_once("503 Service Unavailable", "{}");
         assert!(matches!(
             client(url).heartbeat(&Heartbeat {
-                host_version: "0.1.0",
+                version: "0.1.0",
                 ..Default::default()
             }),
             Err(Failure::Transient(_))
@@ -371,7 +374,7 @@ mod tests {
         }];
         assert!(client(url)
             .heartbeat(&Heartbeat {
-                host_version: "9.9.9",
+                version: "9.9.9",
                 agents: vec![
                     Present::running("a1".into(), false, &lines),
                     Present::running("a2".into(), true, &[])
@@ -406,7 +409,7 @@ mod tests {
         }];
         assert!(client(url)
             .heartbeat(&Heartbeat {
-                host_version: "9.9.9",
+                version: "9.9.9",
                 capacity: Some(2),
                 labels: Some(&labels),
                 samples: &samples,

@@ -8,8 +8,8 @@
 #   AGENT_HOST_SERVICE_URL=… AGENT_HOST_TOKEN=… AGENT_HOST_ID=… heartbeat-cycle.sh BINARY
 #
 # Give it an id no run has used before. Its agent is left stopped -- or,
-# should the cycle break first, force-stopped -- so nothing it placed stays
-# active. The agent is a stand-in for Claude Code, under tmux on a
+# should the cycle break first, force-stopped and so `lost` -- so nothing it
+# placed stays active. The agent is a stand-in for Claude Code, under tmux on a
 # socket, config and folders of the run's own, so nothing a real host on the
 # same machine has is read or touched.
 #
@@ -71,7 +71,12 @@ unset AGENT_HOST_LABELS AGENT_HOST_REPOSITORIES
 cleanup() {
   if [ -n "$agent" ] && [ "$(agent_is 2> /dev/null | cut -d' ' -f2)" = true ]; then
     api POST "/fleet/agents/$agent/stop" '{"force":true}' > /dev/null || true
-    echo "force-stopped $agent, which was still active"
+    left=$(agent_is 2> /dev/null || true)
+    if [ "$left" = "lost false" ]; then
+      echo "force-stopped $agent, which was still active; it is lost"
+    else
+      echo "::warning::force-stopped $agent, which was still active, and it is '$left', not 'lost false'"
+    fi
   fi
   api DELETE "/fleet/hosts/$host" > /dev/null || true
   tmux -L "$host" kill-server 2> /dev/null || true

@@ -61,8 +61,9 @@ tmux_socket = "agent-host"  # AGENT_HOST_TMUX_SOCKET; this is the default
 ```
 
 `capacity` is how many agents this host will run at once, and `labels` what work
-it can be matched to. Both are the owner's to say: a host with no capacity still
-sends heartbeats, but the service places nothing on it. A label the service
+it can be matched to, by a placement's `selector`. Both are the owner's to say:
+a host with no capacity still sends heartbeats, but the service places nothing
+on it. A label the service
 cannot match on is refused with the pattern it must match, and the host logs
 that refusal and waits rather than sending heartbeats without it. `repositories`
 are the checkouts on this machine that agents can be given a worktree of, by the
