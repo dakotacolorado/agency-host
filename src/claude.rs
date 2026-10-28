@@ -248,7 +248,7 @@ pub fn read(line: &str) -> (Option<String>, Vec<Entry>) {
     (at, entries)
 }
 
-fn cut(text: &str) -> String {
+pub fn cut(text: &str) -> String {
     match text.char_indices().nth(LONGEST) {
         Some((at, _)) => format!("{}…", &text[..at]),
         None => text.to_string(),

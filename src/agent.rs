@@ -8,7 +8,7 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::claude::{self, Claude};
 use crate::machine;
@@ -220,9 +220,67 @@ impl Agents {
     /// waiting. Working, it takes the text at its next step rather than when it
     /// has finished; waiting on a question, the text is the answer and the same
     /// run goes on. There is one way in, whoever is speaking: a person, the
-    /// agent above it, or an answer.
+    /// agent above it, or an answer. A message carried for the service goes
+    /// through `Deliveries`, which waits until the session is listening.
     pub fn say(&self, id: &str, text: &str) -> Result<(), String> {
         self.tmux.type_in(&self.running(id)?, text)
+    }
+
+    /// Whether Claude Code has answered anything in the transcript. Until it
+    /// has, it may still be starting, and what is typed into its terminal then
+    /// is lost without a trace.
+    fn listening(&self, id: &str) -> bool {
+        self.scan(id, 0, |entries| {
+            entries
+                .iter()
+                .any(|e| matches!(e, Entry::Said { .. } | Entry::Ran { .. }))
+        })
+    }
+
+    /// Where the transcript ends now, so what is written after can be told apart.
+    fn end(&self, id: &str) -> u64 {
+        self.claude
+            .transcript(&claude::session_id(id))
+            .and_then(|path| fs::metadata(path).ok())
+            .map_or(0, |m| m.len())
+    }
+
+    /// Whether the agent has been told `text` since `offset`, as typed or as
+    /// Claude Code trimmed it.
+    fn told_since(&self, id: &str, offset: u64, text: &str) -> bool {
+        let typed = [claude::cut(text), claude::cut(text.trim())];
+        self.scan(id, offset, |entries| {
+            entries
+                .iter()
+                .any(|e| matches!(e, Entry::Told { text } if typed.contains(text)))
+        })
+    }
+
+    /// Whether `found` holds of any whole line of the transcript after `offset`.
+    /// A line cut through by `offset` reads as nothing.
+    fn scan(&self, id: &str, offset: u64, found: impl Fn(&[Entry]) -> bool) -> bool {
+        let Some(mut file) = self
+            .claude
+            .transcript(&claude::session_id(id))
+            .and_then(|path| File::open(path).ok())
+        else {
+            return false;
+        };
+        if file.seek(SeekFrom::Start(offset)).is_err() {
+            return false;
+        }
+        let mut raw = BufReader::new(file).take(RAW_LIMIT);
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            match raw.read_until(b'\n', &mut line) {
+                Ok(n) if n > 0 && line.ends_with(b"\n") => {}
+                _ => return false,
+            }
+            if found(&claude::read(&String::from_utf8_lossy(&line)).1) {
+                return true;
+            }
+        }
     }
 
     /// Stops the turn the agent is in, as Escape does for a person at its
@@ -280,6 +338,126 @@ impl Agents {
             lines.extend(read);
         }
         (next.offset > from.offset).then_some(Batch { lines, next })
+    }
+}
+
+/// How long a message may take to reach its agent before it is reported
+/// failed: well inside the five minutes after which the service withdraws a
+/// command its host has not reported, so the failure is still heard.
+pub const PATIENCE: Duration = Duration::from_secs(120);
+
+/// Messages carried to agents and not yet settled. Each is typed once its
+/// session is listening, and is done only once the transcript shows the agent
+/// was told it: a message typed into a terminal nobody is reading yet is
+/// accepted by tmux and then lost. Held in memory, so a host that restarts
+/// mid-delivery types a message the service sends again a second time.
+pub struct Deliveries {
+    held: Vec<Delivery>,
+    patience: Duration,
+}
+
+struct Delivery {
+    command: String,
+    agent: String,
+    text: String,
+    since: Instant,
+    /// Where the transcript ended when it was typed, once it has been.
+    typed: Option<u64>,
+}
+
+impl Deliveries {
+    pub fn new(patience: Duration) -> Self {
+        Deliveries {
+            held: Vec::new(),
+            patience,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.held.is_empty()
+    }
+
+    /// Whether `command` is already being delivered. The service sends a
+    /// command again on every beat until it is reported, and a message typed
+    /// twice is said twice.
+    pub fn holds(&self, command: &str) -> bool {
+        self.held.iter().any(|d| d.command == command)
+    }
+
+    /// Takes a message to deliver, typing it at once if the agent is
+    /// listening. What happened to it, if that is already known.
+    pub fn hold(
+        &mut self,
+        agents: &Agents,
+        command: &str,
+        agent: &str,
+        text: &str,
+    ) -> Option<Result<(), String>> {
+        if let Err(e) = agents.running(agent) {
+            return Some(Err(e));
+        }
+        let mut delivery = Delivery {
+            command: command.into(),
+            agent: agent.into(),
+            text: text.into(),
+            since: Instant::now(),
+            typed: None,
+        };
+        let done = delivery.step(agents, self.patience);
+        if done.is_none() {
+            self.held.push(delivery);
+        }
+        done
+    }
+
+    /// Moves every held message on, and hands back, by command, those that
+    /// have reached their agent or never will.
+    pub fn settle(&mut self, agents: &Agents) -> Vec<(String, Result<(), String>)> {
+        let patience = self.patience;
+        let mut settled = Vec::new();
+        self.held.retain_mut(|d| match d.step(agents, patience) {
+            Some(result) => {
+                settled.push((d.command.clone(), result));
+                false
+            }
+            None => true,
+        });
+        settled
+    }
+}
+
+impl Delivery {
+    fn step(&mut self, agents: &Agents, patience: Duration) -> Option<Result<(), String>> {
+        if let Some(offset) = self.typed {
+            if agents.told_since(&self.agent, offset, &self.text) {
+                return Some(Ok(()));
+            }
+        }
+        if let Err(e) = agents.running(&self.agent) {
+            return Some(Err(e));
+        }
+        if self.typed.is_none() && agents.listening(&self.agent) {
+            let offset = agents.end(&self.agent);
+            if let Err(e) = agents.say(&self.agent, &self.text) {
+                return Some(Err(e));
+            }
+            self.typed = Some(offset);
+        }
+        if self.since.elapsed() < patience {
+            return None;
+        }
+        let waited = patience.as_secs();
+        Some(Err(match self.typed {
+            None => format!(
+                "{} was not yet reading input after {waited}s, so the message was never typed",
+                self.agent
+            ),
+            Some(_) => format!(
+                "typed to {}, but not in its transcript after {waited}s: it may still take it \
+                 at its next step",
+                self.agent
+            ),
+        }))
     }
 }
 
@@ -348,6 +526,33 @@ while IFS= read -r line; do
   w "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"$line\"}}"
   w "{\"type\":\"assistant\",\"message\":{\"id\":\"m$n\",\"content\":[{\"type\":\"text\",\"text\":\"on $line\"}],\"stop_reason\":\"end_turn\"}}"
 done
+"#;
+
+    /// Stands in for Claude Code as it starts: what is typed before it is up
+    /// is thrown away, as a terminal switched into raw mode discards it.
+    const DEAF_CLAUDE: &str = r#"#!/bin/sh
+dir="$CLAUDE_CONFIG_DIR/projects/-fake"; mkdir -p "$dir"; t="$dir/$3.jsonl"
+w() { printf '%s\n' "$1" >> "$t"; }
+sleep 1
+stty -icanon min 0 time 0; cat > /dev/null; stty icanon
+w '{"type":"user","message":{"role":"user","content":"wait to be told"}}'
+w '{"type":"assistant","message":{"id":"m0","content":[{"type":"text","text":"waiting"}],"stop_reason":"end_turn"}}'
+n=0
+while IFS= read -r line; do
+  n=$((n+1))
+  w "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"$line\"}}"
+  w "{\"type\":\"assistant\",\"message\":{\"id\":\"m$n\",\"content\":[{\"type\":\"text\",\"text\":\"on $line\"}],\"stop_reason\":\"end_turn\"}}"
+done
+"#;
+
+    /// Never gets far enough to write a transcript.
+    const STUCK_CLAUDE: &str = "#!/bin/sh\nsleep 60\n";
+
+    /// Answers once and then never reads what is typed to it.
+    const AWAY_CLAUDE: &str = r#"#!/bin/sh
+dir="$CLAUDE_CONFIG_DIR/projects/-fake"; mkdir -p "$dir"; t="$dir/$3.jsonl"
+printf '%s\n' '{"type":"assistant","message":{"id":"m0","content":[{"type":"text","text":"busy"}],"stop_reason":"tool_use"}}' >> "$t"
+sleep 60
 "#;
 
     struct Host {
@@ -474,7 +679,8 @@ done
             r#"{"id":"c1","kind":"start","agentId":"a1","ticketId":null,"role":"worker","level":1,"createdBy":null}"#,
         )
         .unwrap();
-        let report = crate::beat::take(&command, &host.agents);
+        let report =
+            crate::beat::take(&command, &host.agents, &mut Deliveries::new(PATIENCE)).unwrap();
         assert!(report.ok, "{report:?}");
         assert_eq!(host.agents.ids(), ["a1"]);
         assert!(host.dir.join("agents/a1").is_dir());
@@ -513,6 +719,111 @@ done
             ]
         );
         assert_eq!(agents.ids(), ["a1"], "the session outlives the interrupt");
+    }
+
+    /// Settles `deliveries` until nothing is held, and says how each ended.
+    fn settle_all(
+        agents: &Agents,
+        deliveries: &mut Deliveries,
+    ) -> Vec<(String, Result<(), String>)> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut settled = vec![];
+        while !deliveries.is_empty() {
+            assert!(Instant::now() < deadline, "never settled");
+            settled.extend(deliveries.settle(agents));
+            thread::sleep(Duration::from_millis(50));
+        }
+        settled
+    }
+
+    fn command(json: &str) -> crate::beat::Command {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn a_message_taken_with_its_agents_start_waits_until_it_listens() {
+        let host = host("deaf", DEAF_CLAUDE);
+        let agents = &host.agents;
+        let mut deliveries = Deliveries::new(PATIENCE);
+        // One beat's commands, taken one after the other.
+        let start = command(r#"{"id":"c1","kind":"start","agentId":"a1"}"#);
+        let message = command(r#"{"id":"c2","kind":"message","agentId":"a1","text":"hello"}"#);
+        let started = crate::beat::take(&start, agents, &mut deliveries).unwrap();
+        assert!(started.ok, "{started:?}");
+        assert_eq!(
+            crate::beat::take(&message, agents, &mut deliveries),
+            None,
+            "not reported while it cannot yet be heard"
+        );
+        assert_eq!(
+            crate::beat::take(&message, agents, &mut deliveries),
+            None,
+            "sent again by the service, it is not typed twice"
+        );
+
+        assert_eq!(
+            settle_all(agents, &mut deliveries),
+            [("c2".to_string(), Ok(()))]
+        );
+        let (mut seen, mut cursor) = (vec![], Cursor::default());
+        read_until(agents, "a1", &mut seen, &mut cursor, |s| {
+            s.contains(&said("on hello"))
+        });
+        assert_eq!(seen.iter().filter(|e| **e == told("hello")).count(), 1);
+    }
+
+    #[test]
+    fn a_message_is_done_only_once_it_is_in_the_transcript() {
+        let host = host("delivered", FAKE_CLAUDE);
+        let agents = &host.agents;
+        agents.start("a1", &brief("fix the build")).unwrap();
+        let (mut seen, mut cursor) = (vec![], Cursor::default());
+        read_until(agents, "a1", &mut seen, &mut cursor, |s| {
+            s.contains(&said("step one"))
+        });
+
+        // Typed at once, but taken only at its next step, a second from now.
+        let mut deliveries = Deliveries::new(PATIENCE);
+        assert_eq!(deliveries.hold(agents, "c1", "a1", "use main"), None);
+        assert_eq!(deliveries.settle(agents), []);
+        let end = agents.end("a1");
+        assert!(!agents.told_since("a1", 0, "use main"), "not there yet");
+
+        assert_eq!(
+            settle_all(agents, &mut deliveries),
+            [("c1".to_string(), Ok(()))]
+        );
+        assert!(
+            agents.told_since("a1", end, "use main"),
+            "in the transcript when it was reported"
+        );
+    }
+
+    #[test]
+    fn a_message_that_cannot_be_delivered_in_time_fails_with_why() {
+        let patience = Duration::from_millis(300);
+
+        let stuck = host("stuck", STUCK_CLAUDE);
+        stuck.agents.start("a1", &Placement::default()).unwrap();
+        let mut deliveries = Deliveries::new(patience);
+        assert_eq!(deliveries.hold(&stuck.agents, "c1", "a1", "hello"), None);
+        let [(_, Err(why))] = &settle_all(&stuck.agents, &mut deliveries)[..] else {
+            panic!("expected one failure")
+        };
+        assert!(why.contains("never typed"), "{why}");
+
+        let away = host("away", AWAY_CLAUDE);
+        away.agents.start("a1", &Placement::default()).unwrap();
+        let (mut seen, mut cursor) = (vec![], Cursor::default());
+        read_until(&away.agents, "a1", &mut seen, &mut cursor, |s| {
+            !s.is_empty()
+        });
+        let mut deliveries = Deliveries::new(patience);
+        assert_eq!(deliveries.hold(&away.agents, "c1", "a1", "hello"), None);
+        let [(_, Err(why))] = &settle_all(&away.agents, &mut deliveries)[..] else {
+            panic!("expected one failure")
+        };
+        assert!(why.contains("not in its transcript"), "{why}");
     }
 
     #[test]

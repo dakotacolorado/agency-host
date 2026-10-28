@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-use crate::agent::{Agents, Line, Placement};
+use crate::agent::{Agents, Deliveries, Line, Placement};
 use crate::config::Config;
 use crate::machine::Sample;
 
@@ -97,6 +97,16 @@ pub struct Report {
     pub error: Option<String>,
 }
 
+impl Report {
+    pub fn new(command_id: String, error: Option<String>) -> Self {
+        Report {
+            command_id,
+            ok: error.is_none(),
+            error,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct Unsupported {
     error: String,
@@ -163,10 +173,15 @@ impl Client {
 
 /// A kind the host does not handle is reported by name rather than dropped,
 /// so the sender learns the command went nowhere. `ping` does nothing and
-/// succeeds, so a whole cycle can be proved without an agent.
-pub fn take(command: &Command, agents: &Agents) -> Report {
+/// succeeds, so a whole cycle can be proved without an agent. A message is
+/// reported once it reaches its agent, by `Deliveries::settle`, so none is
+/// reported here while it is on its way.
+pub fn take(command: &Command, agents: &Agents, deliveries: &mut Deliveries) -> Option<Report> {
     let agent = command.agent_id.as_deref();
     let text = command.text.as_deref();
+    if deliveries.holds(&command.id) {
+        return None;
+    }
     let error = match (command.kind.as_str(), agent) {
         ("ping", _) => None,
         ("start", Some(agent)) => agents
@@ -181,7 +196,7 @@ pub fn take(command: &Command, agents: &Agents) -> Report {
             .err(),
         ("interrupt", Some(agent)) => agents.interrupt(agent, text).err(),
         ("message", Some(agent)) => match text {
-            Some(text) => agents.say(agent, text).err(),
+            Some(text) => deliveries.hold(agents, &command.id, agent, text)?.err(),
             None => Some("a message needs text".into()),
         },
         (kind @ ("start" | "interrupt" | "message"), None) => {
@@ -189,11 +204,7 @@ pub fn take(command: &Command, agents: &Agents) -> Report {
         }
         (kind, _) => Some(format!("this host does not handle {kind:?} commands")),
     };
-    Report {
-        command_id: command.id.clone(),
-        ok: error.is_none(),
-        error,
-    }
+    Some(Report::new(command.id.clone(), error))
 }
 
 #[cfg(test)]
@@ -341,6 +352,11 @@ mod tests {
         )
     }
 
+    /// Takes a command that is settled as soon as it is taken.
+    fn take_now(command: &Command) -> Report {
+        take(command, &no_agents(), &mut Deliveries::new(Duration::ZERO)).unwrap()
+    }
+
     #[test]
     fn a_beat_carries_what_agents_did_in_each_agents_report() {
         let (url, server) = serve_once("200 OK", "{}");
@@ -451,7 +467,7 @@ mod tests {
         let command: Command =
             serde_json::from_str(r#"{"id":"c1","kind":"message","agentId":"a9","text":"hi"}"#)
                 .unwrap();
-        let report = take(&command, &no_agents());
+        let report = take_now(&command);
         assert!(!report.ok);
         assert!(report.error.unwrap().contains("no agent a9"));
     }
@@ -459,13 +475,13 @@ mod tests {
     #[test]
     fn a_message_without_its_fields_is_refused() {
         let command: Command = serde_json::from_str(r#"{"id":"c1","kind":"message"}"#).unwrap();
-        assert!(!take(&command, &no_agents()).ok);
+        assert!(!take_now(&command).ok);
     }
 
     #[test]
     fn an_unhandled_command_is_reported_not_dropped() {
         let command: Command = serde_json::from_str(r#"{"id":"c1","kind":"stop"}"#).unwrap();
-        let report = take(&command, &no_agents());
+        let report = take_now(&command);
         assert_eq!(report.command_id, "c1");
         assert!(!report.ok);
         assert_eq!(
@@ -478,7 +494,7 @@ mod tests {
     fn a_start_that_fails_is_reported_with_its_reason() {
         let command: Command =
             serde_json::from_str(r#"{"id":"c1","kind":"start","agentId":"a1"}"#).unwrap();
-        let report = take(&command, &no_agents());
+        let report = take_now(&command);
         assert!(!report.ok);
         assert!(
             report.error.unwrap().contains("not installed"),
@@ -492,7 +508,7 @@ mod tests {
             let command: Command =
                 serde_json::from_str(&format!(r#"{{"id":"c1","kind":"{kind}","text":"hi"}}"#))
                     .unwrap();
-            let report = take(&command, &no_agents());
+            let report = take_now(&command);
             assert_eq!(
                 report.error.as_deref(),
                 Some(format!("{kind:?} needs an agentId").as_str())
@@ -504,7 +520,7 @@ mod tests {
     fn an_interrupt_for_an_agent_not_here_is_reported() {
         let command: Command =
             serde_json::from_str(r#"{"id":"c1","kind":"interrupt","agentId":"a9"}"#).unwrap();
-        let report = take(&command, &no_agents());
+        let report = take_now(&command);
         assert!(!report.ok);
         assert!(report.error.unwrap().contains("no agent a9"));
     }
@@ -513,7 +529,7 @@ mod tests {
     fn a_ping_succeeds() {
         let command: Command = serde_json::from_str(r#"{"id":"c1","kind":"ping"}"#).unwrap();
         assert_eq!(
-            take(&command, &no_agents()),
+            take_now(&command),
             Report {
                 command_id: "c1".into(),
                 ok: true,

@@ -130,9 +130,12 @@ locked so that `git worktree prune` in the checkout cannot take it by
 accident. Removing one is deliberate:
 `git -C <checkout> worktree remove --force --force <workspace>`.
 
-A message is typed into the session at once; Claude Code takes it at its next
-step, or, if the agent has stopped to ask, as the answer, and the same run goes
-on. An `interrupt` presses Escape in the session, which stops the turn the
+A message is typed into the session once Claude Code is listening -- once it
+has answered something in its transcript, since what is typed while it starts
+is lost -- and reported done only when the transcript shows the agent was told
+it. Claude Code takes it at its next step, or, if the agent has stopped to ask,
+as the answer, and the same run goes on. One not delivered within two minutes
+is reported failed with why: never typed, or typed and not yet taken. An `interrupt` presses Escape in the session, which stops the turn the
 agent is in, mid-command if need be, without ending the session; any text it
 carries is typed in once the turn has stopped. The host reads the session's
 transcript as it is written and sends it up on each beat, in that agent's
