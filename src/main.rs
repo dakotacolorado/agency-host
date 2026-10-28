@@ -1,51 +1,72 @@
-mod agent;
 mod claude;
+mod commands;
 mod config;
 mod heartbeat;
+mod home;
 mod machine;
+mod protocol;
+mod socket;
 mod sys;
 mod tmux;
+mod worker;
 mod workspace;
 
-use agent::{Agents, Deliveries};
+use commands::Taken;
 use config::Config;
-use heartbeat::{Client, Failure, Heartbeat, Present, Report, CONTRACT};
+use heartbeat::{Client, Failure, Heartbeat, CONTRACT};
 use machine::{Meter, Sample};
+use protocol::{line_reports, Command, CommandReport, Line, Up, WorkerReport};
+use socket::Socket;
 use std::collections::HashMap;
-use std::{env, path::PathBuf, process::ExitCode, thread::sleep, time::Duration};
+use std::time::{Duration, Instant};
+use std::{env, path::PathBuf, process::ExitCode, thread::sleep};
+use worker::{Cursor, Deliveries, Workers};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// A commit, or `dirty` or `unknown`; see build.rs.
-const COMMIT: &str = env!("AGENT_HOST_COMMIT");
+const COMMIT: &str = env!("WORKER_HOST_COMMIT");
 
-/// Bytes of transcript lines one agent may add to a heartbeat. Transcripts are
-/// unbounded and bursty, and a heartbeat grown until it fails loses liveness
-/// for the sake of logs; what does not fit goes on the next heartbeat.
-const TRANSCRIPT_PER_AGENT: usize = 32 << 10;
+/// Bytes of transcript lines one worker may add to a heartbeat. Transcripts
+/// are unbounded and bursty, and a heartbeat grown until it fails loses
+/// liveness for the sake of logs; what does not fit goes on the next one.
+const TRANSCRIPT_PER_WORKER: usize = 32 << 10;
 
-/// How soon to send the next heartbeat while a message is on its way, so it is
-/// typed soon after its agent starts listening and reported soon after it
-/// arrives.
+/// Bytes of transcript lines in one report on the socket, for every worker
+/// together. API Gateway takes a frame of 32 KB at most, and tungstenite
+/// sends a message as one frame.
+const TRANSCRIPT_PER_PUSH: usize = 20 << 10;
+
+/// How often the host looks at what its workers are doing, so that a change
+/// is on the socket within about this long.
+const TICK: Duration = Duration::from_secs(1);
+
+/// How soon to send the next heartbeat while a message is on its way and the
+/// socket is down, so it is typed soon after its worker starts listening and
+/// reported soon after it arrives.
 const DELIVERING: Duration = Duration::from_secs(2);
 
-/// Samples kept while heartbeats are failing, the most a heartbeat may carry. A
-/// host cut off for longer loses its oldest, which a chart of load can spare.
+/// Samples kept while heartbeats are failing, the most a heartbeat may carry.
+/// A host cut off for longer loses its oldest, which a chart of load can
+/// spare.
 const SAMPLES_KEPT: usize = 1000;
 
-const USAGE: &str = "usage: agent-host [--config PATH] [--heartbeats N]
+const USAGE: &str = "usage: worker-host [--config PATH] [--heartbeats N]
 
-  --config PATH   config file (default $XDG_CONFIG_HOME/agent-host/config.toml,
-                  or ~/.config/agent-host/config.toml); AGENT_HOST_CONFIG also names it
-  --heartbeats N  stop after N heartbeats, failing on the first one that does not land
+  --config PATH   config file (default $XDG_CONFIG_HOME/worker-host/config.toml,
+                  or ~/.config/worker-host/config.toml); WORKER_HOST_CONFIG also names it
+  --heartbeats N  stop after N heartbeats, failing on the first one that does not land;
+                  heartbeats alone, with no socket
 
 Settings, each overriding the file:
-  AGENT_HOST_SERVICE_URL  service_url  the agent-service to send heartbeats to
-  AGENT_HOST_TOKEN        token
-  AGENT_HOST_ID           host_id      defaults to the hostname
-  AGENT_HOST_CAPACITY     capacity     how many agents this host will run; unset, none are placed here
-  AGENT_HOST_LABELS       labels       what it can run, comma-separated (a list in the file)
-  AGENT_HOST_REPOSITORIES repositories the checkouts an agent can be given a worktree of,
-                                       as name=/path,... (a table in the file)";
+  WORKER_HOST_SERVICE_URL  service_url  the worker-service to send heartbeats to
+  WORKER_HOST_TOKEN        token
+  WORKER_HOST_ID           host_id      defaults to the hostname
+  WORKER_HOST_CAPACITY     capacity     how many workers this host will run sessions for
+  WORKER_HOST_LABELS       labels       what it can run, comma-separated (a list in the file)
+  WORKER_HOST_REPOSITORIES repositories the checkouts a worker can be given a worktree of,
+                                        as name=/path,... (a table in the file)
+  WORKER_HOST_WORKERS_DIR  workers_dir  where workers' folders are (default ~/workers)
+  WORKER_HOST_TMUX_SOCKET  tmux_socket  the tmux server sessions run on (default worker-host)";
 
 struct Args {
     config: Option<PathBuf>,
@@ -54,7 +75,7 @@ struct Args {
 
 fn parse(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut parsed = Args {
-        config: env::var_os("AGENT_HOST_CONFIG").map(PathBuf::from),
+        config: env::var_os("WORKER_HOST_CONFIG").map(PathBuf::from),
         heartbeats: None,
     };
     while let Some(arg) = args.next() {
@@ -69,10 +90,10 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
             }
             "--version" => {
                 // The commit goes last and stays last: two CI steps read this
-                // line with `grep -qx "agent-host .* $GITHUB_SHA"`, so anything
-                // added after the commit breaks the check that the binary on a
-                // bare machine is the one the workflow just built.
-                println!("agent-host {VERSION} (contract {CONTRACT}) {COMMIT}");
+                // line with `grep -qx "worker-host .* $GITHUB_SHA"`, so
+                // anything added after the commit breaks the check that the
+                // binary on a bare machine is the one the workflow just built.
+                println!("worker-host {VERSION} (contract {CONTRACT}) {COMMIT}");
                 std::process::exit(0);
             }
             "--help" | "-h" => {
@@ -96,173 +117,293 @@ fn main() -> ExitCode {
     let config = match config::load(args.config, |k| env::var(k).ok()) {
         Ok(config) => config,
         Err(e) => {
-            log!("agent-host: {e}");
+            log!("worker-host: {e}");
             return ExitCode::from(2);
         }
     };
     sys::ignore_hangup();
     log!(
-        "agent-host {VERSION} {COMMIT} (contract {CONTRACT}): host {} sending heartbeats to {}",
+        "worker-host {VERSION} {COMMIT} (contract {CONTRACT}): host {} sending heartbeats to {}",
         config.host_id,
         config.service_url
     );
     match config.capacity {
         Some(n) => log!(
-            "will run {n} agents, labelled {}",
+            "will run sessions for {n} workers, labelled {}",
             config.labels.as_deref().unwrap_or_default().join(", ")
         ),
-        None => log!("no capacity set: the service will place no agent here until one is"),
+        None => log!("no capacity set: the service will put no worker here until one is"),
     }
-    let Some(home) = config::agents_dir() else {
-        log!("agent-host: no HOME or XDG_DATA_HOME to keep agents' folders in");
-        return ExitCode::from(2);
-    };
     log!(
-        "agents run on tmux socket {0}: tmux -L {0} ls",
+        "workers are in {0}, their sessions on tmux socket {1}: tmux -L {1} ls",
+        config.workers_dir.display(),
         config.tmux_socket
     );
-    let mut meter = Meter::new(home.clone());
-    let agents = Agents::new(
+    let mut meter = Meter::new(config.workers_dir.clone());
+    let workers = Workers::new(
         tmux::Tmux::new(&config.tmux_socket),
         claude::Claude::from_env(|k| env::var(k).ok()),
-        home,
+        config.workers_dir.clone(),
         config.repositories.clone(),
         config.service_url.clone(),
     );
+    for (name, state) in workers.reconcile() {
+        let state = serde_json::to_value(state).unwrap_or_default();
+        log!("worker {name}: {}", state.as_str().unwrap_or_default());
+    }
+    // A run counted in heartbeats proves the heartbeat alone; one that runs
+    // on keeps the socket open beside it.
+    let socket = args
+        .heartbeats
+        .is_none()
+        .then(|| Socket::spawn(&config.host_id, &config.token));
     run(
         &Client::new(&config),
         &config,
-        &agents,
+        &workers,
         &mut meter,
+        socket.as_ref(),
         args.heartbeats,
     )
 }
 
-/// Assumes nothing survives between heartbeats but what is in memory: the
-/// machine may sleep for weeks between two iterations, and the next heartbeat
-/// is simply late. Reports and transcript that did not land are sent again on
-/// the next heartbeat. A host that restarts sends each transcript again from
-/// its start; the `seq` on each line says it is the same.
+/// Reports not yet heard by the service: those for the heartbeat until one
+/// lands, and those for the socket until they are sent on it.
+#[derive(Default)]
+struct Unheard {
+    heartbeat: Vec<CommandReport>,
+    socket: Vec<CommandReport>,
+}
+
+impl Unheard {
+    fn add(&mut self, report: CommandReport) {
+        for list in [&mut self.heartbeat, &mut self.socket] {
+            if !list.iter().any(|r| r.command_id == report.command_id) {
+                list.push(report.clone());
+            }
+        }
+    }
+}
+
+fn take(
+    command: &Command,
+    workers: &Workers,
+    deliveries: &mut Deliveries,
+    taken: &mut Taken,
+    unheard: &mut Unheard,
+) {
+    let fresh = !deliveries.holds(&command.id) && !taken.knows(&command.id);
+    match taken.take(command, workers, deliveries) {
+        Some(report) => {
+            if fresh {
+                log!(
+                    "command {} ({}): {}",
+                    command.id,
+                    command.kind,
+                    report.error.as_deref().unwrap_or("done")
+                );
+            }
+            unheard.add(report);
+        }
+        None if fresh => log!("command {} ({}): on its way", command.id, command.kind),
+        None => {}
+    }
+}
+
+/// Assumes nothing survives between iterations but what is in memory, the
+/// workers' folders and tmux: the machine may sleep for weeks between two,
+/// and the next heartbeat is simply late. Reports and transcript that did not
+/// land are sent again on the next heartbeat. A host that restarts sends each
+/// transcript again from its start; the `seq` on each line says it is the
+/// same.
 fn run(
     client: &Client,
     config: &Config,
-    agents: &Agents,
+    workers: &Workers,
     meter: &mut Meter,
+    socket: Option<&Socket>,
     limit: Option<u64>,
 ) -> ExitCode {
-    let mut reports: Vec<Report> = Vec::new();
+    let mut unheard = Unheard::default();
     let mut samples: Vec<Sample> = Vec::new();
-    let mut cursors: HashMap<String, agent::Cursor> = HashMap::new();
-    let mut deliveries = Deliveries::new(agent::PATIENCE);
+    // How far each worker's transcript has been sent in a heartbeat that
+    // landed, and how far it has been read to tell what the worker is doing
+    // and to send on the socket.
+    let mut landed_at: HashMap<String, Cursor> = HashMap::new();
+    let mut read_at: HashMap<String, Cursor> = HashMap::new();
+    // What the socket was last told of the workers, and on which socket.
+    let mut pushed: Option<(u64, Vec<WorkerReport>)> = None;
+    let mut deliveries = Deliveries::new(worker::PATIENCE);
+    let mut taken = Taken::default();
+    let mut waiting: Vec<Command> = Vec::new();
+    let mut next_heartbeat = Instant::now();
     let mut landed = 0;
     let mut failures = 0u32;
     loop {
-        for (command, result) in deliveries.settle(agents) {
+        if let Some(socket) = socket {
+            waiting.extend(socket.commands.try_iter());
+        }
+        for command in waiting.drain(..) {
+            take(&command, workers, &mut deliveries, &mut taken, &mut unheard);
+        }
+        for (command, result) in deliveries.settle(workers) {
             log!(
                 "command {command} (message): {}",
                 result.as_ref().err().map_or("done", String::as_str)
             );
-            reports.push(Report::new(command, result.err()));
+            let report = CommandReport::new(command, result.err());
+            taken.remember(&report);
+            unheard.add(report);
         }
-        let read: Vec<_> = agents
-            .ids()
-            .into_iter()
-            .map(|id| {
-                let from = cursors.get(&id).copied().unwrap_or_default();
-                let batch = agents.read(&id, from, TRANSCRIPT_PER_AGENT);
-                (id, from, batch)
+
+        let all = workers.all();
+        let live = workers.live();
+        let mut fresh: Vec<(String, Vec<Line>)> = Vec::new();
+        let mut room = TRANSCRIPT_PER_PUSH;
+        for (home, record) in &all {
+            let from = read_at.get(&record.id).copied().unwrap_or_default();
+            if let Some(batch) = workers.read(home, from, room.max(1)) {
+                room = room.saturating_sub(
+                    batch
+                        .lines
+                        .iter()
+                        .map(|l| serde_json::to_string(l).map_or(0, |s| s.len()))
+                        .sum(),
+                );
+                read_at.insert(record.id.clone(), batch.next);
+                fresh.push((record.id.clone(), batch.lines));
+            }
+        }
+        let states: Vec<WorkerReport> = all
+            .iter()
+            .map(|(home, record)| {
+                let waiting = read_at.get(&record.id).is_some_and(|c| c.waiting);
+                let (state, session_id) =
+                    workers.state(home, live.get(&record.id).map(String::as_str), waiting);
+                WorkerReport {
+                    id: record.id.clone(),
+                    state,
+                    session_id,
+                }
             })
             .collect();
-        if let Some(sample) = meter.sample() {
-            if samples.len() == SAMPLES_KEPT {
-                samples.remove(0);
-            }
-            samples.push(sample);
-        }
-        let wait = match client.heartbeat(&Heartbeat {
-            version: VERSION,
-            agents: read
-                .iter()
-                .map(|(id, from, batch)| match batch {
-                    Some(batch) => Present::running(id.clone(), batch.next.waiting, &batch.lines),
-                    None => Present::running(id.clone(), from.waiting, &[]),
+
+        if let Some(socket) = socket.filter(|s| s.is_up()) {
+            let changed = pushed
+                .as_ref()
+                .is_none_or(|(opened, was)| *opened != socket.opened() || *was != states);
+            let said = fresh.iter().any(|(_, lines)| !lines.is_empty());
+            if (changed || said || !unheard.socket.is_empty())
+                && socket.send(&Up::Report {
+                    workers: &states,
+                    lines: line_reports(&fresh),
+                    command_results: &unheard.socket,
                 })
-                .collect(),
-            command_results: &reports,
-            capacity: config.capacity,
-            labels: config.labels.as_deref(),
-            samples: &samples,
-        }) {
-            Ok(reply) => {
-                landed += 1;
-                failures = 0;
-                samples.clear();
-                for (id, _, batch) in &read {
-                    if let Some(batch) = batch {
-                        cursors.insert(id.clone(), batch.next);
-                    }
+            {
+                unheard.socket.clear();
+                pushed = Some((socket.opened(), states.clone()));
+            }
+        }
+
+        if Instant::now() >= next_heartbeat {
+            if let Some(sample) = meter.sample() {
+                if samples.len() == SAMPLES_KEPT {
+                    samples.remove(0);
                 }
-                reports.clear();
-                for command in &reply.commands {
-                    let held = deliveries.holds(&command.id);
-                    match heartbeat::take(command, agents, &mut deliveries) {
-                        Some(report) => {
-                            log!(
-                                "command {} ({}): {}",
-                                command.id,
-                                command.kind,
-                                report.error.as_deref().unwrap_or("done")
-                            );
-                            reports.push(report);
+                samples.push(sample);
+            }
+            let read: Vec<(String, Option<worker::Batch>)> = all
+                .iter()
+                .map(|(home, record)| {
+                    let from = landed_at.get(&record.id).copied().unwrap_or_default();
+                    (
+                        record.id.clone(),
+                        workers.read(home, from, TRANSCRIPT_PER_WORKER),
+                    )
+                })
+                .collect();
+            let lines: Vec<(String, Vec<Line>)> = read
+                .iter()
+                .filter_map(|(id, batch)| Some((id.clone(), batch.as_ref()?.lines.clone())))
+                .collect();
+            let sent = client.heartbeat(&Heartbeat {
+                version: VERSION,
+                labels: config.labels.as_deref(),
+                capacity: config.capacity,
+                samples: &samples,
+                workers: &states,
+                lines: line_reports(&lines),
+                command_results: &unheard.heartbeat,
+            });
+            next_heartbeat = match sent {
+                Ok(reply) => {
+                    landed += 1;
+                    failures = 0;
+                    samples.clear();
+                    for (id, batch) in read {
+                        if let Some(batch) = batch {
+                            landed_at.insert(id, batch.next);
                         }
-                        None if !held => {
-                            log!("command {} ({}): on its way", command.id, command.kind)
+                    }
+                    unheard = Unheard::default();
+                    if let Some(socket) = socket {
+                        socket.point_at(reply.socket_url.as_deref());
+                    }
+                    for command in &reply.commands {
+                        take(command, workers, &mut deliveries, &mut taken, &mut unheard);
+                    }
+                    if let Some(n) = limit.filter(|&n| landed >= n) {
+                        // One more heartbeat carries the last commands'
+                        // reports, which would otherwise never leave.
+                        if (unheard.heartbeat.is_empty() && deliveries.is_empty()) || landed > n {
+                            return ExitCode::SUCCESS;
                         }
-                        None => {}
-                    }
-                }
-                if let Some(n) = limit.filter(|&n| landed >= n) {
-                    // One more heartbeat carries the last commands' reports,
-                    // which would otherwise never leave.
-                    if (reports.is_empty() && deliveries.is_empty()) || landed > n {
-                        return ExitCode::SUCCESS;
-                    }
-                    Duration::ZERO
-                } else {
-                    let wait = Duration::from_secs_f64(
-                        reply.heartbeat_interval.unwrap_or(30.0).clamp(1.0, 300.0),
-                    );
-                    if deliveries.is_empty() {
-                        wait
+                        Instant::now()
                     } else {
-                        wait.min(DELIVERING)
+                        let interval = Duration::from_secs_f64(
+                            reply.heartbeat_interval.unwrap_or(30.0).clamp(1.0, 300.0),
+                        );
+                        let hurry = !deliveries.is_empty() && !socket.is_some_and(Socket::is_up);
+                        Instant::now()
+                            + if hurry {
+                                interval.min(DELIVERING)
+                            } else {
+                                interval
+                            }
                     }
                 }
-            }
-            Err(failure) => {
-                let (message, wait) = match failure {
-                    Failure::Unsupported { minimum, error } => (
-                        format!(
-                            "contract {CONTRACT} is unsupported, the service accepts {minimum} and up: {error}"
+                Err(failure) => {
+                    let (message, wait) = match failure {
+                        Failure::Unsupported { minimum, error } => (
+                            format!(
+                                "contract {CONTRACT} is unsupported, the service accepts {minimum} and up: {error}"
+                            ),
+                            Duration::from_secs(600),
                         ),
-                        Duration::from_secs(600),
-                    ),
-                    Failure::Refused(code, body) => (
-                        format!("refused ({code}): {body}"),
-                        Duration::from_secs(600),
-                    ),
-                    Failure::Transient(e) => {
-                        failures += 1;
-                        (e, Duration::from_secs(2u64.pow(failures.min(6))))
+                        Failure::Refused(code, body) => (
+                            format!("refused ({code}): {body}"),
+                            Duration::from_secs(600),
+                        ),
+                        Failure::Transient(e) => {
+                            failures += 1;
+                            (e, Duration::from_secs(2u64.pow(failures.min(6))))
+                        }
+                    };
+                    log!("heartbeat failed: {message}");
+                    if limit.is_some() {
+                        return ExitCode::FAILURE;
                     }
-                };
-                log!("heartbeat failed: {message}");
-                if limit.is_some() {
-                    return ExitCode::FAILURE;
+                    Instant::now() + wait
                 }
-                wait
-            }
-        };
-        sleep(wait);
+            };
+        }
+
+        // Until the next look, or a command pushed before it, which is taken
+        // at once.
+        let wait = TICK.min(next_heartbeat.saturating_duration_since(Instant::now()));
+        match socket {
+            Some(socket) => waiting.extend(socket.commands.recv_timeout(wait).ok()),
+            None => sleep(wait),
+        }
     }
 }

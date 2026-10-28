@@ -9,7 +9,7 @@ mod build;
 use std::{fs, path::PathBuf, process::Command};
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("agent-host-stamp-{}-{name}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("worker-host-stamp-{}-{name}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     dir
@@ -60,7 +60,7 @@ fn source_untracked_inside_an_unrelated_repo_is_unknown() {
     fs::write(outer.join("unrelated"), "").unwrap();
     git(&outer, &["add", "."]);
     git(&outer, &["commit", "-qm", "c"]);
-    let vendored = outer.join("vendor/agent-host");
+    let vendored = outer.join("vendor/worker-host");
     crate_in(&vendored);
     assert_eq!(build::stamp(&vendored), "unknown");
     fs::remove_dir_all(&outer).unwrap();

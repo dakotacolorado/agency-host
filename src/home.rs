@@ -1,0 +1,434 @@
+//! A worker's folder on this host, `<workers_dir>/<name>/`, and everything the
+//! host keeps about the worker there:
+//!
+//! ```text
+//! worker.json       who it is: id, name, role, repositories, as created
+//! credential        its own token for the service, mode 600
+//! sessions.jsonl    each session the host started for it, and each it stopped
+//! prompt.md         the opening message of its latest session
+//! repos/<repo>/     a git worktree of the host's checkout, on worker/<name>
+//! home/.claude/     its own Claude Code: settings, rules, history, transcripts
+//! logs/<id>.log     everything each session's terminal showed
+//! ```
+//!
+//! The host remembers nothing between runs that is not here or in tmux, so a
+//! machine that dies at any point leaves a folder the next run can read.
+
+use serde::{Deserialize, Serialize};
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
+
+/// Where retired workers' folders are moved, out of the way of a new worker
+/// given the same name. Hidden, so it is never taken for a worker named so.
+pub const RETIRED: &str = ".retired";
+
+/// Who a worker is, as its `create` said.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Record {
+    pub id: String,
+    pub name: String,
+    pub role: String,
+    pub repositories: Vec<String>,
+}
+
+/// One session the host started for a worker. `claude` is the Claude Code
+/// session whose transcript it writes to, and `from` how long that transcript
+/// was when it began: a session that carries on the last conversation writes
+/// on in the same transcript, and what comes after `from` is this session's.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Session {
+    pub session_id: String,
+    pub claude: String,
+    pub from: u64,
+    /// Whether it was ended by a `stop`, rather than by whatever else can end
+    /// a session: a crash, the machine going down.
+    #[serde(skip)]
+    pub stopped: bool,
+}
+
+/// A line of `sessions.jsonl`: a session begun, one stopped, or one that
+/// never began after all, since tmux would not run it.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum Event {
+    Begun(Session),
+    #[serde(rename_all = "camelCase")]
+    Stopped {
+        session_id: String,
+        stopped: bool,
+    },
+    #[serde(rename_all = "camelCase")]
+    Withdrawn {
+        session_id: String,
+        withdrawn: bool,
+    },
+}
+
+/// A worker name as the service allows it, which is also all that keeps a
+/// name from reaching outside the workers folder: `[a-z0-9][a-z0-9-]{0,39}`.
+pub fn valid_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && name.len() <= 40
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Home {
+    pub dir: PathBuf,
+}
+
+impl Home {
+    pub fn new(dir: PathBuf) -> Self {
+        Home { dir }
+    }
+
+    pub fn repo(&self, name: &str) -> PathBuf {
+        self.dir.join("repos").join(name)
+    }
+
+    /// The worker's own HOME as the layout names it. HOME itself stays the
+    /// host user's, for the reason in claude.rs; this holds the worker's own
+    /// Claude Code state.
+    pub fn home(&self) -> PathBuf {
+        self.dir.join("home")
+    }
+
+    pub fn claude(&self) -> PathBuf {
+        self.home().join(".claude")
+    }
+
+    pub fn log(&self, session: &str) -> PathBuf {
+        self.dir.join("logs").join(format!("{session}.log"))
+    }
+
+    pub fn credential(&self) -> PathBuf {
+        self.dir.join("credential")
+    }
+
+    pub fn prompt(&self) -> PathBuf {
+        self.dir.join("prompt.md")
+    }
+
+    fn record_file(&self) -> PathBuf {
+        self.dir.join("worker.json")
+    }
+
+    fn sessions_file(&self) -> PathBuf {
+        self.dir.join("sessions.jsonl")
+    }
+
+    pub fn record(&self) -> Option<Record> {
+        serde_json::from_str(&fs::read_to_string(self.record_file()).ok()?).ok()
+    }
+
+    /// Makes the folder for `record`, or takes up the one a create that was
+    /// cut off, or sent again, left. One that belongs to another worker is
+    /// refused: the service keeps names unique among workers not retired, and
+    /// a retired worker's folder is moved aside, so this is a worker the
+    /// service no longer knows about, and its folder is not this host's to
+    /// take.
+    pub fn make(&self, record: &Record) -> Result<(), String> {
+        let at = |path: &Path, e: io::Error| format!("{}: {e}", path.display());
+        if let Some(held) = self.record() {
+            if held.id != record.id {
+                return Err(format!(
+                    "{} already holds worker {} by that name",
+                    self.dir.display(),
+                    held.id
+                ));
+            }
+        }
+        for dir in [self.dir.join("repos"), self.home(), self.dir.join("logs")] {
+            fs::create_dir_all(&dir).map_err(|e| at(&dir, e))?;
+        }
+        let file = self.record_file();
+        let text = serde_json::to_string_pretty(record).map_err(|e| e.to_string())?;
+        fs::write(&file, text + "\n").map_err(|e| at(&file, e))
+    }
+
+    /// Writes the credential once. A create comes again until it is reported,
+    /// with the same credential, and the first one written is the one kept.
+    pub fn keep_credential(&self, credential: &str) -> Result<(), String> {
+        let file = self.credential();
+        let written = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&file)
+            .and_then(|mut f| f.write_all(credential.as_bytes()));
+        match written {
+            Err(e) if e.kind() != io::ErrorKind::AlreadyExists => {
+                Err(format!("{}: {e}", file.display()))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    pub fn read_credential(&self) -> Option<String> {
+        fs::read_to_string(self.credential())
+            .ok()
+            .filter(|c| !c.is_empty())
+    }
+
+    /// Every session the host has started for the worker, oldest first. A
+    /// line cut off by the machine going down mid-write is passed over.
+    pub fn sessions(&self) -> Vec<Session> {
+        let text = fs::read_to_string(self.sessions_file()).unwrap_or_default();
+        let mut sessions: Vec<Session> = Vec::new();
+        for line in text.lines() {
+            match serde_json::from_str(line) {
+                Ok(Event::Begun(session)) => sessions.push(session),
+                Ok(Event::Stopped { session_id, .. }) => {
+                    if let Some(s) = sessions.iter_mut().find(|s| s.session_id == session_id) {
+                        s.stopped = true;
+                    }
+                }
+                Ok(Event::Withdrawn { session_id, .. }) => {
+                    sessions.retain(|s| s.session_id != session_id)
+                }
+                Err(_) => {}
+            }
+        }
+        sessions
+    }
+
+    pub fn latest(&self) -> Option<Session> {
+        self.sessions().pop()
+    }
+
+    pub fn begin(&self, session: &Session) -> Result<(), String> {
+        self.append(&Event::Begun(session.clone()))
+    }
+
+    pub fn stopped(&self, session_id: &str) -> Result<(), String> {
+        self.append(&Event::Stopped {
+            session_id: session_id.into(),
+            stopped: true,
+        })
+    }
+
+    /// Takes back a session tmux would not start, so that the start is tried
+    /// again when it is sent again rather than taken for one already done.
+    pub fn withdraw(&self, session_id: &str) -> Result<(), String> {
+        self.append(&Event::Withdrawn {
+            session_id: session_id.into(),
+            withdrawn: true,
+        })
+    }
+
+    fn append(&self, event: &Event) -> Result<(), String> {
+        let file = self.sessions_file();
+        let mut line = serde_json::to_string(event).map_err(|e| e.to_string())? + "\n";
+        // After a line torn by the machine going down, this one starts afresh
+        // rather than being read as the end of that one.
+        if fs::read(&file).is_ok_and(|t| t.last().is_some_and(|&b| b != b'\n')) {
+            line.insert(0, '\n');
+        }
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&file)
+            .and_then(|mut f| f.write_all(line.as_bytes()))
+            .map_err(|e| format!("{}: {e}", file.display()))
+    }
+
+    /// Marks the worker retired and moves its folder to
+    /// `<workers_dir>/.retired/<name>-<id>`, where it is kept. Its worktrees
+    /// are told where they went, and its branches renamed after the folder,
+    /// so a new worker given its name can have `worker/<name>` and a folder
+    /// of that name; what was pushed under the old name stays on origin.
+    pub fn retire(
+        &self,
+        record: &Record,
+        repositories: &[(String, PathBuf)],
+    ) -> Result<(), String> {
+        let parent = self.dir.parent().ok_or("a worker folder has no parent")?;
+        let aside = parent
+            .join(RETIRED)
+            .join(format!("{}-{}", record.name, record.id));
+        fs::create_dir_all(parent.join(RETIRED))
+            .map_err(|e| format!("{}: {e}", parent.join(RETIRED).display()))?;
+        fs::rename(&self.dir, &aside).map_err(|e| format!("{}: {e}", self.dir.display()))?;
+        let moved = Home::new(aside);
+        let branch = crate::workspace::own_branch(&record.name);
+        let kept = format!("{branch}-retired-{}", record.id);
+        for (repo, checkout) in repositories {
+            let tree = moved.repo(repo);
+            if !tree.exists() {
+                continue;
+            }
+            crate::workspace::git(checkout, &["worktree", "repair", &tree.to_string_lossy()])?;
+            let local = format!("refs/heads/{branch}");
+            if crate::workspace::git(checkout, &["rev-parse", "--verify", "--quiet", &local])
+                .is_ok()
+            {
+                crate::workspace::git(checkout, &["branch", "-m", &branch, &kept])?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Every worker with a folder under `dir`, retired ones aside.
+pub fn all(dir: &Path) -> Vec<(Home, Record)> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return vec![];
+    };
+    let mut found: Vec<(Home, Record)> = entries
+        .flatten()
+        .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+        .map(|e| Home::new(e.path()))
+        .filter_map(|home| home.record().map(|r| (home, r)))
+        .collect();
+    found.sort_by(|a, b| a.1.name.cmp(&b.1.name));
+    found
+}
+
+/// Whether a worker with this id was retired here.
+pub fn retired(dir: &Path, id: &str) -> bool {
+    let suffix = format!("-{id}");
+    fs::read_dir(dir.join(RETIRED)).is_ok_and(|entries| {
+        entries
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().ends_with(&suffix))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("worker-host-home-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn ana() -> Record {
+        Record {
+            id: "w1".into(),
+            name: "ana".into(),
+            role: "frontend".into(),
+            repositories: vec![],
+        }
+    }
+
+    #[test]
+    fn a_name_is_a_slug_and_nothing_that_reaches_outside() {
+        for good in ["ana", "a", "0", "front-end-2", &"a".repeat(40)] {
+            assert!(valid_name(good), "{good}");
+        }
+        for bad in [
+            "",
+            "-ana",
+            "Ana",
+            "../x",
+            "a/b",
+            ".retired",
+            "a b",
+            &"a".repeat(41),
+        ] {
+            assert!(!valid_name(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_worker_folder_has_the_layout_the_protocol_names() {
+        let dir = scratch("layout");
+        let home = Home::new(dir.join("ana"));
+        home.make(&ana()).unwrap();
+        for sub in ["repos", "home", "logs"] {
+            assert!(dir.join("ana").join(sub).is_dir(), "{sub}");
+        }
+        assert_eq!(home.claude(), dir.join("ana/home/.claude"));
+        assert_eq!(home.log("s1"), dir.join("ana/logs/s1.log"));
+        assert_eq!(home.repo("widgets"), dir.join("ana/repos/widgets"));
+        assert_eq!(home.record(), Some(ana()));
+        assert_eq!(all(&dir), [(home.clone(), ana())]);
+
+        home.make(&ana()).unwrap();
+        let err = home
+            .make(&Record {
+                id: "w2".into(),
+                ..ana()
+            })
+            .unwrap_err();
+        assert!(err.contains("already holds worker w1"), "{err}");
+    }
+
+    #[test]
+    fn the_first_credential_is_kept_for_this_user_alone() {
+        let dir = scratch("credential");
+        let home = Home::new(dir.join("ana"));
+        home.make(&ana()).unwrap();
+        home.keep_credential("wkr_first").unwrap();
+        home.keep_credential("wkr_later").unwrap();
+        assert_eq!(home.read_credential().as_deref(), Some("wkr_first"));
+        let mode = fs::metadata(home.credential())
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn sessions_are_read_back_as_written_and_a_torn_line_is_passed_over() {
+        let dir = scratch("sessions");
+        let home = Home::new(dir.join("ana"));
+        home.make(&ana()).unwrap();
+        assert_eq!(home.latest(), None);
+        let one = Session {
+            session_id: "s1".into(),
+            claude: "c1".into(),
+            from: 0,
+            stopped: false,
+        };
+        home.begin(&one).unwrap();
+        home.stopped("s1").unwrap();
+        let two = Session {
+            session_id: "s2".into(),
+            claude: "c1".into(),
+            from: 120,
+            stopped: false,
+        };
+        home.begin(&two).unwrap();
+        fs::OpenOptions::new()
+            .append(true)
+            .open(dir.join("ana/sessions.jsonl"))
+            .unwrap()
+            .write_all(br#"{"sessionId":"s3","cla"#)
+            .unwrap();
+        home.stopped("s2").unwrap();
+        home.begin(&Session {
+            session_id: "s4".into(),
+            claude: "c4".into(),
+            from: 0,
+            stopped: false,
+        })
+        .unwrap();
+        home.withdraw("s4").unwrap();
+        assert_eq!(
+            home.sessions(),
+            [
+                Session {
+                    stopped: true,
+                    ..one
+                },
+                Session {
+                    stopped: true,
+                    ..two.clone()
+                }
+            ]
+        );
+        assert_eq!(home.latest().map(|s| s.session_id), Some("s2".into()));
+    }
+}

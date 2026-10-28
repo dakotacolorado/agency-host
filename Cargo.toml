@@ -1,5 +1,5 @@
 [package]
-name = "agent-host"
+name = "worker-host"
 version = "0.1.0"
 edition = "2021"
 
@@ -9,6 +9,12 @@ serde_json = "1"
 toml = { version = "0.8", default-features = false, features = ["parse"] }
 # rustls rather than native-tls, so nothing on the machine has to provide openssl.
 ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+# The socket is tungstenite with none of its own TLS: it runs over the same
+# rustls, ring and webpki roots ureq already brings, so there is one TLS stack,
+# pure Rust apart from ring's C, which the musl builds already cross-compile.
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "0.26"
 
 [profile.release]
 strip = true

@@ -1,6 +1,7 @@
-//! Agents run in tmux because an interactive agent needs a terminal -- given a
-//! pipe instead, Claude Code runs once and exits -- and because a session
-//! outlives the host: a host that restarts finds its agents still running.
+//! Workers' sessions run in tmux because an interactive Claude Code needs a
+//! terminal -- given a pipe instead, it runs once and exits -- and because a
+//! session outlives the host: a host that restarts finds its sessions still
+//! running.
 
 use std::io::Write;
 use std::path::Path;
@@ -8,14 +9,14 @@ use std::process::{Command, Stdio};
 
 /// One tmux server on its own socket, so the host's sessions are kept apart
 /// from any a person runs on the same machine. A person attaches with
-/// `tmux -L <socket> attach -t <agent>`.
+/// `tmux -L <socket> attach -t worker-<name>`.
 pub struct Tmux {
     socket: String,
 }
 
-/// The session option that names the agent a session runs, so a session is
-/// found by the agent's id exactly, whatever tmux made of its name.
-const TAG: &str = "@agent";
+/// The session option that names the worker a session is for, so a session is
+/// found by the worker's id exactly, whatever tmux made of its name.
+const TAG: &str = "@worker";
 
 impl Tmux {
     pub fn new(socket: impl Into<String>) -> Self {
@@ -55,16 +56,18 @@ impl Tmux {
         }
     }
 
-    /// Runs `argv` detached in `dir`, as the session for `tag`. A second
-    /// session for the same tag is refused by tmux as a duplicate name.
+    /// Runs `argv` detached in `dir`, as the session `name` for `tag`, and
+    /// hands back tmux's id for it. A second session of the same name is
+    /// refused by tmux as a duplicate.
     pub fn start(
         &self,
         tag: &str,
+        name: &str,
         dir: &Path,
         argv: &[String],
         env: &[(String, String)],
-    ) -> Result<(), String> {
-        let name: String = tag
+    ) -> Result<String, String> {
+        let name: String = name
             .chars()
             .map(|c| match c {
                 'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => c,
@@ -81,9 +84,32 @@ impl Tmux {
         // More than one argument is exec'd as it stands, never handed to a
         // shell, so nothing in the instructions is read as shell syntax.
         args.extend(argv.iter().map(String::as_str));
-        let id = self.run(&args, None)?;
-        self.run(&["set-option", "-t", id.trim(), TAG, tag], None)?;
+        let id = self.run(&args, None)?.trim().to_string();
+        self.run(&["set-option", "-t", &id, TAG, tag], None)?;
+        Ok(id)
+    }
+
+    /// Appends everything the session's pane shows to `log`, from now on.
+    /// `-o` opens a pipe only where there is none, so a host that restarts
+    /// and asks again does not end the one already writing.
+    pub fn log_to(&self, session: &str, log: &Path) -> Result<(), String> {
+        let quoted = format!("'{}'", log.to_string_lossy().replace('\'', r"'\''"));
+        self.run(
+            &[
+                "pipe-pane",
+                "-o",
+                "-t",
+                session,
+                &format!("cat >> {quoted}"),
+            ],
+            None,
+        )?;
         Ok(())
+    }
+
+    /// What the session's pane shows now, as text.
+    pub fn screen(&self, session: &str) -> Option<String> {
+        self.run(&["capture-pane", "-p", "-t", session], None).ok()
     }
 
     /// The tags of every session running, mapped to tmux's id for each.
@@ -110,7 +136,7 @@ impl Tmux {
     /// rather than typed so that a newline inside the text does not send what
     /// comes before it on its own.
     pub fn type_in(&self, session: &str, text: &str) -> Result<(), String> {
-        let buffer = format!("agent-host{session}");
+        let buffer = format!("worker-host{session}");
         self.run(&["load-buffer", "-b", &buffer, "-"], Some(text))?;
         self.run(
             &["paste-buffer", "-p", "-d", "-b", &buffer, "-t", session],

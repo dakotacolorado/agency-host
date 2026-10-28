@@ -1,10 +1,10 @@
-//! A working tree of its own for each agent that has code to work on: a git
-//! worktree of the host's checkout, on the agent's own branch, so two agents
+//! A working tree of its own for each repository a worker is given: a git
+//! worktree of the host's checkout, on the worker's own branch, so two workers
 //! on one machine never share a tree, and a person's checkout is never the one
-//! an agent works in.
+//! a worker works in.
 //!
-//! A workspace is kept when its agent ends, for whoever wants to see what it
-//! left. The worktree is locked, so `git worktree prune` and a plain
+//! A worktree is kept when its worker is retired, for whoever wants to see
+//! what it left. The worktree is locked, so `git worktree prune` and a plain
 //! `git worktree remove` in the checkout leave it alone; removing one is a
 //! person's deliberate `git worktree remove --force --force`, never the host's.
 
@@ -17,8 +17,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 /// Installed dependency folders a worktree takes from its checkout as a link
-/// rather than installing again. A link is shared by every agent given one, so
-/// nothing here ever installs into it; what the agent is told about that is in
+/// rather than installing again. A link is shared by every worker given one, so
+/// nothing here ever installs into it; what the worker is told about that is in
 /// conduct.md.
 const SHARED: &[&str] = &["node_modules"];
 
@@ -32,27 +32,22 @@ pub struct Workspace {
     pub branch: String,
 }
 
-/// The branch an agent works on when its placement named none.
-pub fn own_branch(id: &str) -> String {
-    format!("agent/{id}")
+/// The branch a worker works on in every repository it is given.
+pub fn own_branch(name: &str) -> String {
+    format!("worker/{name}")
 }
 
-/// Makes `dir` a worktree of `checkout` on `branch`, or the agent's own branch
-/// when none is named. A named branch is taken from the remote when it is
-/// there, since what was pushed to it is the work to carry on from; one that
-/// is not becomes new. Anything that would leave the agent without the code it
-/// was placed for is an error here, before it starts, rather than something
-/// for it to find out.
+/// Makes `dir` a worktree of `checkout` on the worker's own branch. The
+/// branch is taken from the remote when it is there, since what was pushed to
+/// it is the work to carry on from -- a host rebuilt, or a name a retired
+/// worker held -- and one that is not becomes new. Anything that would leave
+/// the worker without the code it was given is an error here, when it is
+/// created, rather than something for it to find out.
 ///
-/// A worktree already at `dir` is a start that was cut off before its agent
-/// ran, and is taken as it is.
-pub fn prepare(
-    id: &str,
-    checkout: &Path,
-    dir: &Path,
-    branch: Option<&str>,
-) -> Result<Workspace, String> {
-    let branch = branch.map_or_else(|| own_branch(id), String::from);
+/// A worktree already at `dir` is a create that was cut off, or sent again,
+/// and is taken as it is.
+pub fn prepare(name: &str, checkout: &Path, dir: &Path) -> Result<Workspace, String> {
+    let branch = own_branch(name);
     if dir.exists() {
         let top = git(dir, &["rev-parse", "--show-toplevel"])
             .map_err(|_| format!("{} is there already, and is not a worktree", dir.display()))?;
@@ -84,7 +79,7 @@ pub fn prepare(
     let local = format!("refs/heads/{branch}");
     let pushed = format!("refs/remotes/origin/{branch}");
     let dir_arg = dir.to_string_lossy();
-    let reason = format!("agent-host agent {id}");
+    let reason = format!("worker-host worker {name}");
     let mut add = vec!["worktree", "add", "--lock", "--reason", &reason];
     let base;
     let existed = has(&local);
@@ -105,7 +100,7 @@ pub fn prepare(
         fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
     }
     // git refuses a branch that another worktree has checked out, which is
-    // what keeps two agents placed on one branch out of each other's tree.
+    // what keeps two workers of one name out of each other's tree.
     git(checkout, &add)?;
     if existed && remote && has(&pushed) {
         git(
@@ -142,7 +137,7 @@ fn link_shared(checkout: &Path, dir: &Path) -> Result<(), String> {
 }
 
 /// `node_modules/` in a .gitignore matches a folder and not a link to one, so
-/// without this an agent's `git add -A` would commit the link. Added to the
+/// without this a worker's `git add -A` would commit the link. Added to the
 /// checkout's own exclude file, which every worktree of it shares, and only
 /// added to.
 fn exclude(dir: &Path, name: &str) -> Result<(), String> {
@@ -171,7 +166,7 @@ fn exclude(dir: &Path, name: &str) -> Result<(), String> {
 /// Runs git in `dir` with no terminal to ask for credentials on: a fetch that
 /// wanted a password would otherwise wait for one for ever, holding the
 /// heartbeat.
-fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
+pub fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
     let mut child = Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -256,7 +251,7 @@ pub mod tests {
 
     pub fn repo(name: &str) -> Repo {
         let root =
-            std::env::temp_dir().join(format!("agent-host-ws-{}-{name}", std::process::id()));
+            std::env::temp_dir().join(format!("worker-host-ws-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         sh(
@@ -276,12 +271,12 @@ pub mod tests {
     }
 
     #[test]
-    fn an_agent_gets_a_worktree_on_its_own_branch() {
+    fn a_worker_gets_a_worktree_on_its_own_branch() {
         let repo = repo("own");
-        let dir = repo.root.join("agents/a1/checkout");
-        let ws = prepare("a1", &repo.checkout, &dir, None).unwrap();
-        assert_eq!(ws.branch, "agent/a1");
-        assert_eq!(out(&dir, &["branch", "--show-current"]), "agent/a1");
+        let dir = repo.root.join("ana/repos/widgets");
+        let ws = prepare("ana", &repo.checkout, &dir).unwrap();
+        assert_eq!(ws.branch, "worker/ana");
+        assert_eq!(out(&dir, &["branch", "--show-current"]), "worker/ana");
         assert!(dir.join("README").is_file(), "the code is in it");
         assert_eq!(
             out(&repo.checkout, &["branch", "--show-current"]),
@@ -289,52 +284,39 @@ pub mod tests {
             "the person's checkout is left as it was"
         );
         let list = out(&repo.checkout, &["worktree", "list", "--porcelain"]);
-        assert!(list.contains("locked agent-host agent a1"), "{list}");
+        assert!(list.contains("locked worker-host worker ana"), "{list}");
     }
 
     #[test]
-    fn two_agents_never_share_a_tree() {
+    fn two_workers_never_share_a_tree() {
         let repo = repo("two");
-        let one = prepare("a1", &repo.checkout, &repo.root.join("a1/c"), None).unwrap();
-        let two = prepare("a2", &repo.checkout, &repo.root.join("a2/c"), None).unwrap();
+        let one = prepare("ana", &repo.checkout, &repo.root.join("ana/c")).unwrap();
+        let two = prepare("bo", &repo.checkout, &repo.root.join("bo/c")).unwrap();
         assert_ne!(one.dir, two.dir);
         assert_ne!(one.branch, two.branch);
         fs::write(one.dir.join("scratch"), "mine").unwrap();
         assert!(!two.dir.join("scratch").exists());
 
-        // Placed on one branch, the second is refused rather than let in.
-        prepare(
-            "a3",
-            &repo.checkout,
-            &repo.root.join("a3/c"),
-            Some("feat/x"),
-        )
-        .unwrap();
-        let err = prepare(
-            "a4",
-            &repo.checkout,
-            &repo.root.join("a4/c"),
-            Some("feat/x"),
-        )
-        .unwrap_err();
-        assert!(err.contains("feat/x"), "{err}");
-        assert!(!repo.root.join("a4/c").exists());
+        // A second tree on one worker's branch is refused rather than let in.
+        let err = prepare("ana", &repo.checkout, &repo.root.join("other/c")).unwrap_err();
+        assert!(err.contains("worker/ana"), "{err}");
+        assert!(!repo.root.join("other/c").exists());
     }
 
     #[test]
-    fn a_named_branch_carries_on_from_what_was_pushed() {
+    fn a_branch_carries_on_from_what_was_pushed() {
         let repo = repo("pushed");
         sh(
             &repo.checkout,
-            "git checkout -qb feat/y && echo more > WORK && git add WORK && git commit -qm work \
-             && git push -q origin feat/y && git checkout -q main && git branch -qD feat/y",
+            "git checkout -qb worker/cy && echo more > WORK && git add WORK && git commit -qm work \
+             && git push -q origin worker/cy && git checkout -q main && git branch -qD worker/cy",
         );
-        let dir = repo.root.join("a1/c");
-        prepare("a1", &repo.checkout, &dir, Some("feat/y")).unwrap();
+        let dir = repo.root.join("cy/c");
+        prepare("cy", &repo.checkout, &dir).unwrap();
         assert!(dir.join("WORK").is_file());
         assert_eq!(
             out(&dir, &["rev-parse", "--abbrev-ref", "@{upstream}"]),
-            "origin/feat/y"
+            "origin/worker/cy"
         );
     }
 
@@ -343,19 +325,19 @@ pub mod tests {
         let repo = repo("behind");
         sh(
             &repo.checkout,
-            "git branch feat/z && git checkout -q feat/z && echo more > WORK && git add WORK \
-             && git commit -qm work && git push -q origin feat/z && git checkout -q main \
-             && git branch -qf feat/z main",
+            "git branch worker/di && git checkout -q worker/di && echo more > WORK && git add WORK \
+             && git commit -qm work && git push -q origin worker/di && git checkout -q main \
+             && git branch -qf worker/di main",
         );
-        let dir = repo.root.join("a1/c");
-        prepare("a1", &repo.checkout, &dir, Some("feat/z")).unwrap();
+        let dir = repo.root.join("di/c");
+        prepare("di", &repo.checkout, &dir).unwrap();
         assert!(dir.join("WORK").is_file());
     }
 
     #[test]
     fn a_dependency_folder_is_linked_only_where_there_is_one() {
         let repo = repo("deps");
-        let bare = prepare("a1", &repo.checkout, &repo.root.join("a1/c"), None).unwrap();
+        let bare = prepare("a1", &repo.checkout, &repo.root.join("a1/c")).unwrap();
         assert!(
             bare.dir.join("node_modules").symlink_metadata().is_err(),
             "no link to nothing"
@@ -363,7 +345,7 @@ pub mod tests {
 
         fs::create_dir(repo.checkout.join("node_modules")).unwrap();
         fs::write(repo.checkout.join("node_modules/dep"), "x").unwrap();
-        let with = prepare("a2", &repo.checkout, &repo.root.join("a2/c"), None).unwrap();
+        let with = prepare("a2", &repo.checkout, &repo.root.join("a2/c")).unwrap();
         assert!(with.dir.join("node_modules/dep").is_file());
         sh(&with.dir, "git add -A");
         assert_eq!(
@@ -375,7 +357,7 @@ pub mod tests {
         // The checkout's own may itself be a link to nothing.
         fs::remove_dir_all(repo.checkout.join("node_modules")).unwrap();
         symlink("/nonexistent", repo.checkout.join("node_modules")).unwrap();
-        let dangling = prepare("a3", &repo.checkout, &repo.root.join("a3/c"), None).unwrap();
+        let dangling = prepare("a3", &repo.checkout, &repo.root.join("a3/c")).unwrap();
         assert!(dangling
             .dir
             .join("node_modules")
@@ -384,46 +366,34 @@ pub mod tests {
     }
 
     #[test]
-    fn a_start_cut_off_halfway_takes_up_the_tree_it_left() {
+    fn a_create_cut_off_halfway_takes_up_the_tree_it_left() {
         let repo = repo("again");
         let dir = repo.root.join("a1/c");
-        let first = prepare("a1", &repo.checkout, &dir, None).unwrap();
+        let first = prepare("a1", &repo.checkout, &dir).unwrap();
         fs::write(dir.join("scratch"), "kept").unwrap();
-        assert_eq!(prepare("a1", &repo.checkout, &dir, None).unwrap(), first);
+        assert_eq!(prepare("a1", &repo.checkout, &dir).unwrap(), first);
         assert!(dir.join("scratch").is_file());
     }
 
     #[test]
     fn what_cannot_be_prepared_says_why() {
         let repo = repo("cannot");
-        let err = prepare(
-            "a1",
-            &repo.root.join("nothing"),
-            &repo.root.join("a1/c"),
-            None,
-        )
-        .unwrap_err();
+        let err = prepare("a1", &repo.root.join("nothing"), &repo.root.join("a1/c")).unwrap_err();
         assert!(err.contains("is not there"), "{err}");
 
         fs::create_dir(repo.root.join("plain")).unwrap();
-        let err = prepare(
-            "a1",
-            &repo.root.join("plain"),
-            &repo.root.join("a1/c"),
-            None,
-        )
-        .unwrap_err();
+        let err = prepare("a1", &repo.root.join("plain"), &repo.root.join("a1/c")).unwrap_err();
         assert!(err.contains("is not a git checkout"), "{err}");
 
         sh(
             &repo.checkout,
             "git remote set-url origin /nonexistent/origin.git",
         );
-        let err = prepare("a1", &repo.checkout, &repo.root.join("a1/c"), None).unwrap_err();
+        let err = prepare("a1", &repo.checkout, &repo.root.join("a1/c")).unwrap_err();
         assert!(err.contains("could not fetch from origin"), "{err}");
 
         fs::create_dir_all(repo.root.join("a2/c")).unwrap();
-        let err = prepare("a2", &repo.checkout, &repo.root.join("a2/c"), None).unwrap_err();
+        let err = prepare("a2", &repo.checkout, &repo.root.join("a2/c")).unwrap_err();
         assert!(err.contains("not a worktree"), "{err}");
     }
 }

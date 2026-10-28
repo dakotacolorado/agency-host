@@ -1,4 +1,4 @@
-//! Stamps the commit this binary is built from into it as AGENT_HOST_COMMIT.
+//! Stamps the commit this binary is built from into it as WORKER_HOST_COMMIT.
 //! Hosts do not upgrade together, so the binary is the only thing that can say
 //! which build a machine runs. A tree with uncommitted changes, or no git at
 //! all, is stamped `dirty` or `unknown` rather than with a commit it does not
@@ -49,7 +49,7 @@ pub fn stamp(dir: &Path) -> String {
 
 fn main() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    println!("cargo:rustc-env=AGENT_HOST_COMMIT={}", stamp(dir));
+    println!("cargo:rustc-env=WORKER_HOST_COMMIT={}", stamp(dir));
 
     // By default cargo reruns this only when a package file changes, so a
     // commit that changes nothing on disk would leave `dirty` stamped. Watch

@@ -1,63 +1,35 @@
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-use crate::agent::{Agents, Credential, Deliveries, Line, Placement};
 use crate::config::Config;
 use crate::machine::Sample;
+use crate::protocol::{Command, CommandReport, LineReport, WorkerReport};
 
-/// The agent-service host contract this heartbeat body matches: `reports`
-/// arrived in 2, `labels`, `sessions` and `samples` in 3, and `capacity` in 4
-/// (see agent-service `contracts/`). Raise it only with the body. At 5 the body
-/// is unchanged, and each `start` comes with the agent's credential. At 6 the
-/// route is `heartbeat`, `reports` are `commandResults`, `sessions` are gone,
-/// the states are `running` and `waiting`, the reply says `heartbeatInterval`,
-/// and a `start` names its `workItemId`. At 7 `hostVersion` is `version`; the
-/// service's own words change too (an agent force-stopped is `lost`, a host is
-/// `connected`, `disconnected` or `lost`, and a placement's labels are its
-/// `selector`), none of which a host sends.
-pub const CONTRACT: u32 = 7;
+/// The worker-service host contract this heartbeat body matches. Raise it
+/// only with the body, the reply, a command, a report or the socket's
+/// messages. Sent as the `fleet-contract` header, as hosts of agent-service
+/// did, so the service can refuse a host it cannot speak to with 426.
+pub const CONTRACT: u32 = 1;
 
-/// Every field but the agents and command results may be left out, and one
-/// left out keeps the value the service last had: a host that could not read
-/// something says nothing about it rather than sending a zero or an empty list.
+/// Every field but the reports may be left out, and one left out keeps the
+/// value the service last had: a host that could not read something says
+/// nothing about it rather than sending a zero or an empty list.
 #[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Heartbeat<'a> {
     pub version: &'a str,
-    pub agents: Vec<Present<'a>>,
-    pub command_results: &'a [Report],
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub capacity: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub labels: Option<&'a [String]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<u32>,
     /// Samples taken since the last heartbeat that landed.
-    #[serde(skip_serializing_if = "<[_]>::is_empty")]
     pub samples: &'a [Sample],
-}
-
-/// An agent whose session is running here, by the id the service gave it.
-/// `waiting` when its last turn ended and nothing has been said to it since:
-/// it is waiting on someone, whether it ended on a question or on its work
-/// being done, which its transcript does not tell apart, so the host does not
-/// guess which. Otherwise `running`.
-#[derive(Debug, Serialize)]
-pub struct Present<'a> {
-    pub id: String,
-    pub state: &'static str,
-    /// What it has done since the last heartbeat that landed, so a transcript
-    /// can be read while the agent is still working.
-    #[serde(skip_serializing_if = "<[_]>::is_empty")]
-    pub transcript: &'a [Line],
-}
-
-impl<'a> Present<'a> {
-    pub fn running(id: String, waiting: bool, transcript: &'a [Line]) -> Self {
-        Present {
-            id,
-            state: if waiting { "waiting" } else { "running" },
-            transcript,
-        }
-    }
+    /// Every worker here that is not retired.
+    pub workers: &'a [WorkerReport],
+    /// What workers have done since the last heartbeat that landed, so a
+    /// transcript can be read while the worker is still working.
+    pub lines: Vec<LineReport<'a>>,
+    pub command_results: &'a [CommandReport],
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -66,46 +38,8 @@ pub struct Reply {
     #[serde(default)]
     pub commands: Vec<Command>,
     pub heartbeat_interval: Option<f64>,
-}
-
-/// What routes a command, and the fields of each kind the host handles.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Command {
-    pub id: String,
-    pub kind: String,
-    /// Which agent, for every kind but `ping`; for `message` and `interrupt`,
-    /// what to type to it. Who sent it is the service's record, not the
-    /// agent's: a person, the agent above, and an answer to a question are all
-    /// carried the same way.
-    pub agent_id: Option<String>,
-    pub text: Option<String>,
-    /// For `start`: what the work is and where it is done, as placed.
-    pub repository: Option<String>,
-    pub branch: Option<String>,
-    pub brief: Option<String>,
-    /// For `start`: the agent's own bearer token for the fleet. The same one
-    /// comes on every redelivery, and the first is the one kept.
-    pub credential: Option<Credential>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Report {
-    pub command_id: String,
-    pub ok: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
-
-impl Report {
-    pub fn new(command_id: String, error: Option<String>) -> Self {
-        Report {
-            command_id,
-            ok: error.is_none(),
-            error,
-        }
-    }
+    /// Where to open the socket the service pushes commands on.
+    pub socket_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -175,47 +109,10 @@ impl Client {
     }
 }
 
-/// A kind the host does not handle is reported by name rather than dropped,
-/// so the sender learns the command went nowhere. `ping` does nothing and
-/// succeeds, so a whole cycle can be proved without an agent. A message is
-/// reported once it reaches its agent, by `Deliveries::settle`, so none is
-/// reported here while it is on its way.
-pub fn take(command: &Command, agents: &Agents, deliveries: &mut Deliveries) -> Option<Report> {
-    let agent = command.agent_id.as_deref();
-    let text = command.text.as_deref();
-    if deliveries.holds(&command.id) {
-        return None;
-    }
-    let error = match (command.kind.as_str(), agent) {
-        ("ping", _) => None,
-        ("start", Some(agent)) => agents
-            .start(
-                agent,
-                &Placement {
-                    repository: command.repository.as_deref(),
-                    branch: command.branch.as_deref(),
-                    brief: command.brief.as_deref(),
-                    credential: command.credential.as_ref(),
-                },
-            )
-            .err(),
-        ("interrupt", Some(agent)) => agents.interrupt(agent, text).err(),
-        ("stop", Some(agent)) => agents.stop(agent).err(),
-        ("message", Some(agent)) => match text {
-            Some(text) => deliveries.hold(agents, &command.id, agent, text)?.err(),
-            None => Some("a message needs text".into()),
-        },
-        (kind @ ("start" | "interrupt" | "message" | "stop"), None) => {
-            Some(format!("{kind:?} needs an agentId"))
-        }
-        (kind, _) => Some(format!("this host does not handle {kind:?} commands")),
-    };
-    Some(Report::new(command.id.clone(), error))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::{line_reports, Line, State};
     use serde_json::Value;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
@@ -261,25 +158,39 @@ mod tests {
             capacity: None,
             labels: None,
             repositories: Default::default(),
-            tmux_socket: "agent-host".into(),
+            tmux_socket: "worker-host-test".into(),
+            workers_dir: "/nonexistent".into(),
         })
     }
 
     #[test]
-    fn a_beat_carries_command_results_up_and_brings_commands_down() {
+    fn a_heartbeat_carries_reports_up_and_brings_commands_and_the_socket_down() {
         let (url, server) = serve_once(
             "200 OK",
-            r#"{"commands":[{"id":"c1","kind":"place","agent":{"id":"a1"}}],"heartbeatInterval":3}"#,
+            r#"{"contract":1,"heartbeatInterval":30,"socketUrl":"wss://socket.example/beta",
+                "commands":[{"id":"c1","kind":"stop","workerId":"w1"}]}"#,
         );
-        let reports = [Report {
-            command_id: "c0".into(),
-            ok: true,
-            error: None,
+        let results = [CommandReport::new("c0".into(), None)];
+        let workers = [WorkerReport {
+            id: "w1".into(),
+            state: State::Waiting,
+            session_id: Some("s1".into()),
         }];
+        let lines = [(
+            "w1".to_string(),
+            vec![Line {
+                seq: 0,
+                at: "2026-10-28T12:00:00.000Z".into(),
+                session_id: "s1".into(),
+                from: "agent",
+                text: "hi".into(),
+            }],
+        )];
         let Ok(reply) = client(url).heartbeat(&Heartbeat {
             version: "9.9.9",
-            agents: vec![Present::running("a1".into(), false, &[])],
-            command_results: &reports,
+            workers: &workers,
+            lines: line_reports(&lines),
+            command_results: &results,
             ..Default::default()
         }) else {
             panic!("heartbeat failed")
@@ -300,25 +211,32 @@ mod tests {
             sent,
             serde_json::json!({
                 "version":"9.9.9",
-                "agents":[{"id":"a1","state":"running"}],
+                "samples":[],
+                "workers":[{"id":"w1","state":"waiting","sessionId":"s1"}],
+                "lines":[{"workerId":"w1","seq":0,"at":"2026-10-28T12:00:00.000Z","sessionId":"s1","from":"agent","text":"hi"}],
                 "commandResults":[{"commandId":"c0","ok":true}]
             })
         );
-        assert_eq!(reply.heartbeat_interval, Some(3.0));
+        assert_eq!(reply.heartbeat_interval, Some(30.0));
+        assert_eq!(
+            reply.socket_url.as_deref(),
+            Some("wss://socket.example/beta")
+        );
         assert_eq!(reply.commands[0].id, "c1");
+        assert_eq!(reply.commands[0].worker_id.as_deref(), Some("w1"));
     }
 
     #[test]
     fn an_unsupported_contract_is_refused_with_the_minimum() {
         let (url, _) = serve_once(
             "426 Upgrade Required",
-            r#"{"error":"This host speaks contract 2, and the oldest this service accepts is 3. Upgrade agent-host.","minimum":3,"current":4}"#,
+            r#"{"error":"This host speaks contract 0, and the oldest this service accepts is 1. Upgrade worker-host.","minimum":1,"current":1}"#,
         );
         match client(url).heartbeat(&Heartbeat {
             version: "0.1.0",
             ..Default::default()
         }) {
-            Err(Failure::Unsupported { minimum: 3, error }) => assert!(error.contains("Upgrade")),
+            Err(Failure::Unsupported { minimum: 1, error }) => assert!(error.contains("Upgrade")),
             _ => panic!("expected an unsupported contract"),
         }
     }
@@ -347,58 +265,10 @@ mod tests {
         ));
     }
 
-    /// No tmux server answers on this socket, so the host has no agents.
-    fn no_agents() -> Agents {
-        Agents::new(
-            crate::tmux::Tmux::new(format!("agent-host-test-{}-none", std::process::id())),
-            crate::claude::Claude::new("/nonexistent/claude", None, "/nonexistent".into()),
-            "/nonexistent".into(),
-            Default::default(),
-            "http://fleet.test",
-        )
-    }
-
-    /// Takes a command that is settled as soon as it is taken.
-    fn take_now(command: &Command) -> Report {
-        take(command, &no_agents(), &mut Deliveries::new(Duration::ZERO)).unwrap()
-    }
-
     #[test]
-    fn a_beat_carries_what_agents_did_in_each_agents_report() {
+    fn a_heartbeat_says_what_the_host_will_run_and_how_loaded_it_is() {
         let (url, server) = serve_once("200 OK", "{}");
-        let lines = [Line {
-            seq: 0,
-            at: "2026-10-27T12:00:00.000Z".into(),
-            from: "agent",
-            text: "hi".into(),
-        }];
-        assert!(client(url)
-            .heartbeat(&Heartbeat {
-                version: "9.9.9",
-                agents: vec![
-                    Present::running("a1".into(), false, &lines),
-                    Present::running("a2".into(), true, &[])
-                ],
-                ..Default::default()
-            })
-            .is_ok());
-        let (_, body) = server.join().unwrap();
-        let sent: Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(
-            sent["agents"],
-            serde_json::json!([
-                {"id":"a1","state":"running","transcript":[
-                    {"seq":0,"at":"2026-10-27T12:00:00.000Z","from":"agent","text":"hi"}
-                ]},
-                {"id":"a2","state":"waiting"}
-            ])
-        );
-    }
-
-    #[test]
-    fn a_beat_says_what_the_host_will_run_and_how_loaded_it_is() {
-        let (url, server) = serve_once("200 OK", "{}");
-        let labels = ["macos".to_string(), "repo:agent-service".to_string()];
+        let labels = ["macos".to_string(), "repo:workplace-ui".to_string()];
         let samples = [Sample {
             at: "2026-10-27T12:00:00.000Z".into(),
             cpu: 0.25,
@@ -421,7 +291,7 @@ mod tests {
         assert_eq!(sent["capacity"], 2);
         assert_eq!(
             sent["labels"],
-            serde_json::json!(["macos", "repo:agent-service"])
+            serde_json::json!(["macos", "repo:workplace-ui"])
         );
         assert_eq!(
             sent["samples"],
@@ -458,88 +328,5 @@ mod tests {
             Err(Failure::Refused(400, body)) => assert_eq!(body, reason),
             _ => panic!("expected a refusal"),
         }
-    }
-
-    #[test]
-    fn a_message_for_an_agent_not_here_is_reported() {
-        let command: Command =
-            serde_json::from_str(r#"{"id":"c1","kind":"message","agentId":"a9","text":"hi"}"#)
-                .unwrap();
-        let report = take_now(&command);
-        assert!(!report.ok);
-        assert!(report.error.unwrap().contains("no agent a9"));
-    }
-
-    #[test]
-    fn a_message_without_its_fields_is_refused() {
-        let command: Command = serde_json::from_str(r#"{"id":"c1","kind":"message"}"#).unwrap();
-        assert!(!take_now(&command).ok);
-    }
-
-    #[test]
-    fn an_unhandled_command_is_reported_not_dropped() {
-        let command: Command = serde_json::from_str(r#"{"id":"c1","kind":"reboot"}"#).unwrap();
-        let report = take_now(&command);
-        assert_eq!(report.command_id, "c1");
-        assert!(!report.ok);
-        assert_eq!(
-            report.error.as_deref(),
-            Some(r#"this host does not handle "reboot" commands"#)
-        );
-    }
-
-    #[test]
-    fn a_stop_for_an_agent_not_here_is_done() {
-        let command: Command =
-            serde_json::from_str(r#"{"id":"c1","kind":"stop","agentId":"a9"}"#).unwrap();
-        assert_eq!(take_now(&command), Report::new("c1".into(), None));
-    }
-
-    #[test]
-    fn a_start_that_fails_is_reported_with_its_reason() {
-        let command: Command =
-            serde_json::from_str(r#"{"id":"c1","kind":"start","agentId":"a1"}"#).unwrap();
-        let report = take_now(&command);
-        assert!(!report.ok);
-        assert!(
-            report.error.unwrap().contains("not installed"),
-            "the reason is carried up"
-        );
-    }
-
-    #[test]
-    fn a_command_for_an_agent_names_one() {
-        for kind in ["start", "interrupt", "message", "stop"] {
-            let command: Command =
-                serde_json::from_str(&format!(r#"{{"id":"c1","kind":"{kind}","text":"hi"}}"#))
-                    .unwrap();
-            let report = take_now(&command);
-            assert_eq!(
-                report.error.as_deref(),
-                Some(format!("{kind:?} needs an agentId").as_str())
-            );
-        }
-    }
-
-    #[test]
-    fn an_interrupt_for_an_agent_not_here_is_reported() {
-        let command: Command =
-            serde_json::from_str(r#"{"id":"c1","kind":"interrupt","agentId":"a9"}"#).unwrap();
-        let report = take_now(&command);
-        assert!(!report.ok);
-        assert!(report.error.unwrap().contains("no agent a9"));
-    }
-
-    #[test]
-    fn a_ping_succeeds() {
-        let command: Command = serde_json::from_str(r#"{"id":"c1","kind":"ping"}"#).unwrap();
-        assert_eq!(
-            take_now(&command),
-            Report {
-                command_id: "c1".into(),
-                ok: true,
-                error: None
-            }
-        );
     }
 }

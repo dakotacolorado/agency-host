@@ -7,25 +7,26 @@ pub struct Config {
     pub service_url: String,
     pub token: String,
     pub host_id: String,
-    /// How many agents this host will run at once. Unset, the heartbeat leaves
+    /// How many workers this host will run sessions for at once. Unset, the heartbeat leaves
     /// it out and the service places nothing here: room is the owner's to
     /// state, not the host's to deduce from the machine.
     pub capacity: Option<u32>,
     /// What work this host can be matched to, as its owner names it. Checked
     /// by the service, whose refusal names the pattern a label must match.
     pub labels: Option<Vec<String>>,
-    /// The checkouts an agent can be given a worktree of, by the name a
-    /// placement uses for each. Listing one here is not advertising it: that
-    /// is a `repo:` label, which is the owner's to add alongside.
+    /// The checkouts a worker can be given a worktree of, by the name a
+    /// worker's `repositories` use for each. Listing one here is not
+    /// advertising it: that is a `repo:` label, which is the owner's to add
+    /// alongside.
     pub repositories: BTreeMap<String, PathBuf>,
-    /// The tmux server agents run on, by its `-L` name. Two hosts on one
-    /// machine need two, or each lists the other's agents as its own.
+    /// The tmux server workers' sessions run on, by its `-L` name.
     pub tmux_socket: String,
+    /// Where each worker has its folder. Two hosts on one machine need two of
+    /// these as well as two sockets, or each reports the other's workers.
+    pub workers_dir: PathBuf,
 }
 
-/// The socket every host used before it was a setting, so one upgraded in
-/// place still finds the agents it was already running.
-pub const DEFAULT_TMUX_SOCKET: &str = "agent-host";
+pub const DEFAULT_TMUX_SOCKET: &str = "worker-host";
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -37,22 +38,14 @@ struct File {
     labels: Option<Vec<String>>,
     repositories: Option<BTreeMap<String, PathBuf>>,
     tmux_socket: Option<String>,
+    workers_dir: Option<PathBuf>,
 }
 
 pub fn default_path() -> Option<PathBuf> {
     env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-        .map(|dir| dir.join("agent-host").join("config.toml"))
-}
-
-/// Where agents' folders go: data, not configuration, and kept apart from any
-/// checkout a person works in on the same machine.
-pub fn agents_dir() -> Option<PathBuf> {
-    env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
-        .map(|dir| dir.join("agent-host").join("agents"))
+        .map(|dir| dir.join("worker-host").join("config.toml"))
 }
 
 /// Reads the file, then lets the environment override it. A file that was
@@ -74,33 +67,51 @@ pub fn load(path: Option<PathBuf>, var: impl Fn(&str) -> Option<String>) -> Resu
 fn from_parts(file: File, var: impl Fn(&str) -> Option<String>) -> Result<Config, String> {
     let pick =
         |name: &str, from_file: Option<String>| var(name).filter(|v| !v.is_empty()).or(from_file);
-    let service_url = pick("AGENT_HOST_SERVICE_URL", file.service_url)
-        .ok_or("no service url: set service_url in the config file or AGENT_HOST_SERVICE_URL")?;
-    let token = pick("AGENT_HOST_TOKEN", file.token)
-        .ok_or("no token: set token in the config file or AGENT_HOST_TOKEN")?;
-    let host_id = pick("AGENT_HOST_ID", file.host_id)
+    let service_url = pick("WORKER_HOST_SERVICE_URL", file.service_url)
+        .ok_or("no service url: set service_url in the config file or WORKER_HOST_SERVICE_URL")?;
+    let token = pick("WORKER_HOST_TOKEN", file.token)
+        .ok_or("no token: set token in the config file or WORKER_HOST_TOKEN")?;
+    let host_id = pick("WORKER_HOST_ID", file.host_id)
         .or_else(crate::sys::hostname)
-        .ok_or("no host id: set host_id in the config file or AGENT_HOST_ID")?;
-    let tmux_socket = pick("AGENT_HOST_TMUX_SOCKET", file.tmux_socket)
+        .ok_or("no host id: set host_id in the config file or WORKER_HOST_ID")?;
+    let tmux_socket = pick("WORKER_HOST_TMUX_SOCKET", file.tmux_socket)
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| DEFAULT_TMUX_SOCKET.to_string());
-    let capacity = match var("AGENT_HOST_CAPACITY").filter(|v| !v.is_empty()) {
+    // In plain sight in the person's home rather than under a data directory:
+    // a worker's folder is where a person goes to see its work.
+    let workers_dir = match pick("WORKER_HOST_WORKERS_DIR", None)
+        .map(PathBuf::from)
+        .or(file.workers_dir)
+    {
+        Some(dir) => dir,
+        None => var("HOME")
+            .filter(|h| !h.is_empty())
+            .map(|home| PathBuf::from(home).join("workers"))
+            .ok_or("no workers_dir and no HOME to put ~/workers in")?,
+    };
+    if !workers_dir.is_absolute() {
+        return Err(format!(
+            "workers_dir {} is not an absolute path",
+            workers_dir.display()
+        ));
+    }
+    let capacity = match var("WORKER_HOST_CAPACITY").filter(|v| !v.is_empty()) {
         Some(n) => Some(
             n.parse()
-                .map_err(|_| format!("AGENT_HOST_CAPACITY {n}: not a number"))?,
+                .map_err(|_| format!("WORKER_HOST_CAPACITY {n}: not a number"))?,
         ),
         None => file.capacity,
     };
-    let labels = var("AGENT_HOST_LABELS")
+    let labels = var("WORKER_HOST_LABELS")
         .filter(|v| !v.is_empty())
         .map(|v| v.split(',').map(|l| l.trim().to_string()).collect())
         .or(file.labels);
-    let repositories = match var("AGENT_HOST_REPOSITORIES").filter(|v| !v.is_empty()) {
+    let repositories = match var("WORKER_HOST_REPOSITORIES").filter(|v| !v.is_empty()) {
         Some(v) => v
             .split(',')
             .map(|pair| match pair.split_once('=') {
                 Some((name, path)) => Ok((name.trim().to_string(), PathBuf::from(path.trim()))),
-                None => Err(format!("AGENT_HOST_REPOSITORIES {pair}: not name=path")),
+                None => Err(format!("WORKER_HOST_REPOSITORIES {pair}: not name=path")),
             })
             .collect::<Result<_, _>>()?,
         None => file.repositories.unwrap_or_default(),
@@ -120,6 +131,7 @@ fn from_parts(file: File, var: impl Fn(&str) -> Option<String>) -> Result<Config
         labels,
         repositories,
         tmux_socket,
+        workers_dir,
     })
 }
 
@@ -129,10 +141,12 @@ mod tests {
     use std::collections::HashMap;
 
     fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
-        let map: HashMap<String, String> = pairs
+        let mut map: HashMap<String, String> = pairs
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
+        map.entry("HOME".into())
+            .or_insert_with(|| "/home/me".into());
         move |k| map.get(k).cloned()
     }
 
@@ -145,9 +159,9 @@ mod tests {
         let config = from_parts(
             file(
                 "service_url = \"https://beta.example/\"\ntoken = \"t\"\nhost_id = \"studio\"\n\
-                 capacity = 2\nlabels = [\"macos\", \"repo:agent-service\"]",
+                 capacity = 2\nlabels = [\"macos\", \"repo:workplace-ui\"]",
             ),
-            env(&[]),
+            env(&[("HOME", "/home/me")]),
         )
         .unwrap();
         assert_eq!(
@@ -157,9 +171,10 @@ mod tests {
                 token: "t".into(),
                 host_id: "studio".into(),
                 capacity: Some(2),
-                labels: Some(vec!["macos".into(), "repo:agent-service".into()]),
+                labels: Some(vec!["macos".into(), "repo:workplace-ui".into()]),
                 repositories: BTreeMap::new(),
-                tmux_socket: "agent-host".into(),
+                tmux_socket: "worker-host".into(),
+                workers_dir: "/home/me/workers".into(),
             }
         );
     }
@@ -171,20 +186,18 @@ mod tests {
         assert_eq!(config.tmux_socket, "beta");
         let config = from_parts(
             file(&format!("{base}tmux_socket = \"beta\"")),
-            env(&[("AGENT_HOST_TMUX_SOCKET", "prod")]),
+            env(&[("WORKER_HOST_TMUX_SOCKET", "prod")]),
         )
         .unwrap();
         assert_eq!(config.tmux_socket, "prod");
     }
 
-    /// The socket a host used before this was a setting, so an upgraded host
-    /// still finds the agents it started.
     #[test]
-    fn an_unset_tmux_socket_is_the_one_hosts_always_used() {
+    fn an_unset_tmux_socket_is_worker_hosts_own() {
         let base = "service_url = \"https://x\"\ntoken = \"t\"\nhost_id = \"a\"\n";
         for text in [base.to_string(), format!("{base}tmux_socket = \"\"")] {
-            let config = from_parts(file(&text), env(&[("AGENT_HOST_TMUX_SOCKET", "")])).unwrap();
-            assert_eq!(config.tmux_socket, "agent-host");
+            let config = from_parts(file(&text), env(&[("WORKER_HOST_TMUX_SOCKET", "")])).unwrap();
+            assert_eq!(config.tmux_socket, "worker-host");
         }
     }
 
@@ -204,8 +217,8 @@ mod tests {
         let config = from_parts(
             file("service_url = \"https://x\"\ntoken = \"t\"\nhost_id = \"a\"\ncapacity = 1"),
             env(&[
-                ("AGENT_HOST_CAPACITY", "3"),
-                ("AGENT_HOST_LABELS", "linux, power:mains"),
+                ("WORKER_HOST_CAPACITY", "3"),
+                ("WORKER_HOST_LABELS", "linux, power:mains"),
             ]),
         )
         .unwrap();
@@ -220,10 +233,10 @@ mod tests {
     fn a_capacity_that_is_not_a_number_is_named() {
         let err = from_parts(
             file("service_url = \"https://x\"\ntoken = \"t\"\nhost_id = \"a\""),
-            env(&[("AGENT_HOST_CAPACITY", "lots")]),
+            env(&[("WORKER_HOST_CAPACITY", "lots")]),
         )
         .unwrap_err();
-        assert!(err.contains("AGENT_HOST_CAPACITY lots"), "{err}");
+        assert!(err.contains("WORKER_HOST_CAPACITY lots"), "{err}");
     }
 
     #[test]
@@ -231,8 +244,8 @@ mod tests {
         let config = from_parts(
             file("service_url = \"https://prod.example\"\ntoken = \"file\"\nhost_id = \"a\""),
             env(&[
-                ("AGENT_HOST_SERVICE_URL", "https://beta.example"),
-                ("AGENT_HOST_TOKEN", "env"),
+                ("WORKER_HOST_SERVICE_URL", "https://beta.example"),
+                ("WORKER_HOST_TOKEN", "env"),
             ]),
         )
         .unwrap();
@@ -246,18 +259,18 @@ mod tests {
         let base = "service_url = \"https://x\"\ntoken = \"t\"\nhost_id = \"a\"\n";
         let config = from_parts(
             file(&format!(
-                "{base}repositories = {{ agent-service = \"/src/agent-service\" }}"
+                "{base}repositories = {{ workplace-ui = \"/src/workplace-ui\" }}"
             )),
             env(&[]),
         )
         .unwrap();
         assert_eq!(
             config.repositories,
-            BTreeMap::from([("agent-service".into(), "/src/agent-service".into())])
+            BTreeMap::from([("workplace-ui".into(), "/src/workplace-ui".into())])
         );
         let config = from_parts(
             file(base),
-            env(&[("AGENT_HOST_REPOSITORIES", "a=/src/a, b = /src/b")]),
+            env(&[("WORKER_HOST_REPOSITORIES", "a=/src/a, b = /src/b")]),
         )
         .unwrap();
         assert_eq!(
@@ -270,13 +283,13 @@ mod tests {
     fn a_repository_must_be_an_absolute_path() {
         let err = from_parts(
             file("service_url = \"https://x\"\ntoken = \"t\""),
-            env(&[("AGENT_HOST_REPOSITORIES", "a=src/a")]),
+            env(&[("WORKER_HOST_REPOSITORIES", "a=src/a")]),
         )
         .unwrap_err();
         assert!(err.contains("repository a: src/a"), "{err}");
         let err = from_parts(
             file("service_url = \"https://x\"\ntoken = \"t\""),
-            env(&[("AGENT_HOST_REPOSITORIES", "a")]),
+            env(&[("WORKER_HOST_REPOSITORIES", "a")]),
         )
         .unwrap_err();
         assert!(err.contains("not name=path"), "{err}");
@@ -285,7 +298,29 @@ mod tests {
     #[test]
     fn a_missing_token_is_named() {
         let err = from_parts(file("service_url = \"https://x\""), env(&[])).unwrap_err();
-        assert!(err.contains("AGENT_HOST_TOKEN"), "{err}");
+        assert!(err.contains("WORKER_HOST_TOKEN"), "{err}");
+    }
+
+    #[test]
+    fn workers_live_in_home_unless_the_file_or_the_environment_says_otherwise() {
+        let base = "service_url = \"https://x\"\ntoken = \"t\"\nhost_id = \"a\"\n";
+        let config = from_parts(file(base), env(&[("HOME", "/home/me")])).unwrap();
+        assert_eq!(config.workers_dir, PathBuf::from("/home/me/workers"));
+        let config = from_parts(
+            file(&format!("{base}workers_dir = \"/srv/workers\"")),
+            env(&[("HOME", "/home/me")]),
+        )
+        .unwrap();
+        assert_eq!(config.workers_dir, PathBuf::from("/srv/workers"));
+        let config = from_parts(
+            file(&format!("{base}workers_dir = \"/srv/workers\"")),
+            env(&[("WORKER_HOST_WORKERS_DIR", "/beta/workers")]),
+        )
+        .unwrap();
+        assert_eq!(config.workers_dir, PathBuf::from("/beta/workers"));
+        let err =
+            from_parts(file(base), env(&[("WORKER_HOST_WORKERS_DIR", "workers")])).unwrap_err();
+        assert!(err.contains("not an absolute path"), "{err}");
     }
 
     #[test]
@@ -295,7 +330,7 @@ mod tests {
 
     #[test]
     fn an_explicit_file_must_exist() {
-        let err = load(Some("/nonexistent/agent-host.toml".into()), env(&[])).unwrap_err();
-        assert!(err.contains("/nonexistent/agent-host.toml"), "{err}");
+        let err = load(Some("/nonexistent/worker-host.toml".into()), env(&[])).unwrap_err();
+        assert!(err.contains("/nonexistent/worker-host.toml"), "{err}");
     }
 }
