@@ -5,8 +5,8 @@ static binary per architecture, no runtime to install.
 
 ## What it does, and nothing more
 
-Send heartbeats to worker-service saying what this machine looks like, and
-keep its socket open. Take the commands that come either way: make a worker's
+Send heartbeats to worker-service saying which workers are here and what
+they are doing, and keep its socket open. Take the commands that come either way: make a worker's
 folder, start or stop its session, carry a message to it, retire it. Report
 what workers do and say back out. That is the whole job.
 
