@@ -90,8 +90,8 @@ pub enum Entry {
     },
 }
 
-/// One entry as the service keeps it. `seq` counts the entries before it in
-/// the transcript, so a line read again -- a beat that did not land, or a host
+/// One entry as the service keeps it. `seq` counts the entries before it in the
+/// transcript, so a line read again -- a heartbeat that did not land, or a host
 /// that restarted -- has the same `seq` and is kept once.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Line {
@@ -140,7 +140,7 @@ pub struct Batch {
 /// transcript, most of which is Claude Code's own bookkeeping.
 const RAW_LIMIT: u64 = 8 << 20;
 
-/// The most lines the service takes for one agent in one beat.
+/// The most lines the service takes for one agent in one heartbeat.
 const MOST_LINES: usize = 1000;
 
 pub struct Agents {
@@ -149,7 +149,8 @@ pub struct Agents {
     /// Where each agent gets a folder of its own to start in.
     home: PathBuf,
     repositories: BTreeMap<String, PathBuf>,
-    /// The service this host beats to, which an agent is told as `FLEET_URL`.
+    /// The service this host sends heartbeats to, which an agent is told as
+    /// `FLEET_URL`.
     fleet_url: String,
 }
 
@@ -474,8 +475,8 @@ impl Deliveries {
     }
 
     /// Whether `command` is already being delivered. The service sends a
-    /// command again on every beat until it is reported, and a message typed
-    /// twice is said twice.
+    /// command again on every heartbeat until it is reported, and a message
+    /// typed twice is said twice.
     pub fn holds(&self, command: &str) -> bool {
         self.held.iter().any(|d| d.command == command)
     }
@@ -557,8 +558,9 @@ impl Delivery {
     }
 }
 
-/// Whether `at` is an instant the service takes: UTC, as Claude Code writes
-/// it. One it cannot take refuses the whole beat, and every beat after it.
+/// Whether `at` is an instant the service takes: UTC, as Claude Code writes it.
+/// One it cannot take refuses the whole heartbeat, and every heartbeat after
+/// it.
 fn instant(at: &str) -> bool {
     let shape = b"dddd-dd-ddTdd:dd:dd";
     let at = at.as_bytes();
@@ -781,12 +783,12 @@ sleep 60
     #[test]
     fn a_start_command_runs_the_agent_in_its_own_session_and_folder() {
         let host = host("start", FAKE_CLAUDE);
-        let command: crate::beat::Command = serde_json::from_str(
+        let command: crate::heartbeat::Command = serde_json::from_str(
             r#"{"id":"c1","kind":"start","agentId":"a1","workItemId":null,"role":"worker","level":1,"createdBy":null}"#,
         )
         .unwrap();
         let report =
-            crate::beat::take(&command, &host.agents, &mut Deliveries::new(PATIENCE)).unwrap();
+            crate::heartbeat::take(&command, &host.agents, &mut Deliveries::new(PATIENCE)).unwrap();
         assert!(report.ok, "{report:?}");
         assert_eq!(host.agents.ids(), ["a1"]);
         assert!(host.dir.join("agents/a1").is_dir());
@@ -842,7 +844,7 @@ sleep 60
         settled
     }
 
-    fn command(json: &str) -> crate::beat::Command {
+    fn command(json: &str) -> crate::heartbeat::Command {
         serde_json::from_str(json).unwrap()
     }
 
@@ -851,18 +853,18 @@ sleep 60
         let host = host("deaf", DEAF_CLAUDE);
         let agents = &host.agents;
         let mut deliveries = Deliveries::new(PATIENCE);
-        // One beat's commands, taken one after the other.
+        // One heartbeat's commands, taken one after the other.
         let start = command(r#"{"id":"c1","kind":"start","agentId":"a1"}"#);
         let message = command(r#"{"id":"c2","kind":"message","agentId":"a1","text":"hello"}"#);
-        let started = crate::beat::take(&start, agents, &mut deliveries).unwrap();
+        let started = crate::heartbeat::take(&start, agents, &mut deliveries).unwrap();
         assert!(started.ok, "{started:?}");
         assert_eq!(
-            crate::beat::take(&message, agents, &mut deliveries),
+            crate::heartbeat::take(&message, agents, &mut deliveries),
             None,
             "not reported while it cannot yet be heard"
         );
         assert_eq!(
-            crate::beat::take(&message, agents, &mut deliveries),
+            crate::heartbeat::take(&message, agents, &mut deliveries),
             None,
             "sent again by the service, it is not typed twice"
         );
@@ -1064,7 +1066,7 @@ sleep 60
         );
         assert!(
             host.agents.read("a4", cursor.get(), 1 << 16).is_none(),
-            "nothing new: the beat keeps what the cursor says"
+            "nothing new: the heartbeat keeps what the cursor says"
         );
         assert!(
             !read(&[r#"{"type":"user","message":{"role":"user","content":"main"}}"#,]),
@@ -1258,9 +1260,9 @@ sleep 60
         let stop = command(r#"{"id":"c1","kind":"stop","agentId":"a1"}"#);
         let mut deliveries = Deliveries::new(PATIENCE);
 
-        let report = crate::beat::take(&stop, agents, &mut deliveries).unwrap();
+        let report = crate::heartbeat::take(&stop, agents, &mut deliveries).unwrap();
         assert!(report.ok, "{report:?}");
-        assert!(agents.ids().is_empty(), "the next beat lists no agent");
+        assert!(agents.ids().is_empty(), "the next heartbeat lists no agent");
         assert_eq!(
             fs::read_to_string(tree.join("WORK")).unwrap(),
             "half-done\n"
@@ -1275,7 +1277,7 @@ sleep 60
             "the branch is kept"
         );
 
-        let again = crate::beat::take(&stop, agents, &mut deliveries).unwrap();
+        let again = crate::heartbeat::take(&stop, agents, &mut deliveries).unwrap();
         assert!(again.ok, "stopping one not running is done: {again:?}");
     }
 

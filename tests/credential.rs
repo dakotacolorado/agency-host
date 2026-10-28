@@ -1,8 +1,8 @@
 //! An agent's credential reaches its session's environment and nowhere else a
 //! person or another program could read it: not the host's log, not the
-//! transcript it beats up, not a process's arguments, not the prompt. The host
-//! here is the built binary, beating to a stand-in service, on a tmux server
-//! under a TMUX_TMPDIR of the test's own.
+//! transcript it sends up, not a process's arguments, not the prompt. The host
+//! here is the built binary, sending heartbeats to a stand-in service, on a
+//! tmux server under a TMUX_TMPDIR of the test's own.
 
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -36,8 +36,8 @@ fn start(credential: &str) -> String {
     )
 }
 
-/// Answers each beat in turn: the start, the same start again, then nothing.
-/// Hands back every request, head and body.
+/// Answers each heartbeat in turn: the start, the same start again, then
+/// nothing. Hands back every request, head and body.
 fn serve(listener: TcpListener) -> Arc<Mutex<Vec<String>>> {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let kept = seen.clone();
@@ -136,7 +136,7 @@ fn an_agent_has_its_credential_in_its_environment_and_nowhere_else() {
         .env("AGENT_HOST_TOKEN", "the-hosts-own")
         .env("AGENT_HOST_ID", "test")
         .env("AGENT_HOST_CAPACITY", "1")
-        .args(["--beats", "4"])
+        .args(["--heartbeats", "4"])
         .output()
         .unwrap();
     let log =
@@ -181,12 +181,12 @@ fn an_agent_has_its_credential_in_its_environment_and_nowhere_else() {
     let requests = requests.lock().unwrap();
     assert!(requests
         .iter()
-        .all(|r| r.contains("fleet-contract: 6\r\n") && r.contains("Bearer the-hosts-own")));
+        .all(|r| r.contains("fleet-contract: 7\r\n") && r.contains("Bearer the-hosts-own")));
     let transcript: Vec<String> = requests
         .iter()
         .filter_map(|r| r.split_once("\r\n\r\n"))
         .map(|(_, body)| serde_json::from_str::<Value>(body).unwrap())
-        .flat_map(|beat| beat["agents"].as_array().cloned().unwrap_or_default())
+        .flat_map(|heartbeat| heartbeat["agents"].as_array().cloned().unwrap_or_default())
         .flat_map(|a| a["transcript"].as_array().cloned().unwrap_or_default())
         .map(|line| line["text"].as_str().unwrap().to_string())
         .collect();
@@ -204,7 +204,7 @@ fn an_agent_has_its_credential_in_its_environment_and_nowhere_else() {
         ("any process's arguments", &ps),
         ("the tmux server's environment", &environment),
         ("the prompt", &prompt),
-        ("the beats", &requests.join("\n")),
+        ("the heartbeats", &requests.join("\n")),
     ] {
         for secret in [FIRST, LATER] {
             assert!(

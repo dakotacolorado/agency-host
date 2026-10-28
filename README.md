@@ -1,7 +1,7 @@
 # agent-host
 
-One static binary per machine. It beats to `agent-service`, starts and stops
-agents, carries messages to them and their output back.
+One static binary per machine. It sends heartbeats to `agent-service`, starts
+and stops agents, carries messages to them and their output back.
 
 Installing it is copying the file.
 
@@ -17,7 +17,7 @@ AGENT_HOST_SERVICE_URL=https://… AGENT_HOST_TOKEN=… scripts/install-host.sh
 It installs tmux if it is missing, makes sure the tailnet can reach the
 machine over ssh (and that nothing publishes it beyond the tailnet), downloads
 the release for this machine and checks it against `SHA256SUMS`, proves it
-with one beat, and only then installs it as a service that runs as you,
+with one heartbeat, and only then installs it as a service that runs as you,
 survives logout and reboot, and restarts if it dies: a launchd daemon on a
 mac, a lingering systemd user unit on linux. Workers are attached with
 `ssh` over the tailnet and `tmux attach`; the host itself only calls out.
@@ -60,41 +60,43 @@ repositories = { agent-service = "/Users/me/src/agent-service" }
 tmux_socket = "agent-host"  # AGENT_HOST_TMUX_SOCKET; this is the default
 ```
 
-`capacity` is how many agents this host will run at once, and `labels` what
-work it can be matched to. Both are the owner's to say: a host with no
-capacity still beats, but the service places nothing on it. A label the
-service cannot match on is refused with the pattern it must match, and the
-host logs that refusal and waits rather than beating without it.
-`repositories` are the checkouts on this machine that agents can be given a
-worktree of, by the name a placement uses; listing one is not advertising it,
-which is a `repo:` label's job. `install-host.sh` takes all three from the
-same variables, and keeps the ones an earlier install wrote.
+`capacity` is how many agents this host will run at once, and `labels` what work
+it can be matched to, by a placement's `selector`. Both are the owner's to say:
+a host with no capacity still sends heartbeats, but the service places nothing
+on it. A label the service
+cannot match on is refused with the pattern it must match, and the host logs
+that refusal and waits rather than sending heartbeats without it. `repositories`
+are the checkouts on this machine that agents can be given a worktree of, by the
+name a placement uses; listing one is not advertising it, which is a `repo:`
+label's job. `install-host.sh` takes all three from the same variables, and
+keeps the ones an earlier install wrote.
 
 `tmux_socket` names the tmux server agents run on (`tmux -L <socket>`). A host
-lists every agent on its server as its own, so two hosts on one machine --
-one beating to beta beside one beating to prod -- each need a socket of their
-own, or each reports the other's agents. Unset, it is `agent-host`, the socket
-every host used before it was a setting, so a host upgraded in place still
-finds the agents it was running.
+lists every agent on its server as its own, so two hosts on one machine -- one
+sending heartbeats to beta beside one sending heartbeats to prod -- each need a
+socket of their own, or each reports the other's agents. Unset, it is
+`agent-host`, the socket every host used before it was a setting, so a host
+upgraded in place still finds the agents it was running.
 
-Which service a host beats to is only this, so the same binary tries a change
-against beta before any machine is asked to take it:
+Which service a host sends heartbeats to is only this, so the same binary tries
+a change against beta before any machine is asked to take it:
 
 ```sh
-AGENT_HOST_SERVICE_URL=https://beta… AGENT_HOST_TOKEN=… agent-host --beats 3
+AGENT_HOST_SERVICE_URL=https://beta… AGENT_HOST_TOKEN=… agent-host --heartbeats 3
 ```
 
 ## Run
 
-`agent-host` runs until it is killed, and outlives the terminal that started
-it. A beat that fails is retried; a machine that sleeps simply beats late.
+`agent-host` runs until it is killed, and outlives the terminal that started it.
+A heartbeat that fails is retried; a machine that sleeps simply sends its next
+one late.
 
-Each beat also carries how loaded the machine is -- cpu, memory, and the disk
-agents work on. A reading the host cannot take is left out, never sent as
+Each heartbeat also carries how loaded the machine is -- cpu, memory, and the
+disk agents work on. A reading the host cannot take is left out, never sent as
 zero, and the service keeps the last one it had.
 
-Each beat carries the version and the commit the binary was built from, which
-`agent-host --version` also prints, so a machine can be asked directly:
+Each heartbeat carries the version and the commit the binary was built from,
+which `agent-host --version` also prints, so a machine can be asked directly:
 
 ```sh
 $ agent-host --version
@@ -110,13 +112,13 @@ says `unknown`.
 Each agent is a Claude Code session in tmux, on the host's own socket, so it
 keeps a terminal and can be spoken to while it works. A `start` command runs
 one, named by the id the service gave it, in a folder of its own under
-`$XDG_DATA_HOME/agent-host/agents` (or `~/.local/share/agent-host/agents`). A start the host has already done --
-its session is running, or it has run and left a transcript -- is reported
-done and not repeated, so a host that restarts before reporting does not run
-the agent twice. Every running agent is listed on each beat: `waiting` once its
-transcript shows its last turn ended and nothing said to it since -- it is
-waiting on someone, whether on a question or with its work done -- and
-`running` otherwise.
+`$XDG_DATA_HOME/agent-host/agents` (or `~/.local/share/agent-host/agents`). A
+start the host has already done -- its session is running, or it has run and
+left a transcript -- is reported done and not repeated, so a host that restarts
+before reporting does not run the agent twice. Every running agent is listed on
+each heartbeat: `waiting` once its transcript shows its last turn ended and
+nothing said to it since -- it is waiting on someone, whether on a question or
+with its work done -- and `running` otherwise.
 
 An agent placed for a repository starts in a git worktree of this host's
 checkout of it, at `agents/<id>/<repository>`, on the branch the placement
@@ -135,7 +137,7 @@ repository's own checks, ask when stuck, and how to act on the fleet by role
 -- and then its brief, exactly as placed. The prompt is kept at
 `agents/<id>/prompt.md`.
 
-Each agent's session has `FLEET_URL`, the service this host beats to,
+Each agent's session has `FLEET_URL`, the service this host sends heartbeats to,
 `AGENT_ID`, and `FLEET_TOKEN`, its own credential, with which it acts on the
 fleet as itself: places agents under itself, messages them and the agent that
 placed it, stops them. Each `start` carries the credential, as it has since
@@ -145,7 +147,7 @@ commits can reach it. The session's shell reads it into the environment as
 Claude Code starts, so it is never a process's argument, which anyone on the
 machine can list; it is in no prompt and no log; and where an agent prints it,
 the transcript the host sends says `[credential]` instead. The host itself
-keeps beating with its own token: a credential cannot beat.
+keeps sending heartbeats with its own token: a credential cannot send one.
 
 A workspace is kept when its agent ends, for inspection, and its worktree is
 locked so that `git worktree prune` in the checkout cannot take it by
@@ -160,7 +162,7 @@ as the answer, and the same run goes on. One not delivered within two minutes
 is reported failed with why: never typed, or typed and not yet taken. An `interrupt` presses Escape in the session, which stops the turn the
 agent is in, mid-command if need be, without ending the session; any text it
 carries is typed in once the turn has stopped. The host reads the session's
-transcript as it is written and sends it up on each beat, in that agent's
+transcript as it is written and sends it up on each heartbeat, in that agent's
 report: what it was told, what it said and what it ran, numbered from the
 transcript's start, so a host that restarts sends the same lines again under
 the same numbers and the service keeps each once.
@@ -190,5 +192,6 @@ cargo test -- --ignored real_claude   # real Claude Code sessions, end to end
 
 The tests need `tmux`.
 
-CI runs those, builds every target, runs the linux binary through a whole beat
-cycle against the beta service, and on a merge to main publishes the release.
+CI runs those, builds every target, runs the linux binary through a whole
+heartbeat cycle against the beta service, and on a merge to main publishes the
+release.

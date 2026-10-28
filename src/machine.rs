@@ -1,7 +1,7 @@
 //! How loaded the machine is: cpu, memory and the disk agents work on. A
 //! reading that cannot be taken is None, never zero, since a zero is a claim;
 //! a sample needs all of them, so one missing reading leaves the whole sample
-//! out of the beat and the service keeps the last one it had.
+//! out of the heartbeat and the service keeps the last one it had.
 
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -206,7 +206,7 @@ mod mach {
     }
 
     /// Each call to `mach_host_self` takes another reference to the port, so
-    /// it is asked once rather than on every beat.
+    /// it is asked once rather than on every heartbeat.
     pub fn host() -> u32 {
         static HOST: OnceLock<u32> = OnceLock::new();
         *HOST.get_or_init(|| unsafe { mach_host_self() })

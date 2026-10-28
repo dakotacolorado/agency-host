@@ -96,11 +96,12 @@ jobs:
   # halves agree, so this runs the artifact itself, not `cargo run`.
   integration:
     needs: build
-    # Whether this can prove anything depends on there being a beat endpoint to
-    # beat against, so that is what it asks: until beta exists, answers, and
-    # serves the beat, it passes unproved with a line naming what it waited for
-    # (see scripts/beat-cycle.sh). Red for a dependency still to come teaches
-    # people to ignore red. Either way release does not run.
+    # Whether this can prove anything depends on there being a heartbeat
+    # endpoint to send heartbeats to, so that is what it asks: until beta
+    # exists, answers, and serves the heartbeat, it passes unproved with a line
+    # naming what it waited for (see scripts/heartbeat-cycle.sh). Red for a
+    # dependency still to come teaches people to ignore red. Either way release
+    # does not run.
     runs-on: ubuntu-latest
     outputs:
       proved: ${{ steps.cycle.outputs.proved }}
@@ -120,7 +121,7 @@ jobs:
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE }}
           aws-region: us-east-1
-      - name: A whole beat cycle against beta
+      - name: A whole heartbeat cycle against beta
         id: cycle
         env:
           AWS_DEPLOY_ROLE: ${{ vars.AWS_DEPLOY_ROLE }}
@@ -145,11 +146,11 @@ jobs:
           echo "::add-mask::$AGENT_HOST_TOKEN"
           export AGENT_HOST_SERVICE_URL AGENT_HOST_TOKEN
           export AGENT_HOST_ID="ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          scripts/beat-cycle.sh ./agent-host-x86_64-unknown-linux-musl
+          scripts/heartbeat-cycle.sh ./agent-host-x86_64-unknown-linux-musl
 
   release:
     needs: integration
-    # Green is not enough: until beta serves the beat, integration passes
+    # Green is not enough: until beta serves the heartbeat, integration passes
     # without proving anything, and that must not publish.
     if: github.event_name == 'push' && needs.integration.outputs.proved == 'true'
     runs-on: ubuntu-latest

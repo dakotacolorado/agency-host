@@ -5,9 +5,9 @@ static binary per architecture, no runtime to install.
 
 ## What it does, and nothing more
 
-Beat to the service with what this machine looks like. Take the commands that
-come back: start an agent, stop one, carry a message to one. Stream what agents
-say back out. That is the whole job.
+Send heartbeats to the service saying what this machine looks like. Take the
+commands that come back: start an agent, stop one, carry a message to one.
+Stream what agents say back out. That is the whole job.
 
 It holds no opinion about what the work is. It does not read tickets, decide
 what to run, or know what an agent is for. Anything clever here is in the wrong

@@ -1,7 +1,7 @@
-//! Two hosts on one machine each beat with only their own agents, which needs
-//! each on a tmux server of its own. Every server here is under a TMUX_TMPDIR
-//! of the test's, so the default socket's name can be used without reaching a
-//! host that is really running on this machine.
+//! Two hosts on one machine each send heartbeats with only their own agents,
+//! which needs each on a tmux server of its own. Every server here is under a
+//! TMUX_TMPDIR of the test's, so the default socket's name can be used without
+//! reaching a host that is really running on this machine.
 
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -55,9 +55,9 @@ impl Machine {
         self.sockets.push(socket.to_string());
     }
 
-    /// The agents one host beats with, run with `env` and nothing from the
-    /// person's own config, data or Claude Code.
-    fn beat(&self, env: &[(&str, &str)]) -> Vec<String> {
+    /// The agents one host sends heartbeats with, run with `env` and nothing
+    /// from the person's own config, data or Claude Code.
+    fn heartbeat(&self, env: &[(&str, &str)]) -> Vec<String> {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let server = thread::spawn(move || serve_one_beat(&listener));
@@ -65,12 +65,12 @@ impl Machine {
         let out = host_command(&self.dir, &home)
             .env("AGENT_HOST_SERVICE_URL", &url)
             .envs(env.iter().copied())
-            .args(["--beats", "1"])
+            .args(["--heartbeats", "1"])
             .output()
             .unwrap();
         assert!(out.status.success(), "{out:?}");
-        let beat: Value = serde_json::from_str(&server.join().unwrap()).unwrap();
-        beat["agents"]
+        let heartbeat: Value = serde_json::from_str(&server.join().unwrap()).unwrap();
+        heartbeat["agents"]
             .as_array()
             .unwrap()
             .iter()
@@ -102,7 +102,7 @@ fn host_command(dir: &Path, home: &Path) -> Command {
     command
 }
 
-/// Answers one beat with no commands, and hands back its body.
+/// Answers one heartbeat with no commands, and hands back its body.
 fn serve_one_beat(listener: &TcpListener) -> String {
     let (stream, _) = listener.accept().unwrap();
     let mut reader = BufReader::new(stream);
@@ -135,14 +135,14 @@ fn two_hosts_on_one_machine_each_list_only_their_own_agents() {
     machine.agent("beta", "b1");
     machine.agent("prod", "p1");
     machine.agent("prod", "p2");
-    let mut prod = machine.beat(&[("AGENT_HOST_TMUX_SOCKET", "prod")]);
+    let mut prod = machine.heartbeat(&[("AGENT_HOST_TMUX_SOCKET", "prod")]);
     prod.sort();
     assert_eq!(prod, ["p1", "p2"]);
     let home = machine.dir.join("home");
     let config = home.join(".config/agent-host/config.toml");
     fs::create_dir_all(config.parent().unwrap()).unwrap();
     fs::write(&config, "tmux_socket = \"beta\"\n").unwrap();
-    assert_eq!(machine.beat(&[]), ["b1"]);
+    assert_eq!(machine.heartbeat(&[]), ["b1"]);
 }
 
 #[test]
@@ -151,5 +151,5 @@ fn a_host_upgraded_with_no_new_setting_finds_the_agents_it_already_runs() {
     // Where every host started its agents before the socket was a setting.
     machine.agent("agent-host", "a1");
     machine.agent("elsewhere", "x1");
-    assert_eq!(machine.beat(&[]), ["a1"]);
+    assert_eq!(machine.heartbeat(&[]), ["a1"]);
 }

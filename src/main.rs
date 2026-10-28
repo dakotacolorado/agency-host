@@ -1,15 +1,15 @@
 mod agent;
-mod beat;
 mod claude;
 mod config;
+mod heartbeat;
 mod machine;
 mod sys;
 mod tmux;
 mod workspace;
 
 use agent::{Agents, Deliveries};
-use beat::{Beat, Client, Failure, Present, Report, CONTRACT};
 use config::Config;
+use heartbeat::{Client, Failure, Heartbeat, Present, Report, CONTRACT};
 use machine::{Meter, Sample};
 use std::collections::HashMap;
 use std::{env, path::PathBuf, process::ExitCode, thread::sleep, time::Duration};
@@ -18,27 +18,28 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// A commit, or `dirty` or `unknown`; see build.rs.
 const COMMIT: &str = env!("AGENT_HOST_COMMIT");
 
-/// Bytes of transcript lines one agent may add to a beat. Transcripts are
-/// unbounded and bursty, and a beat grown until it fails loses liveness for
-/// the sake of logs; what does not fit goes on the next beat.
+/// Bytes of transcript lines one agent may add to a heartbeat. Transcripts are
+/// unbounded and bursty, and a heartbeat grown until it fails loses liveness
+/// for the sake of logs; what does not fit goes on the next heartbeat.
 const TRANSCRIPT_PER_AGENT: usize = 32 << 10;
 
-/// How soon to beat again while a message is on its way, so it is typed soon
-/// after its agent starts listening and reported soon after it arrives.
+/// How soon to send the next heartbeat while a message is on its way, so it is
+/// typed soon after its agent starts listening and reported soon after it
+/// arrives.
 const DELIVERING: Duration = Duration::from_secs(2);
 
-/// Samples kept while beats are failing, the most a beat may carry. A host
-/// cut off for longer loses its oldest, which a chart of load can spare.
+/// Samples kept while heartbeats are failing, the most a heartbeat may carry. A
+/// host cut off for longer loses its oldest, which a chart of load can spare.
 const SAMPLES_KEPT: usize = 1000;
 
-const USAGE: &str = "usage: agent-host [--config PATH] [--beats N]
+const USAGE: &str = "usage: agent-host [--config PATH] [--heartbeats N]
 
-  --config PATH  config file (default $XDG_CONFIG_HOME/agent-host/config.toml,
-                 or ~/.config/agent-host/config.toml); AGENT_HOST_CONFIG also names it
-  --beats N      stop after N beats, failing on the first one that does not land
+  --config PATH   config file (default $XDG_CONFIG_HOME/agent-host/config.toml,
+                  or ~/.config/agent-host/config.toml); AGENT_HOST_CONFIG also names it
+  --heartbeats N  stop after N heartbeats, failing on the first one that does not land
 
 Settings, each overriding the file:
-  AGENT_HOST_SERVICE_URL  service_url  the agent-service to beat to
+  AGENT_HOST_SERVICE_URL  service_url  the agent-service to send heartbeats to
   AGENT_HOST_TOKEN        token
   AGENT_HOST_ID           host_id      defaults to the hostname
   AGENT_HOST_CAPACITY     capacity     how many agents this host will run; unset, none are placed here
@@ -48,22 +49,22 @@ Settings, each overriding the file:
 
 struct Args {
     config: Option<PathBuf>,
-    beats: Option<u64>,
+    heartbeats: Option<u64>,
 }
 
 fn parse(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut parsed = Args {
         config: env::var_os("AGENT_HOST_CONFIG").map(PathBuf::from),
-        beats: None,
+        heartbeats: None,
     };
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--config" => parsed.config = Some(args.next().ok_or("--config needs a path")?.into()),
-            "--beats" => {
-                let n = args.next().ok_or("--beats needs a number")?;
-                parsed.beats = Some(
+            "--heartbeats" => {
+                let n = args.next().ok_or("--heartbeats needs a number")?;
+                parsed.heartbeats = Some(
                     n.parse()
-                        .map_err(|_| format!("--beats {n}: not a number"))?,
+                        .map_err(|_| format!("--heartbeats {n}: not a number"))?,
                 );
             }
             "--version" => {
@@ -101,7 +102,7 @@ fn main() -> ExitCode {
     };
     sys::ignore_hangup();
     log!(
-        "agent-host {VERSION} {COMMIT} (contract {CONTRACT}): host {} beating to {}",
+        "agent-host {VERSION} {COMMIT} (contract {CONTRACT}): host {} sending heartbeats to {}",
         config.host_id,
         config.service_url
     );
@@ -133,15 +134,15 @@ fn main() -> ExitCode {
         &config,
         &agents,
         &mut meter,
-        args.beats,
+        args.heartbeats,
     )
 }
 
-/// Assumes nothing survives between beats but what is in memory: the machine
-/// may sleep for weeks between two iterations, and the next beat is simply
-/// late. Reports and transcript that did not land are sent again on the next
-/// beat. A host that restarts sends each transcript again from its start; the
-/// `seq` on each line says it is the same.
+/// Assumes nothing survives between heartbeats but what is in memory: the
+/// machine may sleep for weeks between two iterations, and the next heartbeat
+/// is simply late. Reports and transcript that did not land are sent again on
+/// the next heartbeat. A host that restarts sends each transcript again from
+/// its start; the `seq` on each line says it is the same.
 fn run(
     client: &Client,
     config: &Config,
@@ -178,8 +179,8 @@ fn run(
             }
             samples.push(sample);
         }
-        let wait = match client.beat(&Beat {
-            host_version: VERSION,
+        let wait = match client.heartbeat(&Heartbeat {
+            version: VERSION,
             agents: read
                 .iter()
                 .map(|(id, from, batch)| match batch {
@@ -204,7 +205,7 @@ fn run(
                 reports.clear();
                 for command in &reply.commands {
                     let held = deliveries.holds(&command.id);
-                    match beat::take(command, agents, &mut deliveries) {
+                    match heartbeat::take(command, agents, &mut deliveries) {
                         Some(report) => {
                             log!(
                                 "command {} ({}): {}",
@@ -221,8 +222,8 @@ fn run(
                     }
                 }
                 if let Some(n) = limit.filter(|&n| landed >= n) {
-                    // One more beat carries the last commands' reports, which
-                    // would otherwise never leave.
+                    // One more heartbeat carries the last commands' reports,
+                    // which would otherwise never leave.
                     if (reports.is_empty() && deliveries.is_empty()) || landed > n {
                         return ExitCode::SUCCESS;
                     }
@@ -255,7 +256,7 @@ fn run(
                         (e, Duration::from_secs(2u64.pow(failures.min(6))))
                     }
                 };
-                log!("beat failed: {message}");
+                log!("heartbeat failed: {message}");
                 if limit.is_some() {
                     return ExitCode::FAILURE;
                 }

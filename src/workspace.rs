@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 const SHARED: &[&str] = &["node_modules"];
 
 /// Long enough for a fetch of a large repository; short enough that a network
-/// that has hung does not stop the host beating for good.
+/// that has hung does not stop the host sending heartbeats for good.
 const GIT_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[derive(Debug, PartialEq)]
@@ -169,7 +169,8 @@ fn exclude(dir: &Path, name: &str) -> Result<(), String> {
 }
 
 /// Runs git in `dir` with no terminal to ask for credentials on: a fetch that
-/// wanted a password would otherwise wait for one for ever, holding the beat.
+/// wanted a password would otherwise wait for one for ever, holding the
+/// heartbeat.
 fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
     let mut child = Command::new("git")
         .arg("-C")

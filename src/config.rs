@@ -7,9 +7,9 @@ pub struct Config {
     pub service_url: String,
     pub token: String,
     pub host_id: String,
-    /// How many agents this host will run at once. Unset, the beat leaves it
-    /// out and the service places nothing here: room is the owner's to state,
-    /// not the host's to deduce from the machine.
+    /// How many agents this host will run at once. Unset, the heartbeat leaves
+    /// it out and the service places nothing here: room is the owner's to
+    /// state, not the host's to deduce from the machine.
     pub capacity: Option<u32>,
     /// What work this host can be matched to, as its owner names it. Checked
     /// by the service, whose refusal names the pattern a label must match.
