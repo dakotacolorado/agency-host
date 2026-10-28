@@ -56,13 +56,20 @@ impl Claude {
     /// tmux refuses a command longer than a few kilobytes and a brief may be
     /// far longer. It is still one argument, never shell syntax: a quoted
     /// substitution is not read again.
-    pub fn argv(&self, session: &str, prompt: &Path) -> Vec<String> {
+    ///
+    /// `credential` names the file holding the agent's credential, which is
+    /// read into `FLEET_TOKEN` the same way, so that the token itself is in no
+    /// process's arguments: those are readable by everyone on the machine.
+    /// Without one, any `FLEET_TOKEN` the tmux server inherited is unset, so
+    /// an agent never holds a credential that is not its own.
+    pub fn argv(&self, session: &str, prompt: &Path, credential: Option<&Path>) -> Vec<String> {
         [
             "sh",
             "-c",
-            r#"p=$1; shift; exec "$@" "$(cat -- "$p")""#,
+            r#"p=$1 c=$2; shift 2; unset FLEET_TOKEN; [ -z "$c" ] || export FLEET_TOKEN="$(cat -- "$c")"; exec "$@" "$(cat -- "$p")""#,
             "sh",
             &prompt.to_string_lossy(),
+            &credential.map(Path::to_string_lossy).unwrap_or_default(),
             &self.program,
             "--dangerously-skip-permissions",
             "--session-id",

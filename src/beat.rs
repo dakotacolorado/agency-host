@@ -1,14 +1,15 @@
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-use crate::agent::{Agents, Deliveries, Line, Placement};
+use crate::agent::{Agents, Credential, Deliveries, Line, Placement};
 use crate::config::Config;
 use crate::machine::Sample;
 
 /// The agent-service host contract this beat body matches: `reports` arrived
 /// in 2, `labels`, `sessions` and `samples` in 3, and `capacity` in 4 (see
-/// agent-service `contracts/`). Raise it only with the body.
-pub const CONTRACT: u32 = 4;
+/// agent-service `contracts/`). Raise it only with the body. At 5 the body is
+/// unchanged, and each `start` comes with the agent's credential.
+pub const CONTRACT: u32 = 5;
 
 /// Every field but the agents and reports may be left out, and one left out
 /// keeps the value the service last had: a host that could not read something
@@ -87,6 +88,9 @@ pub struct Command {
     pub repository: Option<String>,
     pub branch: Option<String>,
     pub brief: Option<String>,
+    /// For `start`: the agent's own bearer token for the fleet. The same one
+    /// comes on every redelivery, and the first is the one kept.
+    pub credential: Option<Credential>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -192,6 +196,7 @@ pub fn take(command: &Command, agents: &Agents, deliveries: &mut Deliveries) -> 
                     repository: command.repository.as_deref(),
                     branch: command.branch.as_deref(),
                     brief: command.brief.as_deref(),
+                    credential: command.credential.as_ref(),
                 },
             )
             .err(),
@@ -352,6 +357,7 @@ mod tests {
             crate::claude::Claude::new("/nonexistent/claude", None, "/nonexistent".into()),
             "/nonexistent".into(),
             Default::default(),
+            "http://fleet.test",
         )
     }
 

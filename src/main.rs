@@ -126,6 +126,7 @@ fn main() -> ExitCode {
         claude::Claude::from_env(|k| env::var(k).ok()),
         home,
         config.repositories.clone(),
+        config.service_url.clone(),
     );
     run(
         &Client::new(&config),

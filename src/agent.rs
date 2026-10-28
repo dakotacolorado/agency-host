@@ -2,11 +2,12 @@
 //! which takes input while it works and writes its transcript as it goes; the
 //! host remembers nothing about them that tmux and the transcript do not hold.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
-use std::path::PathBuf;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -33,6 +34,44 @@ pub struct Placement<'a> {
     pub repository: Option<&'a str>,
     pub branch: Option<&'a str>,
     pub brief: Option<&'a str>,
+    pub credential: Option<&'a Credential>,
+}
+
+/// An agent's own bearer token for the fleet's `/fleet` routes, as the service
+/// issued it on its `start`. It has no `Display`, and its `Debug` names it
+/// without showing it, so no log line or error message can carry it by accident.
+#[derive(Deserialize)]
+#[serde(transparent)]
+pub struct Credential(String);
+
+impl std::fmt::Debug for Credential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Credential(..)")
+    }
+}
+
+/// Where an agent's credential is kept: in its own folder, beside its prompt
+/// and outside the worktree it commits from, readable by this user alone.
+const CREDENTIAL: &str = "credential";
+
+/// What stands in a transcript line where the agent's credential was.
+const REDACTED: &str = "[credential]";
+
+/// Writes the credential once. A start comes again until it is reported, with
+/// the same credential, and the first one written is the one kept.
+fn keep(file: &Path, credential: &Credential) -> Result<(), String> {
+    let written = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(file)
+        .and_then(|mut f| f.write_all(credential.0.as_bytes()));
+    match written {
+        Err(e) if e.kind() != io::ErrorKind::AlreadyExists => {
+            Err(format!("{}: {e}", file.display()))
+        }
+        _ => Ok(()),
+    }
 }
 
 /// One step of an agent's conversation, as its transcript says it.
@@ -110,6 +149,8 @@ pub struct Agents {
     /// Where each agent gets a folder of its own to start in.
     home: PathBuf,
     repositories: BTreeMap<String, PathBuf>,
+    /// The service this host beats to, which an agent is told as `FLEET_URL`.
+    fleet_url: String,
 }
 
 /// Between the key that stops a turn and the text that follows it: sent
@@ -123,12 +164,14 @@ impl Agents {
         claude: Claude,
         home: PathBuf,
         repositories: BTreeMap<String, PathBuf>,
+        fleet_url: impl Into<String>,
     ) -> Self {
         Agents {
             tmux,
             claude,
             home,
             repositories,
+            fleet_url: fleet_url.into(),
         }
     }
 
@@ -141,6 +184,12 @@ impl Agents {
     /// A start is sent again until it is reported, so one the host has already
     /// done -- before a restart that lost the report -- is done, not repeated:
     /// its session is still running, or it has run and left a transcript.
+    ///
+    /// The agent's session has `FLEET_URL`, `AGENT_ID` and, when the start
+    /// carried one, `FLEET_TOKEN`: its own credential. The credential is never
+    /// an argument to anything, where `ps` would show it to the machine; it is
+    /// written to a file only this user can read, outside the worktree, and
+    /// the session's shell reads it into the environment as Claude Code starts.
     pub fn start(&self, id: &str, placement: &Placement) -> Result<(), String> {
         let session = claude::session_id(id);
         if self.session(id).is_some() || self.claude.transcript(&session).is_some() {
@@ -149,6 +198,10 @@ impl Agents {
         self.claude.installed()?;
         let home = self.home.join(id);
         fs::create_dir_all(&home).map_err(|e| format!("{}: {e}", home.display()))?;
+        let credential = home.join(CREDENTIAL);
+        if let Some(given) = placement.credential {
+            keep(&credential, given)?;
+        }
         let (dir, workspace) = match (placement.repository, placement.branch) {
             (None, None) => (
                 home.clone(),
@@ -193,12 +246,25 @@ impl Agents {
         let file = home.join("prompt.md");
         fs::write(&file, &prompt).map_err(|e| format!("{}: {e}", file.display()))?;
         self.claude.trust(&dir)?;
+        let mut env = self.claude.env();
+        env.push(("FLEET_URL".into(), self.fleet_url.clone()));
+        env.push(("AGENT_ID".into(), id.into()));
         self.tmux.start(
             id,
             &dir,
-            &self.claude.argv(&session, &file),
-            &self.claude.env(),
+            &self
+                .claude
+                .argv(&session, &file, credential.is_file().then_some(&credential)),
+            &env,
         )
+    }
+
+    /// The agent's credential, if it was given one, so that it can be kept
+    /// out of what is read from its transcript.
+    fn credential(&self, id: &str) -> Option<String> {
+        fs::read_to_string(self.home.join(id).join(CREDENTIAL))
+            .ok()
+            .filter(|c| !c.is_empty())
     }
 
     pub fn ids(&self) -> Vec<String> {
@@ -312,8 +378,13 @@ impl Agents {
     /// of lines; the rest waits for the next read. None when nothing new has
     /// been written. Only whole lines are read, so a line Claude Code is still
     /// writing is left for next time.
+    ///
+    /// An agent may print its own credential, or put it in a command; where
+    /// it does, the line is sent with the credential replaced, since the
+    /// transcript is read by anyone who can read the agent.
     pub fn read(&self, id: &str, from: Cursor, budget: usize) -> Option<Batch> {
         let path = self.claude.transcript(&claude::session_id(id))?;
+        let secret = self.credential(id);
         let mut file = File::open(path).ok()?;
         file.seek(SeekFrom::Start(from.offset)).ok()?;
         let mut raw = BufReader::new(file).take(RAW_LIMIT);
@@ -336,7 +407,15 @@ impl Agents {
             let read: Vec<Line> = entries
                 .into_iter()
                 .zip(next.seq..)
-                .map(|(entry, seq)| entry.line(seq, at.clone()))
+                .map(|(entry, seq)| {
+                    let mut line = entry.line(seq, at.clone());
+                    if let Some(secret) = &secret {
+                        if line.text.contains(secret.as_str()) {
+                            line.text = line.text.replace(secret.as_str(), REDACTED);
+                        }
+                    }
+                    line
+                })
                 .collect();
             let more: usize = read
                 .iter()
@@ -572,6 +651,13 @@ printf '%s\n' '{"type":"assistant","message":{"id":"m0","content":[{"type":"text
 sleep 60
 "#;
 
+    /// Records the fleet's part of its environment, then waits.
+    const FLEET_CLAUDE: &str = r#"#!/bin/sh
+dir="$CLAUDE_CONFIG_DIR/projects/-fake"; mkdir -p "$dir"
+printf '%s %s %s' "$FLEET_URL" "$AGENT_ID" "${FLEET_TOKEN-unset}" > "$dir/$3.fleet"
+sleep 60
+"#;
+
     struct Host {
         agents: Agents,
         dir: PathBuf,
@@ -605,6 +691,7 @@ sleep 60
                 ),
                 dir.join("agents"),
                 repositories,
+                "http://fleet.test",
             ),
             dir,
         }
@@ -859,6 +946,7 @@ sleep 60
             ),
             host.dir.join("agents"),
             BTreeMap::new(),
+            "http://fleet.test",
         );
         restarted.start("a1", &brief("fix the build")).unwrap();
         assert_eq!(restarted.ids(), ["a1"]);
@@ -879,6 +967,7 @@ sleep 60
             Claude::new("/nonexistent/claude", None, "/nonexistent".into()),
             host.dir.join("agents"),
             BTreeMap::new(),
+            "http://fleet.test",
         );
         let err = agents.start("a1", &Placement::default()).unwrap_err();
         assert!(
@@ -1259,6 +1348,77 @@ sleep 60
         assert!(host.agents.ids().is_empty(), "no agent was started anyway");
     }
 
+    /// What the stand-in for Claude Code found in its environment.
+    fn fleet_env(host: &Host, id: &str) -> String {
+        let file = host.dir.join(format!(
+            "state/projects/-fake/{}.fleet",
+            claude::session_id(id)
+        ));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !file.exists() {
+            assert!(Instant::now() < deadline, "never started");
+            thread::sleep(Duration::from_millis(50));
+        }
+        thread::sleep(Duration::from_millis(100));
+        fs::read_to_string(file).unwrap()
+    }
+
+    #[test]
+    fn the_first_credential_given_is_the_one_kept() {
+        let host = host("credential", FLEET_CLAUDE);
+        let (first, later) = (
+            Credential("agt_first".into()),
+            Credential("agt_later".into()),
+        );
+        let err = host
+            .agents
+            .start(
+                "a1",
+                &Placement {
+                    branch: Some("feat/x"),
+                    credential: Some(&first),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(!err.contains("agt_first"), "{err}");
+        host.agents
+            .start(
+                "a1",
+                &Placement {
+                    credential: Some(&later),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(fleet_env(&host, "a1"), "http://fleet.test a1 agt_first");
+        assert_eq!(format!("{:?}", Placement {
+            credential: Some(&first),
+            ..Default::default()
+        }), "Placement { repository: None, branch: None, brief: None, credential: Some(Credential(..)) }");
+    }
+
+    #[test]
+    fn an_agent_started_without_a_credential_holds_none() {
+        let host = host("no-credential", FLEET_CLAUDE);
+        host.agents
+            .tmux
+            .start("other", Path::new("/"), &["sleep".into(), "60".into()], &[])
+            .unwrap();
+        // Whatever the tmux server was started with, the agent has no token
+        // that is not its own.
+        std::process::Command::new("tmux")
+            .args([
+                "-L",
+                &format!("agent-host-test-{}-no-credential", std::process::id()),
+            ])
+            .args(["set-environment", "-g", "FLEET_TOKEN", "someone-elses"])
+            .status()
+            .unwrap();
+        host.agents.start("a1", &Placement::default()).unwrap();
+        assert_eq!(fleet_env(&host, "a1"), "http://fleet.test a1 unset");
+    }
+
     /// Against Claude Code itself, which costs a real session:
     /// `cargo test -- --ignored real_claude`.
     #[test]
@@ -1272,6 +1432,7 @@ sleep 60
             Claude::from_env(|k| std::env::var(k).ok()),
             dir,
             BTreeMap::new(),
+            "http://fleet.test",
         );
         let id = format!("real-{}", std::process::id());
         agents
@@ -1332,6 +1493,7 @@ sleep 60
             Claude::from_env(|k| std::env::var(k).ok()),
             dir.clone(),
             BTreeMap::from([("widgets".to_string(), repo.checkout.clone())]),
+            "http://fleet.test",
         );
         let id = format!("real-w-{}", std::process::id());
         agents
@@ -1385,6 +1547,7 @@ sleep 60
             Claude::from_env(|k| std::env::var(k).ok()),
             dir,
             BTreeMap::new(),
+            "http://fleet.test",
         );
         let id = format!("real-i-{}", std::process::id());
         agents.start(&id, &Placement::default()).unwrap();
