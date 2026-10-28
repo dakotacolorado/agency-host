@@ -29,6 +29,8 @@ url=${WORKER_HOST_SERVICE_URL:-}
 url=${url%/}
 host=$WORKER_HOST_ID
 scratch=$(mktemp -d)
+# tmux's socket path must fit in 104 bytes, and macOS's $TMPDIR alone is half that.
+sockets=$(mktemp -d /tmp/wh.XXXXXX)
 log=$scratch/log
 out=$scratch/out
 worker=
@@ -98,7 +100,7 @@ mkdir -p "$scratch/bin" "$scratch/home" "$scratch/tmux"
 printf '#!/bin/sh\nexec sleep 600\n' > "$scratch/bin/claude"
 chmod +x "$scratch/bin/claude"
 export WORKER_HOST_CONFIG="$scratch/config.toml" WORKER_HOST_TMUX_SOCKET="$host" WORKER_HOST_CAPACITY=1
-export WORKER_HOST_WORKERS_DIR="$scratch/home/workers" TMUX_TMPDIR="$scratch/tmux" PATH="$scratch/bin:$PATH"
+export WORKER_HOST_WORKERS_DIR="$scratch/home/workers" TMUX_TMPDIR="$sockets" PATH="$scratch/bin:$PATH"
 unset WORKER_HOST_LABELS WORKER_HOST_REPOSITORIES
 
 cleanup() {
@@ -109,7 +111,7 @@ cleanup() {
   fi
   api DELETE "/fleet/hosts/$host" > /dev/null || true
   tmux -L "$host" kill-server 2> /dev/null || true
-  rm -rf "$scratch"
+  rm -rf "$scratch" "$sockets"
 }
 trap cleanup EXIT
 
