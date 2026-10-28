@@ -32,7 +32,7 @@ sleep 60
 
 fn start(credential: &str) -> String {
     format!(
-        r#"{{"commands":[{{"id":"c1","kind":"start","agentId":"{AGENT}","ticketId":null,"role":"worker","level":0,"createdBy":null,"brief":"wait","credential":"{credential}"}}],"comeBackIn":1}}"#
+        r#"{{"commands":[{{"id":"c1","kind":"start","agentId":"{AGENT}","workItemId":null,"role":"worker","level":0,"createdBy":null,"brief":"wait","credential":"{credential}"}}],"heartbeatInterval":1}}"#
     )
 }
 
@@ -48,7 +48,7 @@ fn serve(listener: TcpListener) -> Arc<Mutex<Vec<String>>> {
                 &match n {
                     0 => start(FIRST),
                     1 => start(LATER),
-                    _ => r#"{"commands":[],"comeBackIn":1}"#.into(),
+                    _ => r#"{"commands":[],"heartbeatInterval":1}"#.into(),
                 },
             );
             kept.lock().unwrap().push(request);
@@ -181,7 +181,7 @@ fn an_agent_has_its_credential_in_its_environment_and_nowhere_else() {
     let requests = requests.lock().unwrap();
     assert!(requests
         .iter()
-        .all(|r| r.contains("fleet-contract: 5\r\n") && r.contains("Bearer the-hosts-own")));
+        .all(|r| r.contains("fleet-contract: 6\r\n") && r.contains("Bearer the-hosts-own")));
     let transcript: Vec<String> = requests
         .iter()
         .filter_map(|r| r.split_once("\r\n\r\n"))

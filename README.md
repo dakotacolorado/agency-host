@@ -90,10 +90,8 @@ AGENT_HOST_SERVICE_URL=https://beta… AGENT_HOST_TOKEN=… agent-host --beats 3
 it. A beat that fails is retried; a machine that sleeps simply beats late.
 
 Each beat also carries how loaded the machine is -- cpu, memory, and the disk
-agents work on -- and the tmux sessions a person has open on it, which are
-not agents: agents run on the host's own tmux server and are listed apart. A
-reading the host cannot take is left out, never sent as zero, and the service
-keeps the last one it had.
+agents work on. A reading the host cannot take is left out, never sent as
+zero, and the service keeps the last one it had.
 
 Each beat carries the version and the commit the binary was built from, which
 `agent-host --version` also prints, so a machine can be asked directly:
@@ -115,10 +113,10 @@ one, named by the id the service gave it, in a folder of its own under
 `$XDG_DATA_HOME/agent-host/agents` (or `~/.local/share/agent-host/agents`). A start the host has already done --
 its session is running, or it has run and left a transcript -- is reported
 done and not repeated, so a host that restarts before reporting does not run
-the agent twice. Every running agent is listed on each beat: `asking` once its
+the agent twice. Every running agent is listed on each beat: `waiting` once its
 transcript shows its last turn ended and nothing said to it since -- it is
 waiting on someone, whether on a question or with its work done -- and
-`working` otherwise.
+`running` otherwise.
 
 An agent placed for a repository starts in a git worktree of this host's
 checkout of it, at `agents/<id>/<repository>`, on the branch the placement
@@ -140,8 +138,8 @@ repository's own checks, ask when stuck, and how to act on the fleet by role
 Each agent's session has `FLEET_URL`, the service this host beats to,
 `AGENT_ID`, and `FLEET_TOKEN`, its own credential, with which it acts on the
 fleet as itself: places agents under itself, messages them and the agent that
-placed it, stops them. The host beats at contract 5, so each `start` carries
-the credential; the first one sent is kept, at `agents/<id>/credential`, mode
+placed it, stops them. Each `start` carries the credential, as it has since
+contract 5; the first one sent is kept, at `agents/<id>/credential`, mode
 600, beside the prompt and outside the worktree, where nothing the agent
 commits can reach it. The session's shell reads it into the environment as
 Claude Code starts, so it is never a process's argument, which anyone on the

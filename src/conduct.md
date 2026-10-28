@@ -87,9 +87,9 @@ To place an agent, as yourself. Its level follows from yours; you do not set
 it. Build the body with `jq`, so that a brief is quoted whatever it says:
 
 ```sh
-jq -n --arg me "$AGENT_ID" --arg host "<host id>" --arg ticket "<ticket id>" \
+jq -n --arg me "$AGENT_ID" --arg host "<host id>" --arg item "<work item id>" \
       --arg repo "<repository>" --arg brief "<what to do>" \
-  '{hostId: $host, ticketId: $ticket, role: "worker", createdBy: $me, repository: $repo, brief: $brief}' |
+  '{hostId: $host, workItemId: $item, role: "worker", createdBy: $me, repository: $repo, brief: $brief}' |
   curl -sS -X POST "$FLEET_URL/fleet/agents" -H "Authorization: Bearer $FLEET_TOKEN" \
     -H 'Content-Type: application/json' --data-binary @-
 ```
@@ -98,16 +98,33 @@ To message an agent -- one you placed, or the one that placed you. It is
 typed into its session, and its answer comes back into yours the same way:
 
 ```sh
-jq -n --arg text "<what to say>" '{kind: "message", text: $text}' |
+jq -n --arg text "<what to say>" '{text: $text}' |
   curl -sS -X POST "$FLEET_URL/fleet/agents/<agent id>/messages" \
     -H "Authorization: Bearer $FLEET_TOKEN" -H 'Content-Type: application/json' --data-binary @-
 ```
 
-To stop one you placed, once its work is done; add `?force=true` only to give
-up on one whose host is lost, since that abandons it where it stands:
+To interrupt one you placed, which stops the turn it is in before the text is
+typed:
 
 ```sh
-curl -sS -X DELETE "$FLEET_URL/fleet/agents/<agent id>" -H "Authorization: Bearer $FLEET_TOKEN"
+jq -n --arg text "<what to say>" '{interrupt: true, text: $text}' |
+  curl -sS -X POST "$FLEET_URL/fleet/agents/<agent id>/messages" \
+    -H "Authorization: Bearer $FLEET_TOKEN" -H 'Content-Type: application/json' --data-binary @-
+```
+
+To stop one you placed, once its work is done:
+
+```sh
+curl -sS -X POST "$FLEET_URL/fleet/agents/<agent id>/stop" -H "Authorization: Bearer $FLEET_TOKEN" \
+  -H 'Content-Type: application/json' -d '{}'
+```
+
+Force-stop only one whose host is lost, since that abandons it where it
+stands:
+
+```sh
+curl -sS -X POST "$FLEET_URL/fleet/agents/<agent id>/stop" -H "Authorization: Bearer $FLEET_TOKEN" \
+  -H 'Content-Type: application/json' -d '{"force": true}'
 ```
 
 ## If an agent placed you

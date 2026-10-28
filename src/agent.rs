@@ -782,7 +782,7 @@ sleep 60
     fn a_start_command_runs_the_agent_in_its_own_session_and_folder() {
         let host = host("start", FAKE_CLAUDE);
         let command: crate::beat::Command = serde_json::from_str(
-            r#"{"id":"c1","kind":"start","agentId":"a1","ticketId":null,"role":"worker","level":1,"createdBy":null}"#,
+            r#"{"id":"c1","kind":"start","agentId":"a1","workItemId":null,"role":"worker","level":1,"createdBy":null}"#,
         )
         .unwrap();
         let report =

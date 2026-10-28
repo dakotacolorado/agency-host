@@ -70,9 +70,9 @@ impl Drop for Host<'_> {
         for agent in self.fleet.agents(&self.id) {
             if agent["active"] == true {
                 let id = agent["id"].as_str().unwrap();
-                let _ = ureq::delete(&format!("{}/fleet/agents/{id}?force=true", self.fleet.url))
+                let _ = ureq::post(&format!("{}/fleet/agents/{id}/stop", self.fleet.url))
                     .set("Authorization", &self.fleet.authorization)
-                    .call();
+                    .send_json(json!({ "force": true }));
             }
         }
         let _ = self.child.kill();
@@ -141,13 +141,13 @@ fn real_claude_lead_places_one_agent_under_itself_on_beta() {
         "/fleet/agents",
         Some(json!({
             "hostId": id,
-            "ticketId": TICKET,
+            "workItemId": TICKET,
             "role": "lead",
             "createdBy": null,
             "brief": format!(
                 "This is a test of placing an agent, and the whole of your work. Your ticket is \
                  {TICKET}, and the agent you place is on that same ticket. Place exactly one \
-                 agent, as yourself, as your rules show: hostId \"{id}\", ticketId \"{TICKET}\", \
+                 agent, as yourself, as your rules show: hostId \"{id}\", workItemId \"{TICKET}\", \
                  role \"worker\", no repository, and the brief \"Reply with one word: ready.\" Then reply with \
                  one line: the id the fleet gave it. Do nothing else."
             ),
@@ -155,7 +155,7 @@ fn real_claude_lead_places_one_agent_under_itself_on_beta() {
     );
     let lead_id = lead["id"].as_str().unwrap().to_string();
     assert_eq!(lead["level"], 0, "a person placed it");
-    assert_eq!(lead["ticketId"], TICKET);
+    assert_eq!(lead["workItemId"], TICKET);
 
     let deadline = Instant::now() + Duration::from_secs(300);
     let placed = loop {
@@ -179,7 +179,7 @@ fn real_claude_lead_places_one_agent_under_itself_on_beta() {
     );
     assert_eq!(placed["role"], "worker", "{placed}");
     assert_eq!(
-        placed["ticketId"], lead["ticketId"],
+        placed["workItemId"], lead["workItemId"],
         "on the lead's own ticket: {placed}"
     );
     assert_eq!(placed["hostId"], id.as_str(), "{placed}");
