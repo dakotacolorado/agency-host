@@ -180,7 +180,6 @@ fn run(
         }
         let wait = match client.beat(&Beat {
             host_version: VERSION,
-            host_commit: COMMIT,
             agents: read
                 .iter()
                 .map(|(id, from, batch)| match batch {

@@ -21,7 +21,6 @@ pub const CONTRACT: u32 = 6;
 #[serde(rename_all = "camelCase")]
 pub struct Beat<'a> {
     pub host_version: &'a str,
-    pub host_commit: &'a str,
     pub agents: Vec<Present<'a>>,
     pub command_results: &'a [Report],
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -276,7 +275,6 @@ mod tests {
         }];
         let Ok(reply) = client(url).beat(&Beat {
             host_version: "9.9.9",
-            host_commit: "0123abc",
             agents: vec![Present::running("a1".into(), false, &[])],
             command_results: &reports,
             ..Default::default()
@@ -299,7 +297,6 @@ mod tests {
             sent,
             serde_json::json!({
                 "hostVersion":"9.9.9",
-                "hostCommit":"0123abc",
                 "agents":[{"id":"a1","state":"running"}],
                 "commandResults":[{"commandId":"c0","ok":true}]
             })
@@ -316,7 +313,6 @@ mod tests {
         );
         match client(url).beat(&Beat {
             host_version: "0.1.0",
-            host_commit: "dirty",
             ..Default::default()
         }) {
             Err(Failure::Unsupported { minimum: 3, error }) => assert!(error.contains("Upgrade")),
@@ -329,7 +325,6 @@ mod tests {
         let (url, _) = serve_once("403 Forbidden", r#"{"error":"not this host"}"#);
         match client(url).beat(&Beat {
             host_version: "0.1.0",
-            host_commit: "dirty",
             ..Default::default()
         }) {
             Err(Failure::Refused(403, body)) => assert!(body.contains("not this host")),
@@ -343,7 +338,6 @@ mod tests {
         assert!(matches!(
             client(url).beat(&Beat {
                 host_version: "0.1.0",
-                host_commit: "dirty",
                 ..Default::default()
             }),
             Err(Failure::Transient(_))
@@ -378,7 +372,6 @@ mod tests {
         assert!(client(url)
             .beat(&Beat {
                 host_version: "9.9.9",
-                host_commit: "0123abc",
                 agents: vec![
                     Present::running("a1".into(), false, &lines),
                     Present::running("a2".into(), true, &[])
@@ -414,7 +407,6 @@ mod tests {
         assert!(client(url)
             .beat(&Beat {
                 host_version: "9.9.9",
-                host_commit: "0123abc",
                 capacity: Some(2),
                 labels: Some(&labels),
                 samples: &samples,
