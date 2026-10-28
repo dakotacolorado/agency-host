@@ -504,7 +504,9 @@ mod tests {
     }
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("worker-host-{}-{name}", std::process::id()));
+        // Apart from the worker tests' folders, which run beside these and share names.
+        let dir =
+            std::env::temp_dir().join(format!("worker-host-claude-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir.canonicalize().unwrap()

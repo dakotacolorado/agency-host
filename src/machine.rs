@@ -316,10 +316,14 @@ mod tests {
             None,
             "the first reading has nothing to compare cpu with"
         );
-        std::thread::sleep(Duration::from_millis(200));
-        let sample = meter
-            .sample()
-            .expect("a second reading samples the machine");
+        // A loaded machine may count no tick between two close readings, so
+        // a later reading is given the chance an earlier one did not have.
+        let sample = (0..20)
+            .find_map(|_| {
+                std::thread::sleep(Duration::from_millis(200));
+                meter.sample()
+            })
+            .expect("a later reading samples the machine");
         assert!((0.0..=1.0).contains(&sample.cpu), "{sample:?}");
         assert!(sample.memory_total > 64 << 20, "{sample:?}");
         assert!(sample.memory_used > 0, "{sample:?}");
