@@ -1,6 +1,6 @@
-//! Commands as the host takes them, whichever way they came: pushed on the
-//! socket, or in a heartbeat's reply. The service sends a command both ways,
-//! and again on every heartbeat until a report naming it lands, so the same
+//! Commands as the host takes them. The service pushes a command on the
+//! socket when it is written, and again, with every other still pending,
+//! each time the socket opens, until a report naming it is in. So the same
 //! command arrives more than once and must be acted on once.
 
 use std::collections::VecDeque;
@@ -9,7 +9,7 @@ use crate::protocol::{Command, CommandReport};
 use crate::worker::{Deliveries, Workers};
 
 /// How many settled commands are remembered. A command is sent again only
-/// until its report lands, which is the next heartbeat at the latest, so
+/// until its report is in, which is the next report on an open socket, so
 /// this is far more than are ever settled in that time.
 const REMEMBERED: usize = 1000;
 

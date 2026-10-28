@@ -1,43 +1,49 @@
 # worker-host
 
-One static binary per machine. It sends heartbeats to `worker-service` and
-keeps a socket open to it, makes workers' folders, runs their Claude Code
-sessions in tmux, carries messages to them and what they say back.
+One static binary per machine. It sends heartbeats to `worker-service`, which
+say only that it is here and what it offers, and keeps a socket open to it:
+every command comes down the socket and every report goes up it. It makes
+workers' folders, runs their Claude Code sessions in tmux, carries messages to
+them and what they say back.
 
 ## Install
 
-On a mac or linux machine signed in to tailscale, with `gh` signed in and
-Claude Code installed and signed in:
+On a mac or linux machine with `tmux`, `gh` signed in, and Claude Code
+installed and signed in:
 
 ```sh
-WORKER_HOST_SERVICE_URL=https://… WORKER_HOST_TOKEN=… scripts/install-host.sh
+scripts/install-host.sh https://… <token>
+~/.local/bin/worker-host 2>> ~/worker-host.log &
 ```
 
-It installs tmux if missing, checks the tailnet can reach the machine over
-ssh, downloads the release and checks it against `SHA256SUMS`, proves it with
-one heartbeat, and installs it as a service (a launchd daemon on a mac, a
-lingering systemd user unit on linux). Run it again for a newer release
-(`--release TAG`, or `--binary PATH` for a local build); `rollback` swaps back
-to the previous binary, `remove` takes it off the machine.
+The script puts the latest release in `~/.local/bin` and, if there is none,
+writes the config file below. Run it again for a newer release.
 
 ## Configure
 
-`~/.config/worker-host/config.toml` (or `--config`, or `WORKER_HOST_CONFIG`);
-the environment overrides it:
+`~/.config/worker-host/config.toml` (or `--config PATH`, or
+`WORKER_HOST_CONFIG`) holds every setting:
 
 ```toml
-service_url = "https://…"          # WORKER_HOST_SERVICE_URL
-token = "…"                        # WORKER_HOST_TOKEN
-host_id = "studio"                 # WORKER_HOST_ID; defaults to the hostname
-capacity = 2                       # WORKER_HOST_CAPACITY; unset, nothing is placed here
-labels = ["macos"]                 # WORKER_HOST_LABELS, comma-separated
-workers_dir = "/Users/me/workers"  # WORKER_HOST_WORKERS_DIR; default ~/workers
-tmux_socket = "worker-host"        # WORKER_HOST_TMUX_SOCKET; this is the default
+service_url = "https://…"
+token = "…"
+host_id = "studio"                 # default: the hostname
+capacity = 2                       # unset, nothing is placed here
+labels = ["macos"]
+workers_dir = "/Users/me/workers"  # default: ~/workers
+tmux_socket = "worker-host"        # this is the default
 ```
 
 Two hosts on one machine (beta beside prod) each need their own `workers_dir`
-and `tmux_socket`. `worker-host --heartbeats N` sends N heartbeats and stops,
-with no socket. `worker-host --version` prints the version and commit.
+and `tmux_socket`. `worker-host --version` prints the version.
+
+## Socket
+
+Commands arrive only on the socket: pushed when written, and every one still
+pending pushed again when a socket opens. Reports (workers' states, transcript
+lines, command results) go only on it. What has not been written on a socket is
+kept, and each socket opened is first sent every worker's state, the lines not
+yet sent, and the results not yet sent.
 
 ## Workers
 
@@ -80,6 +86,6 @@ cargo test -- --ignored real_claude   # real Claude Code sessions
 WORKER_SERVICE_URL=… WORKER_SERVICE_TOKEN=… cargo test --test worker_service
 ```
 
-The tests need `tmux` and use tmux servers of their own. CI also runs
-`scripts/heartbeat-cycle.sh` against beta (create, start, stop, retire, by
-heartbeat and by socket) and publishes the release on a merge to main.
+The tests need `tmux` and use tmux servers of their own. CI runs
+`tests/worker_service.rs` against beta and publishes a release on a merge to
+main only when that test ran against beta and passed.

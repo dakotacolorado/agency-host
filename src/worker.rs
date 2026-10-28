@@ -567,6 +567,7 @@ impl Deliveries {
         }
     }
 
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.held.is_empty()
     }

@@ -1,9 +1,9 @@
-//! The socket the service pushes commands on, and the host its reports.
-//! Push is best effort and the heartbeat's queue is the truth: a socket that
-//! is down loses nothing, it only makes the host slower to hear and be heard
-//! until it is back. So this is one thread that keeps a socket open whenever
-//! it can, hands down every command it reads, and sends up what it is given
-//! while it is open, dropping what it is given while it is not.
+//! The socket: the only way commands come down and reports go up. A socket
+//! that is down loses nothing -- the service pushes every pending command again
+//! when it opens, and the host keeps what it has not sent -- it only makes the
+//! host slower to hear and be heard until it is back. So this is one thread
+//! that keeps a socket open whenever it can, hands down every command it reads,
+//! and writes what it is given, saying whether it went.
 
 use std::io::{self, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -35,6 +35,9 @@ const PATIENCE: Duration = Duration::from_secs(15);
 const BACKOFF: (Duration, Duration) = (Duration::from_secs(1), Duration::from_secs(60));
 const STEADY: Duration = Duration::from_secs(60);
 
+/// A message to write, and where to say whether it was written.
+type Outgoing = (String, Sender<bool>);
+
 /// The host's side of the socket, shared with its thread.
 struct Shared {
     url: Mutex<Option<String>>,
@@ -46,7 +49,7 @@ struct Shared {
 
 pub struct Socket {
     shared: Arc<Shared>,
-    outbox: Sender<String>,
+    outbox: Sender<Outgoing>,
     pub commands: Receiver<Command>,
 }
 
@@ -92,10 +95,19 @@ impl Socket {
         self.shared.opened.load(Ordering::SeqCst)
     }
 
-    /// Sends `up` if the socket is open, and says whether it was. What is
-    /// sent is only best effort, even then.
+    /// Writes `up` on the socket and says whether it was written: false at
+    /// once while there is no socket, and false for a write that failed.
     pub fn send(&self, up: &Up) -> bool {
-        self.is_up() && serde_json::to_string(up).is_ok_and(|text| self.outbox.send(text).is_ok())
+        if !self.is_up() {
+            return false;
+        }
+        let Ok(text) = serde_json::to_string(up) else {
+            return false;
+        };
+        let (done, written) = mpsc::channel();
+        // A write is given up on after `PATIENCE`, and one read before it.
+        self.outbox.send((text, done)).is_ok()
+            && written.recv_timeout(PATIENCE * 2 + POLL).unwrap_or(false)
     }
 }
 
@@ -227,7 +239,7 @@ struct Link {
     shared: Arc<Shared>,
     host_id: String,
     authorization: String,
-    outgoing: Receiver<String>,
+    outgoing: Receiver<Outgoing>,
     incoming: Sender<Command>,
 }
 
@@ -250,6 +262,7 @@ impl Link {
                     crate::log!("socket open: {url}");
                     let why = self.carry(socket, &url);
                     self.shared.up.store(false, Ordering::SeqCst);
+                    self.drain();
                     crate::log!("socket closed: {why}");
                 }
                 Err(e) => crate::log!("socket could not open: {e}"),
@@ -266,11 +279,12 @@ impl Link {
         }
     }
 
-    /// Throws away what was given to send while there was no socket: it is
-    /// in the next heartbeat in any case, and a report gone stale is worse
-    /// than none.
+    /// Answers what was given to send while there was no socket: not sent,
+    /// so the host keeps it for the next.
     fn drain(&self) {
-        while self.outgoing.try_recv().is_ok() {}
+        while let Ok((_, done)) = self.outgoing.try_recv() {
+            let _ = done.send(false);
+        }
     }
 
     fn host_gone(&self) -> bool {
@@ -288,8 +302,10 @@ impl Link {
             }
             loop {
                 match self.outgoing.try_recv() {
-                    Ok(text) => {
-                        if let Err(e) = socket.send(Message::text(text)) {
+                    Ok((text, done)) => {
+                        let sent = socket.send(Message::text(text));
+                        let _ = done.send(sent.is_ok());
+                        if let Err(e) = sent {
                             return e.to_string();
                         }
                         said = Instant::now();

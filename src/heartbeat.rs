@@ -1,35 +1,28 @@
+//! Liveness, and what the host offers: the heartbeat alone keeps a host
+//! `connected`, and its reply names the socket everything else goes on.
+
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 use crate::config::Config;
-use crate::protocol::{Command, CommandReport, LineReport, WorkerReport};
 
-/// Every field but the reports may be left out, and one left out keeps the
-/// value the service last had: a host that could not read something says
-/// nothing about it rather than sending a zero or an empty list.
+/// A field left out keeps the value the service last had: a host that could
+/// not read something says nothing about it rather than sending a zero or an
+/// empty list.
 #[derive(Debug, Default, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct Heartbeat<'a> {
     pub version: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub labels: Option<&'a [String]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capacity: Option<u32>,
-    /// Every worker here that is not retired.
-    pub workers: &'a [WorkerReport],
-    /// What workers have done since the last heartbeat that landed, so a
-    /// transcript can be read while the worker is still working.
-    pub lines: Vec<LineReport<'a>>,
-    pub command_results: &'a [CommandReport],
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Reply {
-    #[serde(default)]
-    pub commands: Vec<Command>,
     pub heartbeat_interval: Option<f64>,
-    /// Where to open the socket the service pushes commands on.
+    /// Where to open the socket commands and reports go on.
     pub socket_url: Option<String>,
 }
 
@@ -88,7 +81,6 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{line_reports, Line, State};
     use serde_json::Value;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
@@ -139,33 +131,13 @@ mod tests {
     }
 
     #[test]
-    fn a_heartbeat_carries_reports_up_and_brings_commands_and_the_socket_down() {
+    fn a_heartbeat_says_only_what_the_host_is_and_brings_the_socket_down() {
         let (url, server) = serve_once(
             "200 OK",
-            r#"{"heartbeatInterval":30,"socketUrl":"wss://socket.example/beta",
-                "commands":[{"id":"c1","kind":"stop","workerId":"w1"}]}"#,
+            r#"{"heartbeatInterval":30,"socketUrl":"wss://socket.example/beta"}"#,
         );
-        let results = [CommandReport::new("c0".into(), None)];
-        let workers = [WorkerReport {
-            id: "w1".into(),
-            state: State::Waiting,
-            session_id: Some("s1".into()),
-        }];
-        let lines = [(
-            "w1".to_string(),
-            vec![Line {
-                seq: 0,
-                at: "2026-10-28T12:00:00.000Z".into(),
-                session_id: "s1".into(),
-                from: "agent",
-                text: "hi".into(),
-            }],
-        )];
         let Ok(reply) = client(url).heartbeat(&Heartbeat {
             version: "9.9.9",
-            workers: &workers,
-            lines: line_reports(&lines),
-            command_results: &results,
             ..Default::default()
         }) else {
             panic!("heartbeat failed")
@@ -178,22 +150,12 @@ mod tests {
         );
         assert!(head.contains("Authorization: Bearer secret"), "{head}");
         let sent: Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(
-            sent,
-            serde_json::json!({
-                "version":"9.9.9",
-                "workers":[{"id":"w1","state":"waiting","sessionId":"s1"}],
-                "lines":[{"workerId":"w1","seq":0,"at":"2026-10-28T12:00:00.000Z","sessionId":"s1","from":"agent","text":"hi"}],
-                "commandResults":[{"commandId":"c0","ok":true}]
-            })
-        );
+        assert_eq!(sent, serde_json::json!({"version":"9.9.9"}));
         assert_eq!(reply.heartbeat_interval, Some(30.0));
         assert_eq!(
             reply.socket_url.as_deref(),
             Some("wss://socket.example/beta")
         );
-        assert_eq!(reply.commands[0].id, "c1");
-        assert_eq!(reply.commands[0].worker_id.as_deref(), Some("w1"));
     }
 
     #[test]
@@ -229,7 +191,6 @@ mod tests {
                 version: "9.9.9",
                 capacity: Some(2),
                 labels: Some(&labels),
-                ..Default::default()
             })
             .is_ok());
         let (_, body) = server.join().unwrap();

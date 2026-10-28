@@ -1,5 +1,5 @@
-//! What worker-service and a host say to each other, the same whether it
-//! goes by heartbeat or by socket: commands down, reports up.
+//! What worker-service and a host say to each other on the socket: commands
+//! down, reports up.
 
 use serde::{Deserialize, Serialize};
 
@@ -97,8 +97,8 @@ pub fn line_reports(lines: &Lines) -> Vec<LineReport<'_>> {
         .collect()
 }
 
-/// What the socket carries up: a report, as the heartbeat's fields, or a ping
-/// that keeps API Gateway from closing a socket it thinks idle.
+/// What the socket carries up: a report, or a ping that keeps API Gateway
+/// from closing a socket it thinks idle.
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum Up<'a> {
@@ -170,7 +170,7 @@ mod tests {
     }
 
     #[test]
-    fn a_report_is_the_heartbeats_fields_under_its_type() {
+    fn a_report_is_workers_lines_and_results_under_its_type() {
         let workers = [
             WorkerReport {
                 id: "w1".into(),

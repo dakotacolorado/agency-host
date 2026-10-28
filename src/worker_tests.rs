@@ -526,7 +526,7 @@ fn a_message_taken_with_its_workers_start_waits_until_it_listens() {
     let workers = &host.workers;
     host.create("w1", "ana");
     let mut deliveries = Deliveries::new(PATIENCE);
-    // One heartbeat's commands, taken one after the other.
+    // Two commands pushed together, taken one after the other.
     let start = command(r#"{"id":"c1","kind":"start","workerId":"w1","sessionId":"s1"}"#);
     let message = command(r#"{"id":"c2","kind":"message","workerId":"w1","text":"hello"}"#);
     let started = commands::take(&start, workers, &mut deliveries).unwrap();

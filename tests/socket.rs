@@ -1,18 +1,18 @@
 //! The built binary, running on, takes a command pushed on its socket at once
 //! and reports on the socket as soon as what it did shows: well inside the 30
-//! seconds between heartbeats. The service is a stand-in: an HTTP heartbeat
-//! that names a socket, and the socket.
+//! seconds between heartbeats. A socket that drops is opened again and told
+//! every worker's state, and a command the service pushes again on it is
+//! answered, not done again.
 
-use serde_json::{json, Value};
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+mod common;
+
+use common::{push, report_until, result, Service};
+use serde_json::json;
+use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command};
 use std::time::{Duration, Instant};
-use std::{fs, thread};
-use tungstenite::handshake::server::{Request, Response};
-use tungstenite::Message;
 
 /// Answers its opening message, and ends its turn.
 const CLAUDE: &str = r#"#!/bin/sh
@@ -22,34 +22,7 @@ printf '%s\n' '{"type":"assistant","message":{"id":"m0","content":[{"type":"text
 sleep 60
 "#;
 
-/// Answers every heartbeat with the socket's url and nothing else to do.
-fn heartbeats(listener: TcpListener, socket: String) {
-    thread::spawn(move || {
-        for stream in listener.incoming() {
-            let mut reader = BufReader::new(stream.unwrap());
-            let mut length = 0;
-            loop {
-                let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
-                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                    length = v.trim().parse().unwrap();
-                }
-                if line == "\r\n" {
-                    break;
-                }
-            }
-            let mut body = vec![0; length];
-            reader.read_exact(&mut body).unwrap();
-            let reply =
-                json!({"heartbeatInterval":30,"socketUrl":socket,"commands":[]}).to_string();
-            let _ = write!(
-                reader.get_mut(),
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
-                reply.len()
-            );
-        }
-    });
-}
+const TMUX: &str = "wh-test-sock";
 
 struct Machine {
     dir: PathBuf,
@@ -63,63 +36,13 @@ impl Drop for Machine {
         let _ = Command::new("tmux")
             .env_remove("TMUX")
             .env("TMUX_TMPDIR", self.dir.join("tmux"))
-            .args(["-L", "worker-host", "kill-server"])
+            .args(["-L", TMUX, "kill-server"])
             .output();
         let _ = fs::remove_dir_all(&self.dir);
     }
 }
 
-type Socket = tungstenite::WebSocket<TcpStream>;
-
-/// Reads reports until one satisfies `done`, failing after `within`.
-fn report_until(socket: &mut Socket, within: Duration, done: impl Fn(&Value) -> bool) -> Value {
-    let deadline = Instant::now() + within;
-    socket
-        .get_ref()
-        .set_read_timeout(Some(Duration::from_millis(200)))
-        .unwrap();
-    let mut seen = vec![];
-    loop {
-        assert!(Instant::now() < deadline, "no such report in {seen:#?}");
-        match socket.read() {
-            Ok(Message::Text(text)) => {
-                let report: Value = serde_json::from_str(&text).unwrap();
-                assert_eq!(report["type"], "report", "{report}");
-                if done(&report) {
-                    return report;
-                }
-                seen.push(report);
-            }
-            Ok(_) => {}
-            Err(tungstenite::Error::Io(e))
-                if matches!(
-                    e.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) => {}
-            Err(e) => panic!("{e}; read {seen:#?}"),
-        }
-    }
-}
-
-fn result(report: &Value, command: &str) -> Option<Value> {
-    report["commandResults"]
-        .as_array()?
-        .iter()
-        .find(|r| r["commandId"] == command)
-        .cloned()
-}
-
-fn push(socket: &mut Socket, command: Value) {
-    socket
-        .send(Message::text(
-            json!({"type":"command","command":command}).to_string(),
-        ))
-        .unwrap();
-}
-
 #[test]
-// tungstenite's callback answers a refusal with a whole HTTP response.
-#[allow(clippy::result_large_err)]
 fn a_command_pushed_on_the_socket_is_taken_and_reported_at_once() {
     // Short, since a unix socket's path is limited to about a hundred bytes.
     let dir = std::env::temp_dir().join(format!("wh-{}-sock", std::process::id()));
@@ -130,39 +53,17 @@ fn a_command_pushed_on_the_socket_is_taken_and_reported_at_once() {
     fs::write(dir.join("bin/claude"), CLAUDE).unwrap();
     fs::set_permissions(dir.join("bin/claude"), fs::Permissions::from_mode(0o755)).unwrap();
 
-    let sockets = TcpListener::bind("127.0.0.1:0").unwrap();
-    let socket_url = format!("ws://{}/beta", sockets.local_addr().unwrap());
-    let http = TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://{}", http.local_addr().unwrap());
-    heartbeats(http, socket_url);
-
-    let path = format!(
-        "{}:{}",
-        dir.join("bin").display(),
-        std::env::var("PATH").unwrap_or_default()
+    let service = Service::start();
+    let child = common::host(
+        &dir,
+        &format!(
+            "service_url = \"{}\"\ntoken = \"the-hosts-own\"\nhost_id = \"studio\"\ntmux_socket = \"{TMUX}\"\n",
+            service.url
+        ),
     );
-    let child = Command::new(env!("CARGO_BIN_EXE_worker-host"))
-        .env_clear()
-        .env("PATH", path)
-        .env("HOME", dir.join("home"))
-        .env("XDG_CONFIG_HOME", dir.join("home/.config"))
-        .env("TMUX_TMPDIR", dir.join("tmux"))
-        .env("WORKER_HOST_SERVICE_URL", &url)
-        .env("WORKER_HOST_TOKEN", "the-hosts-own")
-        .env("WORKER_HOST_ID", "studio")
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
     let _machine = Machine { dir, child };
 
-    let (stream, _) = sockets.accept().unwrap();
-    let (mut path, mut authorization) = (String::new(), String::new());
-    let mut socket = tungstenite::accept_hdr(stream, |req: &Request, res: Response| {
-        path = req.uri().to_string();
-        authorization = req.headers()["authorization"].to_str().unwrap().into();
-        Ok(res)
-    })
-    .unwrap();
+    let (mut socket, path, authorization) = service.accept();
     assert_eq!(path, "/beta?hostId=studio");
     assert_eq!(authorization, "Bearer the-hosts-own");
     let opening = report_until(&mut socket, Duration::from_secs(5), |_| true);
@@ -180,10 +81,8 @@ fn a_command_pushed_on_the_socket_is_taken_and_reported_at_once() {
         json!([{"id":"w1","state":"idle","sessionId":null}])
     );
 
-    push(
-        &mut socket,
-        json!({"id":"c2","kind":"start","workerId":"w1","sessionId":"5a1e2b3c-4d5e-4f60-8a7b-8c9d0e1f2a3b","resume":false,"text":"hello"}),
-    );
+    let start = json!({"id":"c2","kind":"start","workerId":"w1","sessionId":"5a1e2b3c-4d5e-4f60-8a7b-8c9d0e1f2a3b","resume":false,"text":"hello"});
+    push(&mut socket, start.clone());
     // Its result, its turn ending and what it said may come in one report
     // or in several.
     let (mut ok, mut waiting, mut lines) = (None, false, vec![]);
@@ -215,12 +114,25 @@ fn a_command_pushed_on_the_socket_is_taken_and_reported_at_once() {
         json!([{"id":"w1","state":"idle","sessionId":null}])
     );
 
-    // Pushed again, as the service would until a report of it lands, it is
-    // answered and not done again.
-    push(
-        &mut socket,
-        json!({"id":"c2","kind":"start","workerId":"w1","sessionId":"5a1e2b3c-4d5e-4f60-8a7b-8c9d0e1f2a3b","resume":false,"text":"hello"}),
+    // Dropped without a close, as a network that goes away does. Nothing has
+    // changed, yet the socket opened again is told every worker's state.
+    drop(socket);
+    let (mut socket, _, _) = service.accept();
+    let reopened = report_until(&mut socket, quick, |_| true);
+    assert_eq!(
+        reopened["workers"],
+        json!([{"id":"w1","state":"idle","sessionId":null}])
     );
+    assert_eq!(
+        reopened["lines"],
+        json!([]),
+        "lines sent are not sent again"
+    );
+
+    // Pushed again as pending, as the service does when a socket opens, the
+    // start is answered as before and not done again.
+    push(&mut socket, start);
     let again = report_until(&mut socket, quick, |r| result(r, "c2").is_some());
+    assert_eq!(result(&again, "c2").unwrap()["ok"], true, "{again}");
     assert_eq!(again["workers"][0]["state"], "idle", "{again}");
 }

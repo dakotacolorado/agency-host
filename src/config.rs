@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use std::{env, fs, io, path::PathBuf};
+use std::{env, fs, path::PathBuf};
 
 #[derive(Debug, PartialEq)]
 pub struct Config {
@@ -22,7 +22,7 @@ pub struct Config {
 
 pub const DEFAULT_TMUX_SOCKET: &str = "worker-host";
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct File {
     service_url: Option<String>,
@@ -41,45 +41,35 @@ pub fn default_path() -> Option<PathBuf> {
         .map(|dir| dir.join("worker-host").join("config.toml"))
 }
 
-/// Reads the file, then lets the environment override it. A file that was
-/// named explicitly must exist; the default one may be absent when the
-/// environment carries everything.
-pub fn load(path: Option<PathBuf>, var: impl Fn(&str) -> Option<String>) -> Result<Config, String> {
-    let explicit = path.is_some();
-    let file = match path.or_else(default_path) {
-        None => File::default(),
-        Some(path) => match fs::read_to_string(&path) {
-            Ok(text) => toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?,
-            Err(e) if e.kind() == io::ErrorKind::NotFound && !explicit => File::default(),
-            Err(e) => return Err(format!("{}: {e}", path.display())),
-        },
-    };
-    from_parts(file, var)
+/// Reads the file, which is the only place settings come from.
+pub fn load(path: Option<PathBuf>) -> Result<Config, String> {
+    let path = path
+        .or_else(default_path)
+        .ok_or("no config file: pass --config PATH")?;
+    let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let file = toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    from_file(file, env::var_os("HOME").map(PathBuf::from))
+        .map_err(|e| format!("{}: {e}", path.display()))
 }
 
-fn from_parts(file: File, var: impl Fn(&str) -> Option<String>) -> Result<Config, String> {
-    let pick =
-        |name: &str, from_file: Option<String>| var(name).filter(|v| !v.is_empty()).or(from_file);
-    let service_url = pick("WORKER_HOST_SERVICE_URL", file.service_url)
-        .ok_or("no service url: set service_url in the config file or WORKER_HOST_SERVICE_URL")?;
-    let token = pick("WORKER_HOST_TOKEN", file.token)
-        .ok_or("no token: set token in the config file or WORKER_HOST_TOKEN")?;
-    let host_id = pick("WORKER_HOST_ID", file.host_id)
+fn from_file(file: File, home: Option<PathBuf>) -> Result<Config, String> {
+    let service_url = file.service_url.ok_or("no service_url")?;
+    let token = file.token.ok_or("no token")?;
+    let host_id = file
+        .host_id
         .or_else(crate::sys::hostname)
-        .ok_or("no host id: set host_id in the config file or WORKER_HOST_ID")?;
-    let tmux_socket = pick("WORKER_HOST_TMUX_SOCKET", file.tmux_socket)
+        .ok_or("no host_id, and no hostname to use instead")?;
+    let tmux_socket = file
+        .tmux_socket
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| DEFAULT_TMUX_SOCKET.to_string());
     // In plain sight in the person's home rather than under a data directory:
     // a worker's folder is where a person goes to see its work.
-    let workers_dir = match pick("WORKER_HOST_WORKERS_DIR", None)
-        .map(PathBuf::from)
-        .or(file.workers_dir)
-    {
+    let workers_dir = match file.workers_dir {
         Some(dir) => dir,
-        None => var("HOME")
-            .filter(|h| !h.is_empty())
-            .map(|home| PathBuf::from(home).join("workers"))
+        None => home
+            .filter(|h| !h.as_os_str().is_empty())
+            .map(|home| home.join("workers"))
             .ok_or("no workers_dir and no HOME to put ~/workers in")?,
     };
     if !workers_dir.is_absolute() {
@@ -88,23 +78,12 @@ fn from_parts(file: File, var: impl Fn(&str) -> Option<String>) -> Result<Config
             workers_dir.display()
         ));
     }
-    let capacity = match var("WORKER_HOST_CAPACITY").filter(|v| !v.is_empty()) {
-        Some(n) => Some(
-            n.parse()
-                .map_err(|_| format!("WORKER_HOST_CAPACITY {n}: not a number"))?,
-        ),
-        None => file.capacity,
-    };
-    let labels = var("WORKER_HOST_LABELS")
-        .filter(|v| !v.is_empty())
-        .map(|v| v.split(',').map(|l| l.trim().to_string()).collect())
-        .or(file.labels);
     Ok(Config {
         service_url: service_url.trim_end_matches('/').to_string(),
         token,
         host_id,
-        capacity,
-        labels,
+        capacity: file.capacity,
+        labels: file.labels,
         tmux_socket,
         workers_dir,
     })
@@ -113,30 +92,18 @@ fn from_parts(file: File, var: impl Fn(&str) -> Option<String>) -> Result<Config
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
-    fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
-        let mut map: HashMap<String, String> = pairs
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
-        map.entry("HOME".into())
-            .or_insert_with(|| "/home/me".into());
-        move |k| map.get(k).cloned()
-    }
+    const BASE: &str = "service_url = \"https://x\"\ntoken = \"t\"\nhost_id = \"a\"\n";
 
-    fn file(text: &str) -> File {
-        toml::from_str(text).unwrap()
+    fn read(text: &str) -> Result<Config, String> {
+        from_file(toml::from_str(text).unwrap(), Some("/home/me".into()))
     }
 
     #[test]
     fn reads_the_file() {
-        let config = from_parts(
-            file(
-                "service_url = \"https://beta.example/\"\ntoken = \"t\"\nhost_id = \"studio\"\n\
-                 capacity = 2\nlabels = [\"macos\", \"linux\"]",
-            ),
-            env(&[("HOME", "/home/me")]),
+        let config = read(
+            "service_url = \"https://beta.example/\"\ntoken = \"t\"\nhost_id = \"studio\"\n\
+             capacity = 2\nlabels = [\"macos\", \"linux\"]",
         )
         .unwrap();
         assert_eq!(
@@ -154,105 +121,36 @@ mod tests {
     }
 
     #[test]
-    fn the_tmux_socket_is_named_in_the_file_or_the_environment() {
-        let base = "service_url = \"https://x\"\ntoken = \"t\"\nhost_id = \"a\"\n";
-        let config = from_parts(file(&format!("{base}tmux_socket = \"beta\"")), env(&[])).unwrap();
-        assert_eq!(config.tmux_socket, "beta");
-        let config = from_parts(
-            file(&format!("{base}tmux_socket = \"beta\"")),
-            env(&[("WORKER_HOST_TMUX_SOCKET", "prod")]),
-        )
-        .unwrap();
-        assert_eq!(config.tmux_socket, "prod");
-    }
-
-    #[test]
-    fn an_unset_tmux_socket_is_worker_hosts_own() {
-        let base = "service_url = \"https://x\"\ntoken = \"t\"\nhost_id = \"a\"\n";
-        for text in [base.to_string(), format!("{base}tmux_socket = \"\"")] {
-            let config = from_parts(file(&text), env(&[("WORKER_HOST_TMUX_SOCKET", "")])).unwrap();
-            assert_eq!(config.tmux_socket, "worker-host");
+    fn an_unset_or_empty_tmux_socket_is_worker_hosts_own() {
+        for text in [BASE.to_string(), format!("{BASE}tmux_socket = \"\"")] {
+            assert_eq!(read(&text).unwrap().tmux_socket, "worker-host");
         }
+        let config = read(&format!("{BASE}tmux_socket = \"beta\"")).unwrap();
+        assert_eq!(config.tmux_socket, "beta");
     }
 
     #[test]
     fn capacity_and_labels_are_left_unset_rather_than_guessed() {
-        let config = from_parts(
-            file("service_url = \"https://x\"\ntoken = \"t\"\nhost_id = \"a\""),
-            env(&[]),
-        )
-        .unwrap();
+        let config = read(BASE).unwrap();
         assert_eq!(config.capacity, None);
         assert_eq!(config.labels, None);
     }
 
     #[test]
-    fn the_environment_names_capacity_and_labels() {
-        let config = from_parts(
-            file("service_url = \"https://x\"\ntoken = \"t\"\nhost_id = \"a\"\ncapacity = 1"),
-            env(&[
-                ("WORKER_HOST_CAPACITY", "3"),
-                ("WORKER_HOST_LABELS", "linux, power:mains"),
-            ]),
-        )
-        .unwrap();
-        assert_eq!(config.capacity, Some(3));
-        assert_eq!(
-            config.labels,
-            Some(vec!["linux".into(), "power:mains".into()])
-        );
-    }
-
-    #[test]
-    fn a_capacity_that_is_not_a_number_is_named() {
-        let err = from_parts(
-            file("service_url = \"https://x\"\ntoken = \"t\"\nhost_id = \"a\""),
-            env(&[("WORKER_HOST_CAPACITY", "lots")]),
-        )
-        .unwrap_err();
-        assert!(err.contains("WORKER_HOST_CAPACITY lots"), "{err}");
-    }
-
-    #[test]
-    fn the_environment_overrides_the_file() {
-        let config = from_parts(
-            file("service_url = \"https://prod.example\"\ntoken = \"file\"\nhost_id = \"a\""),
-            env(&[
-                ("WORKER_HOST_SERVICE_URL", "https://beta.example"),
-                ("WORKER_HOST_TOKEN", "env"),
-            ]),
-        )
-        .unwrap();
-        assert_eq!(config.service_url, "https://beta.example");
-        assert_eq!(config.token, "env");
-        assert_eq!(config.host_id, "a");
-    }
-
-    #[test]
     fn a_missing_token_is_named() {
-        let err = from_parts(file("service_url = \"https://x\""), env(&[])).unwrap_err();
-        assert!(err.contains("WORKER_HOST_TOKEN"), "{err}");
+        let err = read("service_url = \"https://x\"").unwrap_err();
+        assert!(err.contains("no token"), "{err}");
     }
 
     #[test]
-    fn workers_live_in_home_unless_the_file_or_the_environment_says_otherwise() {
-        let base = "service_url = \"https://x\"\ntoken = \"t\"\nhost_id = \"a\"\n";
-        let config = from_parts(file(base), env(&[("HOME", "/home/me")])).unwrap();
-        assert_eq!(config.workers_dir, PathBuf::from("/home/me/workers"));
-        let config = from_parts(
-            file(&format!("{base}workers_dir = \"/srv/workers\"")),
-            env(&[("HOME", "/home/me")]),
-        )
-        .unwrap();
+    fn workers_live_in_home_unless_the_file_says_otherwise() {
+        assert_eq!(
+            read(BASE).unwrap().workers_dir,
+            PathBuf::from("/home/me/workers")
+        );
+        let config = read(&format!("{BASE}workers_dir = \"/srv/workers\"")).unwrap();
         assert_eq!(config.workers_dir, PathBuf::from("/srv/workers"));
-        let config = from_parts(
-            file(&format!("{base}workers_dir = \"/srv/workers\"")),
-            env(&[("WORKER_HOST_WORKERS_DIR", "/beta/workers")]),
-        )
-        .unwrap();
-        assert_eq!(config.workers_dir, PathBuf::from("/beta/workers"));
-        let err =
-            from_parts(file(base), env(&[("WORKER_HOST_WORKERS_DIR", "workers")])).unwrap_err();
+        let err = read(&format!("{BASE}workers_dir = \"workers\"")).unwrap_err();
         assert!(err.contains("not an absolute path"), "{err}");
     }
 
@@ -262,8 +160,8 @@ mod tests {
     }
 
     #[test]
-    fn an_explicit_file_must_exist() {
-        let err = load(Some("/nonexistent/worker-host.toml".into()), env(&[])).unwrap_err();
+    fn the_file_must_exist() {
+        let err = load(Some("/nonexistent/worker-host.toml".into())).unwrap_err();
         assert!(err.contains("/nonexistent/worker-host.toml"), "{err}");
     }
 }

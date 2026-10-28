@@ -71,19 +71,20 @@ jobs:
           else
             otool -L "$bin" | tail -n +2 | tee /dev/stderr | grep -v '^[[:space:]]*/usr/lib/' && exit 1 || true
           fi
-      # What a host reports is what it was released as: the commit this run
-      # checked out, which the release is tagged at. Searching the file covers
-      # the targets this runner cannot execute.
-      - name: Names the commit it was built from
-        run: grep -aq "$GITHUB_SHA" target/${{ matrix.target }}/release/worker-host
+      # The two targets these runners can execute must print exactly
+      # `worker-host <Cargo version>`.
       - name: Runs on a bare machine
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: |
-          docker run --rm -v "$PWD/target/${{ matrix.target }}/release:/b:ro" busybox /b/worker-host --version \
-            | tee /dev/stderr | grep -qx "worker-host .* $GITHUB_SHA"
+          got=$(docker run --rm -v "$PWD/target/${{ matrix.target }}/release:/b:ro" busybox /b/worker-host --version)
+          echo "$got"
+          [ "$got" = "worker-host $(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)" ]
       - name: Runs here
         if: matrix.target == 'aarch64-apple-darwin'
-        run: target/${{ matrix.target }}/release/worker-host --version | tee /dev/stderr | grep -qx "worker-host .* $GITHUB_SHA"
+        run: |
+          got=$(target/${{ matrix.target }}/release/worker-host --version)
+          echo "$got"
+          [ "$got" = "worker-host $(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)" ]
 
       - run: cp target/${{ matrix.target }}/release/worker-host worker-host-${{ matrix.target }}
       - uses: actions/upload-artifact@v4
@@ -92,67 +93,65 @@ jobs:
           path: worker-host-${{ matrix.target }}
           if-no-files-found: error
 
-  # Nothing but the built binary talking to the real service proves the two
-  # halves agree, so this runs the artifact itself, not `cargo run`.
+  # Nothing but the host talking to the real service proves the two halves
+  # agree: tests/worker_service.rs runs the host against beta and drives a
+  # worker through create, start, message, stop and retire over the socket.
   integration:
-    needs: build
-    # Whether this can prove anything depends on there being a heartbeat
-    # endpoint to send heartbeats to and a socket it names, so that is what it
-    # asks: until beta exists, answers, serves the heartbeat and names its
-    # socket, it passes unproved with a line naming what it waited for (see
-    # scripts/heartbeat-cycle.sh). Red for a
-    # dependency still to come teaches people to ignore red. Either way release
-    # does not run.
+    needs: checks
+    # The test passes without a service to run against, saying it skipped, so
+    # passing proves nothing by itself: `proved` is set only once it has run
+    # with beta's url and token and passed. Until beta exists this job is
+    # green with a warning naming what it waited for -- red for a dependency
+    # still to come teaches people to ignore red -- and release does not run.
     runs-on: ubuntu-latest
     outputs:
-      proved: ${{ steps.cycle.outputs.proved }}
+      proved: ${{ steps.beta.outputs.proved }}
     permissions:
       id-token: write # required to assume the role via OIDC
       contents: read
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: worker-host-x86_64-unknown-linux-musl
-      - run: chmod +x worker-host-x86_64-unknown-linux-musl
-      # The cycle starts a stand-in Claude Code, which the host runs under tmux.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The worker's stand-in Claude Code runs under tmux, as a real one does.
       - run: command -v tmux || (sudo apt-get update -q && sudo apt-get install -y -q tmux)
       - if: vars.AWS_DEPLOY_ROLE != ''
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE }}
           aws-region: us-east-1
-      - name: A whole cycle against beta, by heartbeat and by socket
-        id: cycle
+      - name: A worker's whole life against beta, over the socket
+        id: beta
         env:
           AWS_DEPLOY_ROLE: ${{ vars.AWS_DEPLOY_ROLE }}
         run: |
+          echo "proved=false" >> "$GITHUB_OUTPUT"
           if [ -z "$AWS_DEPLOY_ROLE" ]; then
             echo "::warning::skipped: waiting for vars.AWS_DEPLOY_ROLE to look up beta with; nothing will be released"
-            echo "proved=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           # describe-stacks fails for a stack not deployed yet, and prints None
           # for one without the output: both mean beta is still to come.
-          WORKER_HOST_SERVICE_URL=$(aws cloudformation describe-stacks --stack-name WorkerService-beta \
-            --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" --output text) || WORKER_HOST_SERVICE_URL=
-          [ "$WORKER_HOST_SERVICE_URL" = None ] && WORKER_HOST_SERVICE_URL=
-          if [ -z "$WORKER_HOST_SERVICE_URL" ]; then
+          WORKER_SERVICE_URL=$(aws cloudformation describe-stacks --stack-name WorkerService-beta \
+            --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" --output text) || WORKER_SERVICE_URL=
+          [ "$WORKER_SERVICE_URL" = None ] && WORKER_SERVICE_URL=
+          if [ -z "$WORKER_SERVICE_URL" ]; then
             echo "::warning::skipped: waiting for stack WorkerService-beta with an ApiUrl output; nothing will be released"
-            echo "proved=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          WORKER_HOST_TOKEN=$(aws secretsmanager get-secret-value \
+          WORKER_SERVICE_TOKEN=$(aws secretsmanager get-secret-value \
             --secret-id worker-service/beta/token --query SecretString --output text)
-          echo "::add-mask::$WORKER_HOST_TOKEN"
-          export WORKER_HOST_SERVICE_URL WORKER_HOST_TOKEN
-          export WORKER_HOST_ID="ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          scripts/heartbeat-cycle.sh ./worker-host-x86_64-unknown-linux-musl
+          echo "::add-mask::$WORKER_SERVICE_TOKEN"
+          [ -n "$WORKER_SERVICE_TOKEN" ] || { echo "::error::beta's token is empty"; exit 1; }
+          export WORKER_SERVICE_URL WORKER_SERVICE_TOKEN
+          # set -e: a failing test ends the step before proved is written.
+          cargo test --locked --test worker_service -- --nocapture
+          echo "proved=true" >> "$GITHUB_OUTPUT"
 
   release:
-    needs: integration
-    # Green is not enough: until beta serves the heartbeat, integration passes
-    # without proving anything, and that must not publish.
+    needs: [build, integration]
+    # Green is not enough: until the test has run against beta, integration
+    # passes without proving anything, and that must not publish.
     if: github.event_name == 'push' && needs.integration.outputs.proved == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -177,4 +176,4 @@ jobs:
           chmod +x dist/worker-host-*
           (cd dist && sha256sum worker-host-* > SHA256SUMS)
           gh release create "$tag" dist/* --target "$GITHUB_SHA" --title "worker-host $tag" \
-            --notes "Built from $GITHUB_SHA, which \`worker-host --version\` names. Install by copying the binary for this machine's target onto its PATH. See the README."
+            --notes "Built from $GITHUB_SHA. Install with scripts/install-host.sh; see the README."

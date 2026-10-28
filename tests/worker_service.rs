@@ -16,6 +16,8 @@ use std::{env, fs, thread};
 /// A heartbeat is 30 s apart, so anything heard sooner came by the socket.
 const PUSHED: Duration = Duration::from_secs(10);
 
+const TMUX: &str = "wh-test-svc";
+
 /// Answers its opening message and each line typed, and ends each turn.
 const CLAUDE: &str = r#"#!/bin/sh
 dir="$CLAUDE_CONFIG_DIR/projects/-fake"; mkdir -p "$dir"
@@ -112,7 +114,7 @@ impl Drop for Host<'_> {
         let _ = Command::new("tmux")
             .env_remove("TMUX")
             .env("TMUX_TMPDIR", self.dir.join("tmux"))
-            .args(["-L", "worker-host", "kill-server"])
+            .args(["-L", TMUX, "kill-server"])
             .output();
         let _ = fs::remove_dir_all(&self.dir);
     }
@@ -151,15 +153,18 @@ fn a_worker_is_created_spoken_to_stopped_and_retired_over_the_socket() {
         dir.join("bin").display(),
         env::var("PATH").unwrap_or_default()
     );
+    let config = format!(
+        "service_url = {:?}\ntoken = {token:?}\nhost_id = {id:?}\ncapacity = 1\ntmux_socket = {TMUX:?}\n",
+        service.url
+    );
+    fs::write(dir.join("config.toml"), config).unwrap();
     let child = Command::new(env!("CARGO_BIN_EXE_worker-host"))
         .env_clear()
         .env("PATH", path)
         .env("HOME", dir.join("home"))
         .env("TMUX_TMPDIR", dir.join("tmux"))
-        .env("WORKER_HOST_SERVICE_URL", &service.url)
-        .env("WORKER_HOST_TOKEN", &token)
-        .env("WORKER_HOST_ID", &id)
-        .env("WORKER_HOST_CAPACITY", "1")
+        .arg("--config")
+        .arg(dir.join("config.toml"))
         .stderr(Stdio::inherit())
         .spawn()
         .unwrap();
