@@ -57,6 +57,7 @@ capacity = 2                # AGENT_HOST_CAPACITY
 labels = ["macos", "repo:agent-service"]  # AGENT_HOST_LABELS, comma-separated
 repositories = { agent-service = "/Users/me/src/agent-service" }
                             # AGENT_HOST_REPOSITORIES, as name=/path,...
+tmux_socket = "agent-host"  # AGENT_HOST_TMUX_SOCKET; this is the default
 ```
 
 `capacity` is how many agents this host will run at once, and `labels` what
@@ -68,6 +69,13 @@ host logs that refusal and waits rather than beating without it.
 worktree of, by the name a placement uses; listing one is not advertising it,
 which is a `repo:` label's job. `install-host.sh` takes all three from the
 same variables, and keeps the ones an earlier install wrote.
+
+`tmux_socket` names the tmux server agents run on (`tmux -L <socket>`). A host
+lists every agent on its server as its own, so two hosts on one machine --
+one beating to beta beside one beating to prod -- each need a socket of their
+own, or each reports the other's agents. Unset, it is `agent-host`, the socket
+every host used before it was a setting, so a host upgraded in place still
+finds the agents it was running.
 
 Which service a host beats to is only this, so the same binary tries a change
 against beta before any machine is asked to take it:
@@ -145,7 +153,7 @@ A command kind the host does not handle is reported failed, naming the kind.
 To watch or talk to one directly on the machine:
 
 ```sh
-tmux -L agent-host ls
+tmux -L agent-host ls                 # or the host's tmux_socket
 tmux -L agent-host attach -t <agent>
 ```
 

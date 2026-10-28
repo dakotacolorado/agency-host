@@ -244,6 +244,7 @@ mod tests {
             capacity: None,
             labels: None,
             repositories: Default::default(),
+            tmux_socket: "agent-host".into(),
         })
     }
 

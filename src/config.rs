@@ -18,7 +18,14 @@ pub struct Config {
     /// placement uses for each. Listing one here is not advertising it: that
     /// is a `repo:` label, which is the owner's to add alongside.
     pub repositories: BTreeMap<String, PathBuf>,
+    /// The tmux server agents run on, by its `-L` name. Two hosts on one
+    /// machine need two, or each lists the other's agents as its own.
+    pub tmux_socket: String,
 }
+
+/// The socket every host used before it was a setting, so one upgraded in
+/// place still finds the agents it was already running.
+pub const DEFAULT_TMUX_SOCKET: &str = "agent-host";
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -29,6 +36,7 @@ struct File {
     capacity: Option<u32>,
     labels: Option<Vec<String>>,
     repositories: Option<BTreeMap<String, PathBuf>>,
+    tmux_socket: Option<String>,
 }
 
 pub fn default_path() -> Option<PathBuf> {
@@ -73,6 +81,9 @@ fn from_parts(file: File, var: impl Fn(&str) -> Option<String>) -> Result<Config
     let host_id = pick("AGENT_HOST_ID", file.host_id)
         .or_else(crate::sys::hostname)
         .ok_or("no host id: set host_id in the config file or AGENT_HOST_ID")?;
+    let tmux_socket = pick("AGENT_HOST_TMUX_SOCKET", file.tmux_socket)
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| DEFAULT_TMUX_SOCKET.to_string());
     let capacity = match var("AGENT_HOST_CAPACITY").filter(|v| !v.is_empty()) {
         Some(n) => Some(
             n.parse()
@@ -108,6 +119,7 @@ fn from_parts(file: File, var: impl Fn(&str) -> Option<String>) -> Result<Config
         capacity,
         labels,
         repositories,
+        tmux_socket,
     })
 }
 
@@ -147,8 +159,33 @@ mod tests {
                 capacity: Some(2),
                 labels: Some(vec!["macos".into(), "repo:agent-service".into()]),
                 repositories: BTreeMap::new(),
+                tmux_socket: "agent-host".into(),
             }
         );
+    }
+
+    #[test]
+    fn the_tmux_socket_is_named_in_the_file_or_the_environment() {
+        let base = "service_url = \"https://x\"\ntoken = \"t\"\nhost_id = \"a\"\n";
+        let config = from_parts(file(&format!("{base}tmux_socket = \"beta\"")), env(&[])).unwrap();
+        assert_eq!(config.tmux_socket, "beta");
+        let config = from_parts(
+            file(&format!("{base}tmux_socket = \"beta\"")),
+            env(&[("AGENT_HOST_TMUX_SOCKET", "prod")]),
+        )
+        .unwrap();
+        assert_eq!(config.tmux_socket, "prod");
+    }
+
+    /// The socket a host used before this was a setting, so an upgraded host
+    /// still finds the agents it started.
+    #[test]
+    fn an_unset_tmux_socket_is_the_one_hosts_always_used() {
+        let base = "service_url = \"https://x\"\ntoken = \"t\"\nhost_id = \"a\"\n";
+        for text in [base.to_string(), format!("{base}tmux_socket = \"\"")] {
+            let config = from_parts(file(&text), env(&[("AGENT_HOST_TMUX_SOCKET", "")])).unwrap();
+            assert_eq!(config.tmux_socket, "agent-host");
+        }
     }
 
     #[test]

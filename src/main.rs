@@ -112,9 +112,13 @@ fn main() -> ExitCode {
         log!("agent-host: no HOME or XDG_DATA_HOME to keep agents' folders in");
         return ExitCode::from(2);
     };
+    log!(
+        "agents run on tmux socket {0}: tmux -L {0} ls",
+        config.tmux_socket
+    );
     let mut meter = Meter::new(home.clone());
     let agents = Agents::new(
-        tmux::Tmux::new("agent-host"),
+        tmux::Tmux::new(&config.tmux_socket),
         claude::Claude::from_env(|k| env::var(k).ok()),
         home,
         config.repositories.clone(),
