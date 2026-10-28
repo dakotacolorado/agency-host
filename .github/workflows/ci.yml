@@ -26,8 +26,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
-      # The session tests run a stand-in agent under real tmux, since tmux is
-      # what gives an agent the terminal it needs to be spoken to.
+      # The session tests run a stand-in Claude Code under real tmux, since
+      # tmux is what gives a worker the terminal it needs to be spoken to.
       - run: command -v tmux || (sudo apt-get update -q && sudo apt-get install -y -q tmux)
       - run: cargo test --locked
 
@@ -65,7 +65,7 @@ jobs:
       # system libraries every mac ships on macOS.
       - name: Needs nothing on the machine
         run: |
-          bin=target/${{ matrix.target }}/release/agent-host
+          bin=target/${{ matrix.target }}/release/worker-host
           if [ "$RUNNER_OS" = Linux ]; then
             file "$bin" | tee /dev/stderr | grep -q 'statically linked'
           else
@@ -75,21 +75,21 @@ jobs:
       # checked out, which the release is tagged at. Searching the file covers
       # the targets this runner cannot execute.
       - name: Names the commit it was built from
-        run: grep -aq "$GITHUB_SHA" target/${{ matrix.target }}/release/agent-host
+        run: grep -aq "$GITHUB_SHA" target/${{ matrix.target }}/release/worker-host
       - name: Runs on a bare machine
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: |
-          docker run --rm -v "$PWD/target/${{ matrix.target }}/release:/b:ro" busybox /b/agent-host --version \
-            | tee /dev/stderr | grep -qx "agent-host .* $GITHUB_SHA"
+          docker run --rm -v "$PWD/target/${{ matrix.target }}/release:/b:ro" busybox /b/worker-host --version \
+            | tee /dev/stderr | grep -qx "worker-host .* $GITHUB_SHA"
       - name: Runs here
         if: matrix.target == 'aarch64-apple-darwin'
-        run: target/${{ matrix.target }}/release/agent-host --version | tee /dev/stderr | grep -qx "agent-host .* $GITHUB_SHA"
+        run: target/${{ matrix.target }}/release/worker-host --version | tee /dev/stderr | grep -qx "worker-host .* $GITHUB_SHA"
 
-      - run: cp target/${{ matrix.target }}/release/agent-host agent-host-${{ matrix.target }}
+      - run: cp target/${{ matrix.target }}/release/worker-host worker-host-${{ matrix.target }}
       - uses: actions/upload-artifact@v4
         with:
-          name: agent-host-${{ matrix.target }}
-          path: agent-host-${{ matrix.target }}
+          name: worker-host-${{ matrix.target }}
+          path: worker-host-${{ matrix.target }}
           if-no-files-found: error
 
   # Nothing but the built binary talking to the real service proves the two
@@ -97,9 +97,10 @@ jobs:
   integration:
     needs: build
     # Whether this can prove anything depends on there being a heartbeat
-    # endpoint to send heartbeats to, so that is what it asks: until beta
-    # exists, answers, and serves the heartbeat, it passes unproved with a line
-    # naming what it waited for (see scripts/heartbeat-cycle.sh). Red for a
+    # endpoint to send heartbeats to and a socket it names, so that is what it
+    # asks: until beta exists, answers, serves the heartbeat and names its
+    # socket, it passes unproved with a line naming what it waited for (see
+    # scripts/heartbeat-cycle.sh). Red for a
     # dependency still to come teaches people to ignore red. Either way release
     # does not run.
     runs-on: ubuntu-latest
@@ -112,16 +113,16 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: agent-host-x86_64-unknown-linux-musl
-      - run: chmod +x agent-host-x86_64-unknown-linux-musl
-      # The cycle starts a stand-in agent, which the host runs under tmux.
+          name: worker-host-x86_64-unknown-linux-musl
+      - run: chmod +x worker-host-x86_64-unknown-linux-musl
+      # The cycle starts a stand-in Claude Code, which the host runs under tmux.
       - run: command -v tmux || (sudo apt-get update -q && sudo apt-get install -y -q tmux)
       - if: vars.AWS_DEPLOY_ROLE != ''
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE }}
           aws-region: us-east-1
-      - name: A whole heartbeat cycle against beta
+      - name: A whole cycle against beta, by heartbeat and by socket
         id: cycle
         env:
           AWS_DEPLOY_ROLE: ${{ vars.AWS_DEPLOY_ROLE }}
@@ -133,20 +134,20 @@ jobs:
           fi
           # describe-stacks fails for a stack not deployed yet, and prints None
           # for one without the output: both mean beta is still to come.
-          AGENT_HOST_SERVICE_URL=$(aws cloudformation describe-stacks --stack-name AgentService-beta \
-            --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" --output text) || AGENT_HOST_SERVICE_URL=
-          [ "$AGENT_HOST_SERVICE_URL" = None ] && AGENT_HOST_SERVICE_URL=
-          if [ -z "$AGENT_HOST_SERVICE_URL" ]; then
-            echo "::warning::skipped: waiting for stack AgentService-beta with an ApiUrl output; nothing will be released"
+          WORKER_HOST_SERVICE_URL=$(aws cloudformation describe-stacks --stack-name WorkerService-beta \
+            --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" --output text) || WORKER_HOST_SERVICE_URL=
+          [ "$WORKER_HOST_SERVICE_URL" = None ] && WORKER_HOST_SERVICE_URL=
+          if [ -z "$WORKER_HOST_SERVICE_URL" ]; then
+            echo "::warning::skipped: waiting for stack WorkerService-beta with an ApiUrl output; nothing will be released"
             echo "proved=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          AGENT_HOST_TOKEN=$(aws secretsmanager get-secret-value \
-            --secret-id agent-service/beta/api-token --query SecretString --output text)
-          echo "::add-mask::$AGENT_HOST_TOKEN"
-          export AGENT_HOST_SERVICE_URL AGENT_HOST_TOKEN
-          export AGENT_HOST_ID="ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          scripts/heartbeat-cycle.sh ./agent-host-x86_64-unknown-linux-musl
+          WORKER_HOST_TOKEN=$(aws secretsmanager get-secret-value \
+            --secret-id worker-service/beta/token --query SecretString --output text)
+          echo "::add-mask::$WORKER_HOST_TOKEN"
+          export WORKER_HOST_SERVICE_URL WORKER_HOST_TOKEN
+          export WORKER_HOST_ID="ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          scripts/heartbeat-cycle.sh ./worker-host-x86_64-unknown-linux-musl
 
   release:
     needs: integration
@@ -164,7 +165,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          pattern: agent-host-*
+          pattern: worker-host-*
           merge-multiple: true
           path: dist
       - name: Publish
@@ -173,7 +174,7 @@ jobs:
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           tag="v${version}-${GITHUB_RUN_NUMBER}"
-          chmod +x dist/agent-host-*
-          (cd dist && sha256sum agent-host-* > SHA256SUMS)
-          gh release create "$tag" dist/* --target "$GITHUB_SHA" --title "agent-host $tag" \
-            --notes "Built from $GITHUB_SHA, which \`agent-host --version\` names. Install by copying the binary for this machine's target onto its PATH. See the README."
+          chmod +x dist/worker-host-*
+          (cd dist && sha256sum worker-host-* > SHA256SUMS)
+          gh release create "$tag" dist/* --target "$GITHUB_SHA" --title "worker-host $tag" \
+            --notes "Built from $GITHUB_SHA, which \`worker-host --version\` names. Install by copying the binary for this machine's target onto its PATH. See the README."

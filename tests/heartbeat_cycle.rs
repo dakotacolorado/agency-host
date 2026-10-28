@@ -23,10 +23,10 @@ fn heartbeat_cycle(name: &str, service_url: &str) -> Run {
             env!("CARGO_MANIFEST_DIR"),
             "/scripts/heartbeat-cycle.sh"
         ))
-        .arg(env!("CARGO_BIN_EXE_agent-host"))
-        .env("AGENT_HOST_SERVICE_URL", service_url)
-        .env("AGENT_HOST_TOKEN", "unused")
-        .env("AGENT_HOST_ID", "test")
+        .arg(env!("CARGO_BIN_EXE_worker-host"))
+        .env("WORKER_HOST_SERVICE_URL", service_url)
+        .env("WORKER_HOST_TOKEN", "unused")
+        .env("WORKER_HOST_ID", "test")
         .env("GITHUB_OUTPUT", &github_output)
         .output()
         .unwrap();
