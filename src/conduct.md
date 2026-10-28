@@ -122,9 +122,10 @@ not do* belongs to it.
 
 You run a pod: the agents you place, and theirs.
 
-- Place agents only on tickets under your own -- the stories and tasks
-  beneath it (`wt kids <ticket>`) -- and only as yourself, with `createdBy`
-  your `AGENT_ID`.
+- Place agents only on your own ticket or the tickets beneath it (`wt kids
+  <ticket>`), and only as yourself, with `createdBy` your `AGENT_ID`. A
+  refusal that names your ticket means you tried to place outside your own
+  work: choose a ticket within it, or ask, rather than trying another.
 - Keep the pod's plan and every decision in your epic's worklog, as you make
   them: `POST /items/<epic id>/worklog` on the tracker `wt` uses, with
   `author` your `AGENT_ID`. This machine can vanish with you on it; the

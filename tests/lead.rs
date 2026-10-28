@@ -11,6 +11,10 @@ use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 use std::{env, fs, thread};
 
+/// The lead's ticket. The service lets an agent place only on its own ticket
+/// or beneath it, and its own needs no lookup in the tracker, so any uuid does.
+const TICKET: &str = "00000000-0000-4000-8000-000000000002";
+
 fn setting(var: &str, file: &str) -> String {
     env::var(var)
         .ok()
@@ -137,20 +141,21 @@ fn real_claude_lead_places_one_agent_under_itself_on_beta() {
         "/fleet/agents",
         Some(json!({
             "hostId": id,
-            "ticketId": null,
+            "ticketId": TICKET,
             "role": "lead",
             "createdBy": null,
             "brief": format!(
                 "This is a test of placing an agent, and the whole of your work. Your ticket is \
-                 none, so the agent you place has none either. Place exactly one agent, as \
-                 yourself, as your rules show: hostId \"{id}\", ticketId null, role \"worker\", \
-                 no repository, and the brief \"Reply with one word: ready.\" Then reply with \
+                 {TICKET}, and the agent you place is on that same ticket. Place exactly one \
+                 agent, as yourself, as your rules show: hostId \"{id}\", ticketId \"{TICKET}\", \
+                 role \"worker\", no repository, and the brief \"Reply with one word: ready.\" Then reply with \
                  one line: the id the fleet gave it. Do nothing else."
             ),
         })),
     );
     let lead_id = lead["id"].as_str().unwrap().to_string();
     assert_eq!(lead["level"], 0, "a person placed it");
+    assert_eq!(lead["ticketId"], TICKET);
 
     let deadline = Instant::now() + Duration::from_secs(300);
     let placed = loop {
@@ -173,6 +178,10 @@ fn real_claude_lead_places_one_agent_under_itself_on_beta() {
         "its level follows from the lead's: {placed}"
     );
     assert_eq!(placed["role"], "worker", "{placed}");
+    assert_eq!(
+        placed["ticketId"], lead["ticketId"],
+        "on the lead's own ticket: {placed}"
+    );
     assert_eq!(placed["hostId"], id.as_str(), "{placed}");
     assert_eq!(
         fleet.agents(&id).len(),
