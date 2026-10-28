@@ -521,6 +521,40 @@ fn an_interrupt_stops_the_turn_and_the_session_goes_on() {
     );
 }
 
+#[test]
+fn a_message_clears_what_was_left_in_the_input_first() {
+    // Claude Code puts an interrupted prompt back in its input; the terminal
+    // stand-in holds typed but unsent words the same way.
+    let host = host("leftover", CHAT_CLAUDE);
+    let workers = &host.workers;
+    host.create("w1", "ana");
+    workers.start("w1", "s1", false, Some("begin")).unwrap();
+    let home = host.home("ana");
+    let (mut seen, mut cursor) = (vec![], Cursor::default());
+    read_until(workers, &home, &mut seen, &mut cursor, |s| {
+        s.contains(&said("on begin"))
+    });
+
+    let session = workers.live().remove("w1").unwrap();
+    Process::new("tmux")
+        .args([
+            "-L",
+            &host.socket,
+            "send-keys",
+            "-t",
+            &session,
+            "-l",
+            "stale words ",
+        ])
+        .status()
+        .unwrap();
+    workers.say("w1", "next").unwrap();
+    read_until(workers, &home, &mut seen, &mut cursor, |s| {
+        s.contains(&said("on next"))
+    });
+    assert!(!seen.contains(&told("stale words next")), "{seen:?}");
+}
+
 /// Settles `deliveries` until nothing is held, and says how each ended.
 fn settle_all(workers: &Workers, deliveries: &mut Deliveries) -> Vec<(String, Result<(), String>)> {
     let deadline = Instant::now() + Duration::from_secs(10);

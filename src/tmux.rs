@@ -136,6 +136,9 @@ impl Tmux {
     /// rather than typed so that a newline inside the text does not send what
     /// comes before it on its own.
     pub fn type_in(&self, session: &str, text: &str) -> Result<(), String> {
+        // Claude Code puts an interrupted prompt back in its input; cleared
+        // first, it cannot be sent again as the start of this message.
+        self.press(session, "C-u")?;
         let buffer = format!("worker-host{session}");
         self.run(&["load-buffer", "-b", &buffer, "-"], Some(text))?;
         self.run(
