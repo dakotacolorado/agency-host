@@ -7,7 +7,7 @@ mod sys;
 mod tmux;
 mod workspace;
 
-use agent::Agents;
+use agent::{Agents, Deliveries};
 use beat::{Beat, Client, Failure, Present, Report, Session, CONTRACT};
 use config::Config;
 use machine::{Meter, Sample};
@@ -22,6 +22,10 @@ const COMMIT: &str = env!("AGENT_HOST_COMMIT");
 /// unbounded and bursty, and a beat grown until it fails loses liveness for
 /// the sake of logs; what does not fit goes on the next beat.
 const TRANSCRIPT_PER_AGENT: usize = 32 << 10;
+
+/// How soon to beat again while a message is on its way, so it is typed soon
+/// after its agent starts listening and reported soon after it arrives.
+const DELIVERING: Duration = Duration::from_secs(2);
 
 /// Samples kept while beats are failing, the most a beat may carry. A host
 /// cut off for longer loses its oldest, which a chart of load can spare.
@@ -148,16 +152,24 @@ fn run(
     let mut reports: Vec<Report> = Vec::new();
     let mut samples: Vec<Sample> = Vec::new();
     let mut cursors: HashMap<String, agent::Cursor> = HashMap::new();
+    let mut deliveries = Deliveries::new(agent::PATIENCE);
     let mut landed = 0;
     let mut failures = 0u32;
     loop {
+        for (command, result) in deliveries.settle(agents) {
+            log!(
+                "command {command} (message): {}",
+                result.as_ref().err().map_or("done", String::as_str)
+            );
+            reports.push(Report::new(command, result.err()));
+        }
         let read: Vec<_> = agents
             .ids()
             .into_iter()
             .map(|id| {
                 let from = cursors.get(&id).copied().unwrap_or_default();
                 let batch = agents.read(&id, from, TRANSCRIPT_PER_AGENT);
-                (id, batch)
+                (id, from, batch)
             })
             .collect();
         if let Some(sample) = meter.sample() {
@@ -171,8 +183,9 @@ fn run(
             host_commit: COMMIT,
             agents: read
                 .iter()
-                .map(|(id, batch)| {
-                    Present::running(id.clone(), batch.as_ref().map_or(&[], |b| &b.lines))
+                .map(|(id, from, batch)| match batch {
+                    Some(batch) => Present::running(id.clone(), batch.next.waiting, &batch.lines),
+                    None => Present::running(id.clone(), from.waiting, &[]),
                 })
                 .collect(),
             reports: &reports,
@@ -187,33 +200,46 @@ fn run(
                 landed += 1;
                 failures = 0;
                 samples.clear();
-                for (id, batch) in &read {
+                for (id, _, batch) in &read {
                     if let Some(batch) = batch {
                         cursors.insert(id.clone(), batch.next);
                     }
                 }
-                reports = reply
-                    .commands
-                    .iter()
-                    .map(|command| beat::take(command, agents))
-                    .collect();
-                for (command, report) in reply.commands.iter().zip(&reports) {
-                    log!(
-                        "command {} ({}): {}",
-                        command.id,
-                        command.kind,
-                        report.error.as_deref().unwrap_or("done")
-                    );
+                reports.clear();
+                for command in &reply.commands {
+                    let held = deliveries.holds(&command.id);
+                    match beat::take(command, agents, &mut deliveries) {
+                        Some(report) => {
+                            log!(
+                                "command {} ({}): {}",
+                                command.id,
+                                command.kind,
+                                report.error.as_deref().unwrap_or("done")
+                            );
+                            reports.push(report);
+                        }
+                        None if !held => {
+                            log!("command {} ({}): on its way", command.id, command.kind)
+                        }
+                        None => {}
+                    }
                 }
                 if let Some(n) = limit.filter(|&n| landed >= n) {
                     // One more beat carries the last commands' reports, which
                     // would otherwise never leave.
-                    if reports.is_empty() || landed > n {
+                    if (reports.is_empty() && deliveries.is_empty()) || landed > n {
                         return ExitCode::SUCCESS;
                     }
                     Duration::ZERO
                 } else {
-                    Duration::from_secs_f64(reply.come_back_in.unwrap_or(30.0).clamp(1.0, 300.0))
+                    let wait = Duration::from_secs_f64(
+                        reply.come_back_in.unwrap_or(30.0).clamp(1.0, 300.0),
+                    );
+                    if deliveries.is_empty() {
+                        wait
+                    } else {
+                        wait.min(DELIVERING)
+                    }
                 }
             }
             Err(failure) => {

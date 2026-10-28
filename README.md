@@ -115,7 +115,10 @@ one, named by the id the service gave it, in a folder of its own under
 `$XDG_DATA_HOME/agent-host/agents` (or `~/.local/share/agent-host/agents`). A start the host has already done --
 its session is running, or it has run and left a transcript -- is reported
 done and not repeated, so a host that restarts before reporting does not run
-the agent twice. Every running agent is listed on each beat.
+the agent twice. Every running agent is listed on each beat: `asking` once its
+transcript shows its last turn ended and nothing said to it since -- it is
+waiting on someone, whether on a question or with its work done -- and
+`working` otherwise.
 
 An agent placed for a repository starts in a git worktree of this host's
 checkout of it, at `agents/<id>/<repository>`, on the branch the placement
@@ -138,15 +141,23 @@ locked so that `git worktree prune` in the checkout cannot take it by
 accident. Removing one is deliberate:
 `git -C <checkout> worktree remove --force --force <workspace>`.
 
-A message is typed into the session at once; Claude Code takes it at its next
-step, or, if the agent has stopped to ask, as the answer, and the same run goes
-on. An `interrupt` presses Escape in the session, which stops the turn the
+A message is typed into the session once Claude Code is listening -- once it
+has answered something in its transcript, since what is typed while it starts
+is lost -- and reported done only when the transcript shows the agent was told
+it. Claude Code takes it at its next step, or, if the agent has stopped to ask,
+as the answer, and the same run goes on. One not delivered within two minutes
+is reported failed with why: never typed, or typed and not yet taken. An `interrupt` presses Escape in the session, which stops the turn the
 agent is in, mid-command if need be, without ending the session; any text it
 carries is typed in once the turn has stopped. The host reads the session's
 transcript as it is written and sends it up on each beat, in that agent's
 report: what it was told, what it said and what it ran, numbered from the
 transcript's start, so a host that restarts sends the same lines again under
 the same numbers and the service keeps each once.
+
+A `stop` ends the agent's tmux session, and the agent with it, and is
+reported done; its workspace and branch are left as they are, like any other
+agent's that ends. Stopping an agent that is not running is done, not failed:
+it is already what was asked.
 
 A command kind the host does not handle is reported failed, naming the kind.
 

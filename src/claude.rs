@@ -195,18 +195,43 @@ pub fn session_id(agent: &str) -> String {
     )
 }
 
-/// What one transcript line says, and when Claude Code wrote it. A line of a
-/// kind not read here says nothing, and the lines after it are read as usual.
-pub fn read(line: &str) -> (Option<String>, Vec<Entry>) {
+/// What one transcript line says, and when Claude Code wrote it.
+#[derive(Debug, Default, PartialEq)]
+pub struct Read {
+    pub at: Option<String>,
+    pub entries: Vec<Entry>,
+    /// Whether the agent is waiting after this line: true when it ends the
+    /// agent's turn (`stop_reason` `end_turn`), false when it shows the agent
+    /// at work or being told something, None when it says neither.
+    pub waiting: Option<bool>,
+}
+
+/// A line of a kind not read here says nothing, and the lines after it are
+/// read as usual.
+pub fn read(line: &str) -> Read {
     let Ok(v) = serde_json::from_str::<Value>(line) else {
-        return (None, vec![]);
+        return Read::default();
     };
     let at = v["timestamp"].as_str().map(String::from);
     // A subagent's own conversation, and lines Claude Code adds for itself.
     if v["isSidechain"] == true || v["isMeta"] == true {
-        return (at, vec![]);
+        return Read {
+            at,
+            ..Read::default()
+        };
     }
     let message = &v["message"];
+    let waiting = match v["type"].as_str() {
+        // A tool's result, too, is the agent at work.
+        Some("user") => Some(false),
+        Some("attachment") if v["attachment"]["type"] == "queued_command" => Some(false),
+        // One message is a line per block, and only its last says how it
+        // stopped; a line that does not say leaves it as it was.
+        Some("assistant") => message["stop_reason"]
+            .as_str()
+            .map(|reason| reason == "end_turn"),
+        _ => None,
+    };
     let entries = match v["type"].as_str() {
         Some("user") => match &message["content"] {
             Value::String(text) => vec![Entry::Told { text: cut(text) }],
@@ -245,10 +270,14 @@ pub fn read(line: &str) -> (Option<String>, Vec<Entry>) {
             .collect(),
         _ => vec![],
     };
-    (at, entries)
+    Read {
+        at,
+        entries,
+        waiting,
+    }
 }
 
-fn cut(text: &str) -> String {
+pub fn cut(text: &str) -> String {
     match text.char_indices().nth(LONGEST) {
         Some((at, _)) => format!("{}…", &text[..at]),
         None => text.to_string(),
@@ -261,7 +290,10 @@ mod tests {
     use serde_json::json;
 
     fn read_all(lines: &[Value]) -> Vec<Entry> {
-        lines.iter().flat_map(|l| read(&l.to_string()).1).collect()
+        lines
+            .iter()
+            .flat_map(|l| read(&l.to_string()).entries)
+            .collect()
     }
 
     fn told(text: &str) -> Entry {
@@ -323,10 +355,9 @@ mod tests {
     #[test]
     fn a_line_says_when_it_was_written() {
         let line = json!({"type":"user","timestamp":"2026-10-27T13:34:52.123Z","message":{"content":"hi"}});
-        assert_eq!(
-            read(&line.to_string()),
-            (Some("2026-10-27T13:34:52.123Z".into()), vec![told("hi")])
-        );
+        let read = read(&line.to_string());
+        assert_eq!(read.at.as_deref(), Some("2026-10-27T13:34:52.123Z"));
+        assert_eq!(read.entries, [told("hi")]);
     }
 
     #[test]
@@ -338,7 +369,34 @@ mod tests {
             json!({"type":"file-history-snapshot"}),
         ]);
         assert_eq!(entries, []);
-        assert_eq!(read("not json {"), (None, vec![]));
+        assert_eq!(read("not json {"), Read::default());
+    }
+
+    #[test]
+    fn a_turn_that_ended_leaves_the_agent_waiting_until_it_is_told_something() {
+        let waiting = |line: Value| read(&line.to_string()).waiting;
+        assert_eq!(
+            waiting(
+                json!({"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"Which branch?"}],"stop_reason":"end_turn"}})
+            ),
+            Some(true)
+        );
+        for working in [
+            json!({"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","name":"Bash","input":{}}],"stop_reason":"tool_use"}}),
+            json!({"type":"user","message":{"role":"user","content":"main"}}),
+            json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"ok"}]}}),
+            json!({"type":"attachment","attachment":{"type":"queued_command","prompt":"main"}}),
+        ] {
+            assert_eq!(waiting(working.clone()), Some(false), "{working}");
+        }
+        for neither in [
+            json!({"type":"assistant","message":{"id":"m1","content":[{"type":"thinking","thinking":""}],"stop_reason":null}}),
+            json!({"type":"system","subtype":"turn_duration","durationMs":1}),
+            json!({"type":"user","isMeta":true,"message":{"content":"<local-command-caveat>"}}),
+            json!({"type":"file-history-snapshot"}),
+        ] {
+            assert_eq!(waiting(neither.clone()), None, "{neither}");
+        }
     }
 
     #[test]

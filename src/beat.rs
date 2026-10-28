@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-use crate::agent::{Agents, Line, Placement};
+use crate::agent::{Agents, Deliveries, Line, Placement};
 use crate::config::Config;
 use crate::machine::Sample;
 
@@ -39,8 +39,10 @@ pub struct Session {
 }
 
 /// An agent whose session is running here, by the id the service gave it.
-/// Always `working`: whether one that has stopped has finished or is asking is
-/// not something its transcript says, so the host does not guess.
+/// `asking` when its last turn ended and nothing has been said to it since:
+/// it is waiting on someone, whether it ended on a question or on its work
+/// being done, which its transcript does not tell apart, so the host does not
+/// guess which. Otherwise `working`.
 #[derive(Debug, Serialize)]
 pub struct Present<'a> {
     pub id: String,
@@ -52,10 +54,10 @@ pub struct Present<'a> {
 }
 
 impl<'a> Present<'a> {
-    pub fn running(id: String, transcript: &'a [Line]) -> Self {
+    pub fn running(id: String, waiting: bool, transcript: &'a [Line]) -> Self {
         Present {
             id,
-            state: "working",
+            state: if waiting { "asking" } else { "working" },
             transcript,
         }
     }
@@ -69,8 +71,7 @@ pub struct Reply {
     pub come_back_in: Option<f64>,
 }
 
-/// What routes a command, and the fields of each kind handled so far; the
-/// rest arrive with the stories that handle them.
+/// What routes a command, and the fields of each kind the host handles.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Command {
@@ -95,6 +96,16 @@ pub struct Report {
     pub ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+impl Report {
+    pub fn new(command_id: String, error: Option<String>) -> Self {
+        Report {
+            command_id,
+            ok: error.is_none(),
+            error,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -163,10 +174,15 @@ impl Client {
 
 /// A kind the host does not handle is reported by name rather than dropped,
 /// so the sender learns the command went nowhere. `ping` does nothing and
-/// succeeds, so a whole cycle can be proved without an agent.
-pub fn take(command: &Command, agents: &Agents) -> Report {
+/// succeeds, so a whole cycle can be proved without an agent. A message is
+/// reported once it reaches its agent, by `Deliveries::settle`, so none is
+/// reported here while it is on its way.
+pub fn take(command: &Command, agents: &Agents, deliveries: &mut Deliveries) -> Option<Report> {
     let agent = command.agent_id.as_deref();
     let text = command.text.as_deref();
+    if deliveries.holds(&command.id) {
+        return None;
+    }
     let error = match (command.kind.as_str(), agent) {
         ("ping", _) => None,
         ("start", Some(agent)) => agents
@@ -180,20 +196,17 @@ pub fn take(command: &Command, agents: &Agents) -> Report {
             )
             .err(),
         ("interrupt", Some(agent)) => agents.interrupt(agent, text).err(),
+        ("stop", Some(agent)) => agents.stop(agent).err(),
         ("message", Some(agent)) => match text {
-            Some(text) => agents.say(agent, text).err(),
+            Some(text) => deliveries.hold(agents, &command.id, agent, text)?.err(),
             None => Some("a message needs text".into()),
         },
-        (kind @ ("start" | "interrupt" | "message"), None) => {
+        (kind @ ("start" | "interrupt" | "message" | "stop"), None) => {
             Some(format!("{kind:?} needs an agentId"))
         }
         (kind, _) => Some(format!("this host does not handle {kind:?} commands")),
     };
-    Report {
-        command_id: command.id.clone(),
-        ok: error.is_none(),
-        error,
-    }
+    Some(Report::new(command.id.clone(), error))
 }
 
 #[cfg(test)]
@@ -262,7 +275,7 @@ mod tests {
         let Ok(reply) = client(url).beat(&Beat {
             host_version: "9.9.9",
             host_commit: "0123abc",
-            agents: vec![Present::running("a1".into(), &[])],
+            agents: vec![Present::running("a1".into(), false, &[])],
             reports: &reports,
             ..Default::default()
         }) else {
@@ -342,6 +355,11 @@ mod tests {
         )
     }
 
+    /// Takes a command that is settled as soon as it is taken.
+    fn take_now(command: &Command) -> Report {
+        take(command, &no_agents(), &mut Deliveries::new(Duration::ZERO)).unwrap()
+    }
+
     #[test]
     fn a_beat_carries_what_agents_did_in_each_agents_report() {
         let (url, server) = serve_once("200 OK", "{}");
@@ -356,8 +374,8 @@ mod tests {
                 host_version: "9.9.9",
                 host_commit: "0123abc",
                 agents: vec![
-                    Present::running("a1".into(), &lines),
-                    Present::running("a2".into(), &[])
+                    Present::running("a1".into(), false, &lines),
+                    Present::running("a2".into(), true, &[])
                 ],
                 ..Default::default()
             })
@@ -370,7 +388,7 @@ mod tests {
                 {"id":"a1","state":"working","transcript":[
                     {"seq":0,"at":"2026-10-27T12:00:00.000Z","from":"agent","text":"hi"}
                 ]},
-                {"id":"a2","state":"working"}
+                {"id":"a2","state":"asking"}
             ])
         );
     }
@@ -452,7 +470,7 @@ mod tests {
         let command: Command =
             serde_json::from_str(r#"{"id":"c1","kind":"message","agentId":"a9","text":"hi"}"#)
                 .unwrap();
-        let report = take(&command, &no_agents());
+        let report = take_now(&command);
         assert!(!report.ok);
         assert!(report.error.unwrap().contains("no agent a9"));
     }
@@ -460,26 +478,33 @@ mod tests {
     #[test]
     fn a_message_without_its_fields_is_refused() {
         let command: Command = serde_json::from_str(r#"{"id":"c1","kind":"message"}"#).unwrap();
-        assert!(!take(&command, &no_agents()).ok);
+        assert!(!take_now(&command).ok);
     }
 
     #[test]
     fn an_unhandled_command_is_reported_not_dropped() {
-        let command: Command = serde_json::from_str(r#"{"id":"c1","kind":"stop"}"#).unwrap();
-        let report = take(&command, &no_agents());
+        let command: Command = serde_json::from_str(r#"{"id":"c1","kind":"reboot"}"#).unwrap();
+        let report = take_now(&command);
         assert_eq!(report.command_id, "c1");
         assert!(!report.ok);
         assert_eq!(
             report.error.as_deref(),
-            Some(r#"this host does not handle "stop" commands"#)
+            Some(r#"this host does not handle "reboot" commands"#)
         );
+    }
+
+    #[test]
+    fn a_stop_for_an_agent_not_here_is_done() {
+        let command: Command =
+            serde_json::from_str(r#"{"id":"c1","kind":"stop","agentId":"a9"}"#).unwrap();
+        assert_eq!(take_now(&command), Report::new("c1".into(), None));
     }
 
     #[test]
     fn a_start_that_fails_is_reported_with_its_reason() {
         let command: Command =
             serde_json::from_str(r#"{"id":"c1","kind":"start","agentId":"a1"}"#).unwrap();
-        let report = take(&command, &no_agents());
+        let report = take_now(&command);
         assert!(!report.ok);
         assert!(
             report.error.unwrap().contains("not installed"),
@@ -489,11 +514,11 @@ mod tests {
 
     #[test]
     fn a_command_for_an_agent_names_one() {
-        for kind in ["start", "interrupt", "message"] {
+        for kind in ["start", "interrupt", "message", "stop"] {
             let command: Command =
                 serde_json::from_str(&format!(r#"{{"id":"c1","kind":"{kind}","text":"hi"}}"#))
                     .unwrap();
-            let report = take(&command, &no_agents());
+            let report = take_now(&command);
             assert_eq!(
                 report.error.as_deref(),
                 Some(format!("{kind:?} needs an agentId").as_str())
@@ -505,7 +530,7 @@ mod tests {
     fn an_interrupt_for_an_agent_not_here_is_reported() {
         let command: Command =
             serde_json::from_str(r#"{"id":"c1","kind":"interrupt","agentId":"a9"}"#).unwrap();
-        let report = take(&command, &no_agents());
+        let report = take_now(&command);
         assert!(!report.ok);
         assert!(report.error.unwrap().contains("no agent a9"));
     }
@@ -514,7 +539,7 @@ mod tests {
     fn a_ping_succeeds() {
         let command: Command = serde_json::from_str(r#"{"id":"c1","kind":"ping"}"#).unwrap();
         assert_eq!(
-            take(&command, &no_agents()),
+            take_now(&command),
             Report {
                 command_id: "c1".into(),
                 ok: true,
