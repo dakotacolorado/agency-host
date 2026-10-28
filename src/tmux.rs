@@ -143,6 +143,12 @@ impl Tmux {
         self.press(session, "Enter")
     }
 
+    /// Ends the session and what runs in it, which tmux hangs up on.
+    pub fn kill_session(&self, session: &str) -> Result<(), String> {
+        self.run(&["kill-session", "-t", session], None)?;
+        Ok(())
+    }
+
     /// Presses one key in the session, named as `send-keys` names it.
     pub fn press(&self, session: &str, key: &str) -> Result<(), String> {
         self.run(&["send-keys", "-t", session, key], None)?;

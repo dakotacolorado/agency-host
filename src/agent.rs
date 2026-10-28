@@ -298,6 +298,16 @@ impl Agents {
         Ok(())
     }
 
+    /// Ends the agent's session, and with it the agent. Its folder, worktree
+    /// and branch are left as they are, for inspection and for whatever comes
+    /// after it. One not running is already stopped, which is what was asked.
+    pub fn stop(&self, id: &str) -> Result<(), String> {
+        match self.session(id) {
+            Some(session) => self.tmux.kill_session(&session),
+            None => Ok(()),
+        }
+    }
+
     /// What the agent has done since `from`, as much as fits in `budget` bytes
     /// of lines; the rest waits for the next read. None when nothing new has
     /// been written. Only whole lines are read, so a line Claude Code is still
@@ -1139,6 +1149,45 @@ sleep 60
             !s.is_empty()
         });
         assert_eq!(seen[0], told("fix the build"));
+    }
+
+    #[test]
+    fn a_stop_ends_the_session_and_leaves_its_work_where_it_is() {
+        let (host, repo) = repo_host("stop");
+        let agents = &host.agents;
+        agents
+            .start(
+                "a1",
+                &Placement {
+                    repository: Some("widgets"),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let tree = cwd(&host, "a1");
+        crate::workspace::tests::sh(&tree, "echo half-done > WORK");
+        let stop = command(r#"{"id":"c1","kind":"stop","agentId":"a1"}"#);
+        let mut deliveries = Deliveries::new(PATIENCE);
+
+        let report = crate::beat::take(&stop, agents, &mut deliveries).unwrap();
+        assert!(report.ok, "{report:?}");
+        assert!(agents.ids().is_empty(), "the next beat lists no agent");
+        assert_eq!(
+            fs::read_to_string(tree.join("WORK")).unwrap(),
+            "half-done\n"
+        );
+        let branch = std::process::Command::new("git")
+            .args(["branch", "--list", "agent/a1"])
+            .current_dir(&repo.checkout)
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&branch.stdout).contains("agent/a1"),
+            "the branch is kept"
+        );
+
+        let again = crate::beat::take(&stop, agents, &mut deliveries).unwrap();
+        assert!(again.ok, "stopping one not running is done: {again:?}");
     }
 
     #[test]

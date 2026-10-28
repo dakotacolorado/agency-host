@@ -71,8 +71,7 @@ pub struct Reply {
     pub come_back_in: Option<f64>,
 }
 
-/// What routes a command, and the fields of each kind handled so far; the
-/// rest arrive with the stories that handle them.
+/// What routes a command, and the fields of each kind the host handles.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Command {
@@ -197,11 +196,12 @@ pub fn take(command: &Command, agents: &Agents, deliveries: &mut Deliveries) -> 
             )
             .err(),
         ("interrupt", Some(agent)) => agents.interrupt(agent, text).err(),
+        ("stop", Some(agent)) => agents.stop(agent).err(),
         ("message", Some(agent)) => match text {
             Some(text) => deliveries.hold(agents, &command.id, agent, text)?.err(),
             None => Some("a message needs text".into()),
         },
-        (kind @ ("start" | "interrupt" | "message"), None) => {
+        (kind @ ("start" | "interrupt" | "message" | "stop"), None) => {
             Some(format!("{kind:?} needs an agentId"))
         }
         (kind, _) => Some(format!("this host does not handle {kind:?} commands")),
@@ -482,14 +482,21 @@ mod tests {
 
     #[test]
     fn an_unhandled_command_is_reported_not_dropped() {
-        let command: Command = serde_json::from_str(r#"{"id":"c1","kind":"stop"}"#).unwrap();
+        let command: Command = serde_json::from_str(r#"{"id":"c1","kind":"reboot"}"#).unwrap();
         let report = take_now(&command);
         assert_eq!(report.command_id, "c1");
         assert!(!report.ok);
         assert_eq!(
             report.error.as_deref(),
-            Some(r#"this host does not handle "stop" commands"#)
+            Some(r#"this host does not handle "reboot" commands"#)
         );
+    }
+
+    #[test]
+    fn a_stop_for_an_agent_not_here_is_done() {
+        let command: Command =
+            serde_json::from_str(r#"{"id":"c1","kind":"stop","agentId":"a9"}"#).unwrap();
+        assert_eq!(take_now(&command), Report::new("c1".into(), None));
     }
 
     #[test]
@@ -506,7 +513,7 @@ mod tests {
 
     #[test]
     fn a_command_for_an_agent_names_one() {
-        for kind in ["start", "interrupt", "message"] {
+        for kind in ["start", "interrupt", "message", "stop"] {
             let command: Command =
                 serde_json::from_str(&format!(r#"{{"id":"c1","kind":"{kind}","text":"hi"}}"#))
                     .unwrap();

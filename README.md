@@ -146,6 +146,11 @@ report: what it was told, what it said and what it ran, numbered from the
 transcript's start, so a host that restarts sends the same lines again under
 the same numbers and the service keeps each once.
 
+A `stop` ends the agent's tmux session, and the agent with it, and is
+reported done; its workspace and branch are left as they are, like any other
+agent's that ends. Stopping an agent that is not running is done, not failed:
+it is already what was asked.
+
 A command kind the host does not handle is reported failed, naming the kind.
 
 To watch or talk to one directly on the machine:
