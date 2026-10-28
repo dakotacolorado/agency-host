@@ -55,7 +55,7 @@ api() {
 }
 agent_is() {
   [ "$(api GET "/fleet/agents/$agent")" = 200 ] || fail "reading agent $agent: $(cat "$out")"
-  jq -r '.agent | "\(.state) \(.active)"' "$out"
+  jq -r '(.agent // .) | "\(.state) \(.active)"' "$out"
 }
 
 mkdir -p "$scratch/bin" "$scratch/data" "$scratch/claude"
@@ -71,6 +71,7 @@ cleanup() {
     api POST "/fleet/agents/$agent/stop" '{"force":true}' > /dev/null || true
     echo "force-stopped $agent, which was still active"
   fi
+  api DELETE "/fleet/hosts/$host" > /dev/null || true
   tmux -L "$host" kill-server 2> /dev/null || true
   rm -rf "$scratch"
 }
