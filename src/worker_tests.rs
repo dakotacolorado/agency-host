@@ -1206,6 +1206,7 @@ fn a_worker_given_no_credential_holds_none() {
             Path::new("/"),
             &["sleep".into(), "60".into()],
             &[],
+            None,
         )
         .unwrap();
     // Whatever the tmux server was started with, the worker has no token that

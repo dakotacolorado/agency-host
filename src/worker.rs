@@ -311,21 +311,16 @@ impl Workers {
         // Written before tmux is asked, so a machine that dies between the two
         // leaves a session it knows of, which then reads as interrupted.
         home.begin(&session)?;
-        let tmux = match self.tmux.start(
+        if let Err(e) = self.tmux.start(
             id,
             &format!("worker-{}", record.name),
             &home.dir,
             &argv,
             &env,
+            Some(&home.log(session_id)),
         ) {
-            Ok(tmux) => tmux,
-            Err(e) => {
-                let _ = home.withdraw(session_id);
-                return Err(e);
-            }
-        };
-        if let Err(e) = self.tmux.log_to(&tmux, &home.log(session_id)) {
-            crate::log!("worker {}: its terminal is not logged: {e}", record.name);
+            let _ = home.withdraw(session_id);
+            return Err(e);
         }
         Ok(())
     }

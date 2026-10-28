@@ -58,7 +58,8 @@ impl Tmux {
 
     /// Runs `argv` detached in `dir`, as the session `name` for `tag`, and
     /// hands back tmux's id for it. A second session of the same name is
-    /// refused by tmux as a duplicate.
+    /// refused by tmux as a duplicate. With a `log`, everything the pane
+    /// shows goes to it from the program's first word.
     pub fn start(
         &self,
         tag: &str,
@@ -66,6 +67,7 @@ impl Tmux {
         dir: &Path,
         argv: &[String],
         env: &[(String, String)],
+        log: Option<&Path>,
     ) -> Result<String, String> {
         let name: String = name
             .chars()
@@ -81,11 +83,30 @@ impl Tmux {
         for pair in &env {
             args.extend(["-e", pair]);
         }
+        // A pipe can only be attached to a pane that exists, and a program
+        // started with the pane can speak before it is: so the pane first
+        // holds a program that says nothing, and the real one replaces it.
+        const QUIET: [&str; 2] = ["sleep", "86400"];
+        let first: Vec<&str> = match log {
+            Some(_) => QUIET.to_vec(),
+            None => argv.iter().map(String::as_str).collect(),
+        };
         // More than one argument is exec'd as it stands, never handed to a
         // shell, so nothing in the instructions is read as shell syntax.
-        args.extend(argv.iter().map(String::as_str));
+        args.extend(first);
         let id = self.run(&args, None)?.trim().to_string();
         self.run(&["set-option", "-t", &id, TAG, tag], None)?;
+        if let Some(log) = log {
+            if let Err(e) = self.log_to(&id, log) {
+                crate::log!("session {name}: its terminal is not logged: {e}");
+            }
+            let mut respawn = vec!["respawn-pane", "-k", "-t", &id, "-c", &dir];
+            respawn.extend(argv.iter().map(String::as_str));
+            if let Err(e) = self.run(&respawn, None) {
+                let _ = self.kill_session(&id);
+                return Err(e);
+            }
+        }
         Ok(id)
     }
 
