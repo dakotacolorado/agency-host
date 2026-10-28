@@ -2,11 +2,9 @@
 //! host keeps about the worker there:
 //!
 //! ```text
-//! worker.json       who it is: id, name, role, repositories, as created
-//! credential        its own token for the service, mode 600
+//! worker.json       who it is: id and name, as created
 //! sessions.jsonl    each session the host started for it, and each it stopped
 //! prompt.md         the opening message of its latest session
-//! repos/<repo>/     a git worktree of the host's checkout, on worker/<name>
 //! home/.claude/     its own Claude Code: settings, rules, history, transcripts
 //! logs/<id>.log     everything each session's terminal showed
 //! ```
@@ -17,7 +15,6 @@
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 /// Where retired workers' folders are moved, out of the way of a new worker
@@ -29,8 +26,6 @@ pub const RETIRED: &str = ".retired";
 pub struct Record {
     pub id: String,
     pub name: String,
-    pub role: String,
-    pub repositories: Vec<String>,
 }
 
 /// One session the host started for a worker. `claude` is the Claude Code
@@ -88,10 +83,6 @@ impl Home {
         Home { dir }
     }
 
-    pub fn repo(&self, name: &str) -> PathBuf {
-        self.dir.join("repos").join(name)
-    }
-
     /// The worker's own HOME as the layout names it. HOME itself stays the
     /// host user's, for the reason in claude.rs; this holds the worker's own
     /// Claude Code state.
@@ -105,10 +96,6 @@ impl Home {
 
     pub fn log(&self, session: &str) -> PathBuf {
         self.dir.join("logs").join(format!("{session}.log"))
-    }
-
-    pub fn credential(&self) -> PathBuf {
-        self.dir.join("credential")
     }
 
     pub fn prompt(&self) -> PathBuf {
@@ -144,36 +131,12 @@ impl Home {
                 ));
             }
         }
-        for dir in [self.dir.join("repos"), self.home(), self.dir.join("logs")] {
+        for dir in [self.home(), self.dir.join("logs")] {
             fs::create_dir_all(&dir).map_err(|e| at(&dir, e))?;
         }
         let file = self.record_file();
         let text = serde_json::to_string_pretty(record).map_err(|e| e.to_string())?;
         fs::write(&file, text + "\n").map_err(|e| at(&file, e))
-    }
-
-    /// Writes the credential once. A create comes again until it is reported,
-    /// with the same credential, and the first one written is the one kept.
-    pub fn keep_credential(&self, credential: &str) -> Result<(), String> {
-        let file = self.credential();
-        let written = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&file)
-            .and_then(|mut f| f.write_all(credential.as_bytes()));
-        match written {
-            Err(e) if e.kind() != io::ErrorKind::AlreadyExists => {
-                Err(format!("{}: {e}", file.display()))
-            }
-            _ => Ok(()),
-        }
-    }
-
-    pub fn read_credential(&self) -> Option<String> {
-        fs::read_to_string(self.credential())
-            .ok()
-            .filter(|c| !c.is_empty())
     }
 
     /// Every session the host has started for the worker, oldest first. A
@@ -238,40 +201,16 @@ impl Home {
             .map_err(|e| format!("{}: {e}", file.display()))
     }
 
-    /// Marks the worker retired and moves its folder to
-    /// `<workers_dir>/.retired/<name>-<id>`, where it is kept. Its worktrees
-    /// are told where they went, and its branches renamed after the folder,
-    /// so a new worker given its name can have `worker/<name>` and a folder
-    /// of that name; what was pushed under the old name stays on origin.
-    pub fn retire(
-        &self,
-        record: &Record,
-        repositories: &[(String, PathBuf)],
-    ) -> Result<(), String> {
+    /// Moves the worker's folder to `<workers_dir>/.retired/<name>-<id>`,
+    /// where it is kept, so a new worker can be given its name.
+    pub fn retire(&self, record: &Record) -> Result<(), String> {
         let parent = self.dir.parent().ok_or("a worker folder has no parent")?;
         let aside = parent
             .join(RETIRED)
             .join(format!("{}-{}", record.name, record.id));
         fs::create_dir_all(parent.join(RETIRED))
             .map_err(|e| format!("{}: {e}", parent.join(RETIRED).display()))?;
-        fs::rename(&self.dir, &aside).map_err(|e| format!("{}: {e}", self.dir.display()))?;
-        let moved = Home::new(aside);
-        let branch = crate::workspace::own_branch(&record.name);
-        let kept = format!("{branch}-retired-{}", record.id);
-        for (repo, checkout) in repositories {
-            let tree = moved.repo(repo);
-            if !tree.exists() {
-                continue;
-            }
-            crate::workspace::git(checkout, &["worktree", "repair", &tree.to_string_lossy()])?;
-            let local = format!("refs/heads/{branch}");
-            if crate::workspace::git(checkout, &["rev-parse", "--verify", "--quiet", &local])
-                .is_ok()
-            {
-                crate::workspace::git(checkout, &["branch", "-m", &branch, &kept])?;
-            }
-        }
-        Ok(())
+        fs::rename(&self.dir, &aside).map_err(|e| format!("{}: {e}", self.dir.display()))
     }
 }
 
@@ -303,7 +242,6 @@ pub fn retired(dir: &Path, id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     fn scratch(name: &str) -> PathBuf {
         let dir =
@@ -317,8 +255,6 @@ mod tests {
         Record {
             id: "w1".into(),
             name: "ana".into(),
-            role: "frontend".into(),
-            repositories: vec![],
         }
     }
 
@@ -346,12 +282,11 @@ mod tests {
         let dir = scratch("layout");
         let home = Home::new(dir.join("ana"));
         home.make(&ana()).unwrap();
-        for sub in ["repos", "home", "logs"] {
+        for sub in ["home", "logs"] {
             assert!(dir.join("ana").join(sub).is_dir(), "{sub}");
         }
         assert_eq!(home.claude(), dir.join("ana/home/.claude"));
         assert_eq!(home.log("s1"), dir.join("ana/logs/s1.log"));
-        assert_eq!(home.repo("widgets"), dir.join("ana/repos/widgets"));
         assert_eq!(home.record(), Some(ana()));
         assert_eq!(all(&dir), [(home.clone(), ana())]);
 
@@ -363,21 +298,6 @@ mod tests {
             })
             .unwrap_err();
         assert!(err.contains("already holds worker w1"), "{err}");
-    }
-
-    #[test]
-    fn the_first_credential_is_kept_for_this_user_alone() {
-        let dir = scratch("credential");
-        let home = Home::new(dir.join("ana"));
-        home.make(&ana()).unwrap();
-        home.keep_credential("wkr_first").unwrap();
-        home.keep_credential("wkr_later").unwrap();
-        assert_eq!(home.read_credential().as_deref(), Some("wkr_first"));
-        let mode = fs::metadata(home.credential())
-            .unwrap()
-            .permissions()
-            .mode();
-        assert_eq!(mode & 0o777, 0o600);
     }
 
     #[test]

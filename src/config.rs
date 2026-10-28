@@ -1,5 +1,4 @@
 use serde::Deserialize;
-use std::collections::BTreeMap;
 use std::{env, fs, io, path::PathBuf};
 
 #[derive(Debug, PartialEq)]
@@ -14,11 +13,6 @@ pub struct Config {
     /// What work this host can be matched to, as its owner names it. Checked
     /// by the service, whose refusal names the pattern a label must match.
     pub labels: Option<Vec<String>>,
-    /// The checkouts a worker can be given a worktree of, by the name a
-    /// worker's `repositories` use for each. Listing one here is not
-    /// advertising it: that is a `repo:` label, which is the owner's to add
-    /// alongside.
-    pub repositories: BTreeMap<String, PathBuf>,
     /// The tmux server workers' sessions run on, by its `-L` name.
     pub tmux_socket: String,
     /// Where each worker has its folder. Two hosts on one machine need two of
@@ -36,7 +30,6 @@ struct File {
     host_id: Option<String>,
     capacity: Option<u32>,
     labels: Option<Vec<String>>,
-    repositories: Option<BTreeMap<String, PathBuf>>,
     tmux_socket: Option<String>,
     workers_dir: Option<PathBuf>,
 }
@@ -106,30 +99,12 @@ fn from_parts(file: File, var: impl Fn(&str) -> Option<String>) -> Result<Config
         .filter(|v| !v.is_empty())
         .map(|v| v.split(',').map(|l| l.trim().to_string()).collect())
         .or(file.labels);
-    let repositories = match var("WORKER_HOST_REPOSITORIES").filter(|v| !v.is_empty()) {
-        Some(v) => v
-            .split(',')
-            .map(|pair| match pair.split_once('=') {
-                Some((name, path)) => Ok((name.trim().to_string(), PathBuf::from(path.trim()))),
-                None => Err(format!("WORKER_HOST_REPOSITORIES {pair}: not name=path")),
-            })
-            .collect::<Result<_, _>>()?,
-        None => file.repositories.unwrap_or_default(),
-    };
-    // The host runs as a daemon whose working directory is nobody's choice.
-    if let Some((name, path)) = repositories.iter().find(|(_, p)| !p.is_absolute()) {
-        return Err(format!(
-            "repository {name}: {} is not an absolute path",
-            path.display()
-        ));
-    }
     Ok(Config {
         service_url: service_url.trim_end_matches('/').to_string(),
         token,
         host_id,
         capacity,
         labels,
-        repositories,
         tmux_socket,
         workers_dir,
     })
@@ -159,7 +134,7 @@ mod tests {
         let config = from_parts(
             file(
                 "service_url = \"https://beta.example/\"\ntoken = \"t\"\nhost_id = \"studio\"\n\
-                 capacity = 2\nlabels = [\"macos\", \"repo:workplace-ui\"]",
+                 capacity = 2\nlabels = [\"macos\", \"linux\"]",
             ),
             env(&[("HOME", "/home/me")]),
         )
@@ -171,8 +146,7 @@ mod tests {
                 token: "t".into(),
                 host_id: "studio".into(),
                 capacity: Some(2),
-                labels: Some(vec!["macos".into(), "repo:workplace-ui".into()]),
-                repositories: BTreeMap::new(),
+                labels: Some(vec!["macos".into(), "linux".into()]),
                 tmux_socket: "worker-host".into(),
                 workers_dir: "/home/me/workers".into(),
             }
@@ -252,47 +226,6 @@ mod tests {
         assert_eq!(config.service_url, "https://beta.example");
         assert_eq!(config.token, "env");
         assert_eq!(config.host_id, "a");
-    }
-
-    #[test]
-    fn repositories_are_named_in_the_file_or_the_environment() {
-        let base = "service_url = \"https://x\"\ntoken = \"t\"\nhost_id = \"a\"\n";
-        let config = from_parts(
-            file(&format!(
-                "{base}repositories = {{ workplace-ui = \"/src/workplace-ui\" }}"
-            )),
-            env(&[]),
-        )
-        .unwrap();
-        assert_eq!(
-            config.repositories,
-            BTreeMap::from([("workplace-ui".into(), "/src/workplace-ui".into())])
-        );
-        let config = from_parts(
-            file(base),
-            env(&[("WORKER_HOST_REPOSITORIES", "a=/src/a, b = /src/b")]),
-        )
-        .unwrap();
-        assert_eq!(
-            config.repositories,
-            BTreeMap::from([("a".into(), "/src/a".into()), ("b".into(), "/src/b".into())])
-        );
-    }
-
-    #[test]
-    fn a_repository_must_be_an_absolute_path() {
-        let err = from_parts(
-            file("service_url = \"https://x\"\ntoken = \"t\""),
-            env(&[("WORKER_HOST_REPOSITORIES", "a=src/a")]),
-        )
-        .unwrap_err();
-        assert!(err.contains("repository a: src/a"), "{err}");
-        let err = from_parts(
-            file("service_url = \"https://x\"\ntoken = \"t\""),
-            env(&[("WORKER_HOST_REPOSITORIES", "a")]),
-        )
-        .unwrap_err();
-        assert!(err.contains("not name=path"), "{err}");
     }
 
     #[test]

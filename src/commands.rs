@@ -6,7 +6,7 @@
 use std::collections::VecDeque;
 
 use crate::protocol::{Command, CommandReport};
-use crate::worker::{Create, Deliveries, Workers};
+use crate::worker::{Deliveries, Workers};
 
 /// How many settled commands are remembered. A command is sent again only
 /// until its report lands, which is the next heartbeat at the latest, so
@@ -75,15 +75,7 @@ pub fn take(
     let text = command.text.as_deref();
     let error = match (command.kind.as_str(), command.worker_id.as_deref()) {
         ("create", Some(worker)) => match &command.name {
-            Some(name) => workers
-                .create(&Create {
-                    id: worker,
-                    name,
-                    role: command.role.as_deref().unwrap_or_default(),
-                    repositories: command.repositories.as_deref().unwrap_or_default(),
-                    credential: command.credential.as_ref(),
-                })
-                .err(),
+            Some(name) => workers.create(worker, name).err(),
             None => Some("a create needs a name".into()),
         },
         ("start", Some(worker)) => match &command.session_id {
@@ -121,8 +113,6 @@ mod tests {
             Tmux::new(format!("worker-host-test-{}-none", std::process::id())),
             Claude::new("/nonexistent/claude", None),
             "/nonexistent/workers".into(),
-            Default::default(),
-            "http://service.test",
         )
     }
 
@@ -209,18 +199,9 @@ mod tests {
 
     #[test]
     fn a_create_that_cannot_be_done_says_why() {
-        let report = take_now(
-            r#"{"id":"c1","kind":"create","workerId":"w1","name":"Ana","role":"x","credential":"wkr_secret"}"#,
-        );
+        let report = take_now(r#"{"id":"c1","kind":"create","workerId":"w1","name":"Ana"}"#);
         let error = report.error.unwrap();
         assert!(error.contains("not a worker name"), "{error}");
-        let report = take_now(
-            r#"{"id":"c1","kind":"create","workerId":"w1","name":"ana","repositories":["gadgets"]}"#,
-        );
-        assert!(
-            report.error.unwrap().contains("no checkout of gadgets"),
-            "the reason is carried up"
-        );
     }
 
     #[test]

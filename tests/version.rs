@@ -16,11 +16,8 @@ fn run(program: &str, args: &[&str]) -> String {
 #[test]
 fn names_the_commit_or_says_it_cannot() {
     let version = run(env!("CARGO_BIN_EXE_worker-host"), &["--version"]);
-    // The commit is the last word on the line, not the whole remainder: the line
-    // also says which contract the host speaks, and both halves of that sentence
-    // are somebody's acceptance criterion. Last rather than first because CI
-    // asserts the same shape with `grep -qx "worker-host .* $GITHUB_SHA"`, and a
-    // format two checks disagree about is a format that breaks one of them.
+    // The commit is the last word on the line, because CI asserts the same
+    // shape with `grep -qx "worker-host .* $GITHUB_SHA"`.
     let commit = version
         .strip_prefix(concat!("worker-host ", env!("CARGO_PKG_VERSION"), " "))
         .and_then(|rest| rest.split_whitespace().last())

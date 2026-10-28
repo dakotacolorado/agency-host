@@ -3,18 +3,15 @@ mod commands;
 mod config;
 mod heartbeat;
 mod home;
-mod machine;
 mod protocol;
 mod socket;
 mod sys;
 mod tmux;
 mod worker;
-mod workspace;
 
 use commands::Taken;
 use config::Config;
-use heartbeat::{Client, Failure, Heartbeat, CONTRACT};
-use machine::{Meter, Sample};
+use heartbeat::{Client, Failure, Heartbeat};
 use protocol::{line_reports, Command, CommandReport, Line, Up, WorkerReport};
 use socket::Socket;
 use std::collections::HashMap;
@@ -45,11 +42,6 @@ const TICK: Duration = Duration::from_secs(1);
 /// reported soon after it arrives.
 const DELIVERING: Duration = Duration::from_secs(2);
 
-/// Samples kept while heartbeats are failing, the most a heartbeat may carry.
-/// A host cut off for longer loses its oldest, which a chart of load can
-/// spare.
-const SAMPLES_KEPT: usize = 1000;
-
 const USAGE: &str = "usage: worker-host [--config PATH] [--heartbeats N]
 
   --config PATH   config file (default $XDG_CONFIG_HOME/worker-host/config.toml,
@@ -63,8 +55,6 @@ Settings, each overriding the file:
   WORKER_HOST_ID           host_id      defaults to the hostname
   WORKER_HOST_CAPACITY     capacity     how many workers this host will run sessions for
   WORKER_HOST_LABELS       labels       what it can run, comma-separated (a list in the file)
-  WORKER_HOST_REPOSITORIES repositories the checkouts a worker can be given a worktree of,
-                                        as name=/path,... (a table in the file)
   WORKER_HOST_WORKERS_DIR  workers_dir  where workers' folders are (default ~/workers)
   WORKER_HOST_TMUX_SOCKET  tmux_socket  the tmux server sessions run on (default worker-host)";
 
@@ -93,7 +83,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
                 // line with `grep -qx "worker-host .* $GITHUB_SHA"`, so
                 // anything added after the commit breaks the check that the
                 // binary on a bare machine is the one the workflow just built.
-                println!("worker-host {VERSION} (contract {CONTRACT}) {COMMIT}");
+                println!("worker-host {VERSION} {COMMIT}");
                 std::process::exit(0);
             }
             "--help" | "-h" => {
@@ -123,7 +113,7 @@ fn main() -> ExitCode {
     };
     sys::ignore_hangup();
     log!(
-        "worker-host {VERSION} {COMMIT} (contract {CONTRACT}): host {} sending heartbeats to {}",
+        "worker-host {VERSION} {COMMIT}: host {} sending heartbeats to {}",
         config.host_id,
         config.service_url
     );
@@ -139,13 +129,10 @@ fn main() -> ExitCode {
         config.workers_dir.display(),
         config.tmux_socket
     );
-    let mut meter = Meter::new(config.workers_dir.clone());
     let workers = Workers::new(
         tmux::Tmux::new(&config.tmux_socket),
         claude::Claude::from_env(|k| env::var(k).ok()),
         config.workers_dir.clone(),
-        config.repositories.clone(),
-        config.service_url.clone(),
     );
     for (name, state) in workers.reconcile() {
         let state = serde_json::to_value(state).unwrap_or_default();
@@ -161,7 +148,6 @@ fn main() -> ExitCode {
         &Client::new(&config),
         &config,
         &workers,
-        &mut meter,
         socket.as_ref(),
         args.heartbeats,
     )
@@ -220,12 +206,10 @@ fn run(
     client: &Client,
     config: &Config,
     workers: &Workers,
-    meter: &mut Meter,
     socket: Option<&Socket>,
     limit: Option<u64>,
 ) -> ExitCode {
     let mut unheard = Unheard::default();
-    let mut samples: Vec<Sample> = Vec::new();
     // How far each worker's transcript has been sent in a heartbeat that
     // landed, and how far it has been read to tell what the worker is doing
     // and to send on the socket.
@@ -306,12 +290,6 @@ fn run(
         }
 
         if Instant::now() >= next_heartbeat {
-            if let Some(sample) = meter.sample() {
-                if samples.len() == SAMPLES_KEPT {
-                    samples.remove(0);
-                }
-                samples.push(sample);
-            }
             let read: Vec<(String, Option<worker::Batch>)> = all
                 .iter()
                 .map(|(home, record)| {
@@ -330,7 +308,6 @@ fn run(
                 version: VERSION,
                 labels: config.labels.as_deref(),
                 capacity: config.capacity,
-                samples: &samples,
                 workers: &states,
                 lines: line_reports(&lines),
                 command_results: &unheard.heartbeat,
@@ -339,7 +316,6 @@ fn run(
                 Ok(reply) => {
                     landed += 1;
                     failures = 0;
-                    samples.clear();
                     for (id, batch) in read {
                         if let Some(batch) = batch {
                             landed_at.insert(id, batch.next);
@@ -374,12 +350,6 @@ fn run(
                 }
                 Err(failure) => {
                     let (message, wait) = match failure {
-                        Failure::Unsupported { minimum, error } => (
-                            format!(
-                                "contract {CONTRACT} is unsupported, the service accepts {minimum} and up: {error}"
-                            ),
-                            Duration::from_secs(600),
-                        ),
                         Failure::Refused(code, body) => (
                             format!("refused ({code}): {body}"),
                             Duration::from_secs(600),

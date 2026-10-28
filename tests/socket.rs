@@ -41,8 +41,7 @@ fn heartbeats(listener: TcpListener, socket: String) {
             let mut body = vec![0; length];
             reader.read_exact(&mut body).unwrap();
             let reply =
-                json!({"contract":1,"heartbeatInterval":30,"socketUrl":socket,"commands":[]})
-                    .to_string();
+                json!({"heartbeatInterval":30,"socketUrl":socket,"commands":[]}).to_string();
             let _ = write!(
                 reader.get_mut(),
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
@@ -172,7 +171,7 @@ fn a_command_pushed_on_the_socket_is_taken_and_reported_at_once() {
     let quick = Duration::from_secs(10);
     push(
         &mut socket,
-        json!({"id":"c1","kind":"create","workerId":"w1","name":"ana","role":"x","repositories":[],"credential":"wkr_w1_x"}),
+        json!({"id":"c1","kind":"create","workerId":"w1","name":"ana"}),
     );
     let created = report_until(&mut socket, quick, |r| result(r, "c1").is_some());
     assert_eq!(result(&created, "c1").unwrap()["ok"], true, "{created}");

@@ -1,7 +1,9 @@
-//! The two things std does not offer, declared directly rather than pulling
-//! in libc for them. Both values are the same on Linux and macOS.
+//! What std does not offer: two calls declared directly rather than pulling
+//! in libc for them (both values are the same on Linux and macOS), and the
+//! time as the service reads it.
 
 use std::ffi::{c_char, c_int, CStr};
+use std::time::SystemTime;
 
 const SIGHUP: c_int = 1;
 const SIG_IGN: usize = 1;
@@ -36,4 +38,49 @@ macro_rules! log {
         use std::io::Write;
         let _ = writeln!(std::io::stderr(), $($arg)*);
     }};
+}
+
+/// Now, as the service's `date-time` reads it.
+pub fn now() -> String {
+    rfc3339(SystemTime::now())
+}
+
+/// UTC to the millisecond, as the service's `date-time` reads it.
+fn rfc3339(t: SystemTime) -> String {
+    let d = t.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default();
+    let secs = d.as_secs();
+    let (days, rem) = ((secs / 86400) as i64, secs % 86400);
+    // Howard Hinnant's civil_from_days.
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{:03}Z",
+        rem / 3600,
+        rem / 60 % 60,
+        rem % 60,
+        d.subsec_millis()
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn times_are_utc_to_the_millisecond() {
+        let t = SystemTime::UNIX_EPOCH + Duration::from_millis(1_793_102_400_123);
+        assert_eq!(rfc3339(t), "2026-10-27T12:00:00.123Z");
+        assert_eq!(
+            rfc3339(SystemTime::UNIX_EPOCH + Duration::from_secs(951_782_400)),
+            "2000-02-29T00:00:00.000Z"
+        );
+    }
 }

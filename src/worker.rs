@@ -3,7 +3,7 @@
 //! while it works and writes its transcript as it goes. The host remembers
 //! nothing about them that their folders and tmux do not hold.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::PathBuf;
@@ -12,15 +12,9 @@ use std::time::{Duration, Instant};
 
 use crate::claude::{self, Begin, Claude};
 use crate::home::{self, Home, Record, Session};
-use crate::machine;
-use crate::protocol::{Credential, Line, State};
+use crate::protocol::{Line, State};
+use crate::sys;
 use crate::tmux::Tmux;
-use crate::workspace;
-
-/// Every worker's standing rules, kept as its Claude Code's user memory. Its
-/// first lines were written in agent-rig's prompts/worker.md, which still has
-/// its own copy: a change to one is not a change to the other.
-const CONDUCT: &str = include_str!("conduct.md");
 
 /// The opening message is one argument to Claude Code, and linux takes no
 /// single argument longer than this.
@@ -36,9 +30,6 @@ const NOTHING_YET: &str = "Nothing has been asked of you yet. Wait to be told wh
 const CARRY_ON: &str = "Your last session ended and this one carries on from it. If you were \
                         waiting to be told something, keep waiting; otherwise carry on where you \
                         left off.";
-
-/// What stands in a transcript line where the worker's credential was.
-const REDACTED: &str = "[credential]";
 
 /// However much has piled up, a read stops after this many bytes of the raw
 /// transcript, most of which is Claude Code's own bookkeeping.
@@ -106,16 +97,6 @@ pub struct Batch {
     pub next: Cursor,
 }
 
-/// What a `create` says of a worker.
-#[derive(Debug)]
-pub struct Create<'a> {
-    pub id: &'a str,
-    pub name: &'a str,
-    pub role: &'a str,
-    pub repositories: &'a [String],
-    pub credential: Option<&'a Credential>,
-}
-
 /// The Claude Code transcripts a worker's sessions wrote to, in the order
 /// they were begun, each once: a session that carries on the last
 /// conversation writes on in the transcript before it.
@@ -133,27 +114,11 @@ pub struct Workers {
     tmux: Tmux,
     claude: Claude,
     dir: PathBuf,
-    repositories: BTreeMap<String, PathBuf>,
-    /// The service this host sends heartbeats to, which a worker is told as
-    /// `WORKER_SERVICE_URL`.
-    service_url: String,
 }
 
 impl Workers {
-    pub fn new(
-        tmux: Tmux,
-        claude: Claude,
-        dir: PathBuf,
-        repositories: BTreeMap<String, PathBuf>,
-        service_url: impl Into<String>,
-    ) -> Self {
-        Workers {
-            tmux,
-            claude,
-            dir,
-            repositories,
-            service_url: service_url.into(),
-        }
+    pub fn new(tmux: Tmux, claude: Claude, dir: PathBuf) -> Self {
+        Workers { tmux, claude, dir }
     }
 
     /// Every worker here that is not retired.
@@ -174,14 +139,10 @@ impl Workers {
             })
     }
 
-    /// Makes the worker's folder: its record, its credential, a worktree of
-    /// each repository it was given, and a Claude Code state of its own. A
-    /// create is sent again until it is reported, and one the host has done
-    /// already is taken up where it stands. A repository this host has no
-    /// checkout of, or a worktree that cannot be made, fails it: a worker
-    /// without the code it was given would spend its sessions finding out.
-    pub fn create(&self, create: &Create) -> Result<(), String> {
-        let Create { id, name, .. } = *create;
+    /// Makes the worker's folder: its record and a Claude Code state of its
+    /// own. A create is sent again until it is reported, and one the host has
+    /// done already is taken up where it stands.
+    pub fn create(&self, id: &str, name: &str) -> Result<(), String> {
         if !home::valid_name(name) {
             return Err(format!(
                 "{name:?} is not a worker name: [a-z0-9][a-z0-9-]{{0,39}}"
@@ -195,29 +156,12 @@ impl Workers {
                 return Err(format!("worker {id} is here already, named {}", held.name));
             }
         }
-        let checkouts = create
-            .repositories
-            .iter()
-            .map(|repo| {
-                self.repositories.get(repo).map(|c| (repo, c)).ok_or_else(|| {
-                    format!("this host has no checkout of {repo}: its config names none by that name")
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
         let home = Home::new(self.dir.join(name));
         let record = Record {
             id: id.into(),
             name: name.into(),
-            role: create.role.into(),
-            repositories: create.repositories.to_vec(),
         };
         home.make(&record)?;
-        if let Some(credential) = create.credential {
-            home.keep_credential(credential.expose())?;
-        }
-        for (repo, checkout) in checkouts {
-            workspace::prepare(name, checkout, &home.repo(repo))?;
-        }
         self.claude
             .prepare(&home.claude(), &home.dir, &rules(&home, &record))
     }
@@ -229,12 +173,6 @@ impl Workers {
     /// A start is sent again until it is reported, so one the host has done
     /// already -- before a restart that lost the report -- is done, not
     /// repeated: its session is running, or it ran and has ended since.
-    ///
-    /// The session has `WORKER_SERVICE_URL`, `WORKER_ID` and, when the worker
-    /// was given one, `WORKER_TOKEN`: its own credential. The credential is
-    /// never an argument to anything, where `ps` would show it to the
-    /// machine; the session's shell reads it from the worker's folder into
-    /// the environment as Claude Code starts.
     pub fn start(
         &self,
         id: &str,
@@ -299,15 +237,8 @@ impl Workers {
         // ones of the host it runs on.
         self.claude
             .prepare(&home.claude(), &home.dir, &rules(&home, &record))?;
-        let credential = home.credential();
-        let argv = self.claude.argv(
-            begin,
-            &prompt,
-            credential.is_file().then_some(credential.as_path()),
-        );
-        let mut env = self.claude.env(&home.claude());
-        env.push(("WORKER_SERVICE_URL".into(), self.service_url.clone()));
-        env.push(("WORKER_ID".into(), id.into()));
+        let argv = self.claude.argv(begin, &prompt);
+        let env = self.claude.env(&home.claude());
         // Written before tmux is asked, so a machine that dies between the two
         // leaves a session it knows of, which then reads as interrupted.
         home.begin(&session)?;
@@ -364,10 +295,8 @@ impl Workers {
     pub fn state(&self, home: &Home, live: Option<&str>, waiting: bool) -> (State, Option<String>) {
         let latest = home.latest();
         match live {
-            Some(tmux) => {
-                let state = if self.tmux.screen(tmux).is_some_and(|s| claude::asking(&s)) {
-                    State::Blocked
-                } else if waiting {
+            Some(_) => {
+                let state = if waiting {
                     State::Waiting
                 } else {
                     State::Working
@@ -404,7 +333,7 @@ impl Workers {
     }
 
     /// Ends the worker's session, and Claude Code with it; the worker is idle.
-    /// Its folder, worktrees and branches are left as they are. One with no
+    /// Its folder is left as it is. One with no
     /// session, or not here at all, is already stopped, which is what was
     /// asked; one whose session ended without a stop is idle from now on.
     pub fn stop(&self, id: &str) -> Result<(), String> {
@@ -427,12 +356,7 @@ impl Workers {
             return Ok(());
         };
         self.stop(id)?;
-        let checkouts: Vec<(String, PathBuf)> = record
-            .repositories
-            .iter()
-            .filter_map(|r| Some((r.clone(), self.repositories.get(r)?.clone())))
-            .collect();
-        home.retire(&record, &checkouts)
+        home.retire(&record)
     }
 
     /// Whether Claude Code has answered anything in the worker's latest
@@ -519,14 +443,9 @@ impl Workers {
     /// the transcript still being written, so a line Claude Code is in the
     /// middle of is left for next time; one an ended session left torn is
     /// passed over.
-    ///
-    /// A worker may print its own credential, or put it in a command; where
-    /// it does, the line is sent with the credential replaced, since the
-    /// transcript is read by anyone who can read the worker.
     pub fn read(&self, home: &Home, from: Cursor, budget: usize) -> Option<Batch> {
         let sessions = home.sessions();
         let files = transcripts(&sessions);
-        let secret = home.read_credential();
         let (mut next, mut lines, mut size) = (from, Vec::new(), 0);
         'files: while next.file < files.len() {
             let claude = files[next.file];
@@ -576,19 +495,11 @@ impl Workers {
                     entries,
                     waiting,
                 } = claude::read(&String::from_utf8_lossy(&line));
-                let at = at.filter(|at| instant(at)).unwrap_or_else(machine::now);
+                let at = at.filter(|at| instant(at)).unwrap_or_else(sys::now);
                 let read: Vec<Line> = entries
                     .into_iter()
                     .zip(next.seq..)
-                    .map(|(entry, seq)| {
-                        let mut line = entry.line(seq, at.clone(), session.into());
-                        if let Some(secret) = &secret {
-                            if line.text.contains(secret.as_str()) {
-                                line.text = line.text.replace(secret.as_str(), REDACTED);
-                            }
-                        }
-                        line
-                    })
+                    .map(|(entry, seq)| entry.line(seq, at.clone(), session.into()))
                     .collect();
                 let more: usize = read
                     .iter()
@@ -612,26 +523,16 @@ impl Workers {
     }
 }
 
-/// The worker's standing rules, with where it works filled in.
+/// The worker's standing rules, Claude Code's user memory.
 fn rules(home: &Home, record: &Record) -> String {
-    let mut place = format!(
-        "You are worker `{}`, role `{}`. Your folder is `{}`, and you start in it.",
+    format!(
+        "You are worker `{}`, and your folder is `{}`. A person reads everything you \
+         write, and what to do comes to you as messages. Clone whatever you need into \
+         your folder; `home/`, `logs/`, `prompt.md`, `sessions.jsonl` and `worker.json` \
+         are the host's records of you, so leave them be.\n",
         record.name,
-        record.role,
         home.dir.display()
-    );
-    if record.repositories.is_empty() {
-        place.push_str(" No repository was given to you, so it holds no code.");
-    } else {
-        place.push_str(" Your code is under `repos/`, a git worktree of each repository given to you, made for you alone:\n");
-        for repo in &record.repositories {
-            place.push_str(&format!(
-                "\n- `repos/{repo}`, on branch `{}`",
-                workspace::own_branch(&record.name)
-            ));
-        }
-    }
-    CONDUCT.replace("{{WORKSPACE}}", &place)
+    )
 }
 
 /// How long a message may take to reach its worker before it is reported

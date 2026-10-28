@@ -189,7 +189,7 @@ fn a_worker_is_created_spoken_to_stopped_and_retired_over_the_socket() {
     let created = service.call(
         "POST",
         "/fleet/workers",
-        Some(json!({"name": name, "role": "test", "hostId": id, "repositories": [], "brief": "hello"})),
+        Some(json!({"name": name, "hostId": id, "brief": "hello"})),
     );
     let created = created.get("worker").cloned().unwrap_or(created);
     let worker = created["id"].as_str().unwrap().to_string();

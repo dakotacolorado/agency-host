@@ -40,7 +40,7 @@ impl Machine {
     fn worker(&self, workers: &Path, id: &str, name: &str) {
         let home = workers.join(name);
         fs::create_dir_all(&home).unwrap();
-        let record = json!({"id": id, "name": name, "role": "x", "repositories": []});
+        let record = json!({"id": id, "name": name});
         fs::write(home.join("worker.json"), record.to_string()).unwrap();
         let session = json!({"sessionId": format!("s-{id}"), "claude": "c", "from": 0});
         fs::write(home.join("sessions.jsonl"), format!("{session}\n")).unwrap();
@@ -133,7 +133,7 @@ fn serve_one_heartbeat(listener: &TcpListener) -> String {
     }
     let mut body = vec![0; length];
     reader.read_exact(&mut body).unwrap();
-    let reply = r#"{"contract":1,"commands":[],"heartbeatInterval":30}"#;
+    let reply = r#"{"commands":[],"heartbeatInterval":30}"#;
     write!(
         reader.get_mut(),
         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",

@@ -92,19 +92,9 @@ w '{"type":"assistant","message":{"id":"m0","content":[{"type":"text","text":"bu
 sleep 60
 "#;
 
-/// Holds the session on a question at its terminal, as Claude Code's own
-/// dialogs do.
-const ASKING_CLAUDE: &str = r#"
-w '{"type":"assistant","message":{"id":"m0","content":[{"type":"text","text":"may I?"}],"stop_reason":"tool_use"}}'
-printf '  Do you want to proceed?\n  > 1. Yes\n    2. No\n  Enter to confirm · Esc to cancel\n'
-sleep 60
-"#;
-
-/// Records the service's part of its environment, and Claude Code's, then
-/// waits.
+/// Records Claude Code's part of its environment, then waits.
 const ENV_CLAUDE: &str = r#"
-printf '%s|%s|%s|%s|%s' "$WORKER_SERVICE_URL" "$WORKER_ID" "${WORKER_TOKEN-unset}" \
-  "$CLAUDE_CONFIG_DIR" "${CLAUDE_SECURESTORAGE_CONFIG_DIR-unset}" > "$dir/$s.env"
+printf '%s|%s' "$CLAUDE_CONFIG_DIR" "${CLAUDE_SECURESTORAGE_CONFIG_DIR-unset}" > "$dir/$s.env"
 sleep 60
 "#;
 
@@ -122,10 +112,6 @@ impl Drop for Host {
 }
 
 fn host(name: &str, program: &str) -> Host {
-    host_with(name, program, BTreeMap::new())
-}
-
-fn host_with(name: &str, program: &str, repositories: BTreeMap<String, PathBuf>) -> Host {
     let dir = std::env::temp_dir().join(format!("worker-host-{}-{name}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -135,7 +121,7 @@ fn host_with(name: &str, program: &str, repositories: BTreeMap<String, PathBuf>)
     fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
     let socket = format!("worker-host-test-{}-{name}", std::process::id());
     Host {
-        workers: workers_at(&dir, &socket, &fake.to_string_lossy(), repositories),
+        workers: workers_at(&dir, &socket, &fake.to_string_lossy()),
         dir,
         socket,
     }
@@ -143,18 +129,11 @@ fn host_with(name: &str, program: &str, repositories: BTreeMap<String, PathBuf>)
 
 /// The host as it would be on starting again: nothing but the folders and
 /// tmux to go on.
-fn workers_at(
-    dir: &Path,
-    socket: &str,
-    program: &str,
-    repositories: BTreeMap<String, PathBuf>,
-) -> Workers {
+fn workers_at(dir: &Path, socket: &str, program: &str) -> Workers {
     Workers::new(
         Tmux::new(socket),
         Claude::new(program, None),
         dir.join("workers"),
-        repositories,
-        "http://service.test",
     )
 }
 
@@ -164,17 +143,7 @@ impl Host {
     }
 
     fn create(&self, id: &str, name: &str) {
-        self.create_with(id, name, &[]).unwrap();
-    }
-
-    fn create_with(&self, id: &str, name: &str, repositories: &[String]) -> Result<(), String> {
-        self.workers.create(&Create {
-            id,
-            name,
-            role: "frontend",
-            repositories,
-            credential: None,
-        })
+        self.workers.create(id, name).unwrap();
     }
 
     /// The stand-in's own record of `session`, once it has written it.
@@ -328,7 +297,7 @@ fn create_and_start_commands_run_a_worker_in_its_own_folder_and_session() {
     let host = host("start", FAKE_CLAUDE);
     let mut deliveries = Deliveries::new(PATIENCE);
     for json in [
-        r#"{"id":"c1","kind":"create","workerId":"w1","name":"ana","role":"frontend","repositories":[],"credential":"wkr_w1_x"}"#,
+        r#"{"id":"c1","kind":"create","workerId":"w1","name":"ana"}"#,
         r#"{"id":"c2","kind":"start","workerId":"w1","sessionId":"s1","resume":false}"#,
     ] {
         let report = commands::take(&command(json), &host.workers, &mut deliveries).unwrap();
@@ -348,11 +317,7 @@ fn create_and_start_commands_run_a_worker_in_its_own_folder_and_session() {
         "started with nothing to do but wait"
     );
     let rules = fs::read_to_string(home.claude().join("CLAUDE.md")).unwrap();
-    assert!(
-        rules.contains("You are worker `ana`, role `frontend`"),
-        "{rules}"
-    );
-    assert!(rules.contains("holds no code"), "{rules}");
+    assert!(rules.contains("You are worker `ana`"), "{rules}");
 }
 
 #[test]
@@ -387,7 +352,7 @@ fn a_worker_reports_idle_working_waiting_interrupted_and_idle_again() {
         host.state("ana", cursor.waiting),
         (State::Interrupted, Some("s1".into()))
     );
-    let restarted = workers_at(&host.dir, &host.socket, "/nonexistent", BTreeMap::new());
+    let restarted = workers_at(&host.dir, &host.socket, "/nonexistent");
     assert_eq!(
         restarted.reconcile(),
         [("ana".to_string(), State::Interrupted)]
@@ -401,18 +366,6 @@ fn a_worker_reports_idle_working_waiting_interrupted_and_idle_again() {
         workers.live().is_empty(),
         "started a session that had ended"
     );
-}
-
-#[test]
-fn a_question_at_its_terminal_reports_the_worker_blocked() {
-    let host = host("blocked", ASKING_CLAUDE);
-    host.create("w1", "ana");
-    host.workers.start("w1", "s1", false, None).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while host.state("ana", false).0 != State::Blocked {
-        assert!(Instant::now() < deadline, "never blocked");
-        thread::sleep(Duration::from_millis(50));
-    }
 }
 
 #[test]
@@ -673,7 +626,6 @@ fn a_host_that_restarts_picks_up_live_sessions_and_does_not_start_them_again() {
         &host.dir,
         &host.socket,
         &host.dir.join("claude").to_string_lossy(),
-        BTreeMap::new(),
     );
     assert_eq!(restarted.reconcile(), [("ana".to_string(), State::Working)]);
     restarted
@@ -689,12 +641,7 @@ fn a_host_that_restarts_picks_up_live_sessions_and_does_not_start_them_again() {
 fn a_start_that_cannot_run_says_why_and_can_be_tried_again() {
     let host = host("missing", FAKE_CLAUDE);
     host.create("w1", "ana");
-    let workers = workers_at(
-        &host.dir,
-        &host.socket,
-        "/nonexistent/claude",
-        BTreeMap::new(),
-    );
+    let workers = workers_at(&host.dir, &host.socket, "/nonexistent/claude");
     let err = workers.start("w1", "s1", false, None).unwrap_err();
     assert!(
         err.contains("/nonexistent/claude is not installed"),
@@ -777,7 +724,7 @@ fn a_read_stops_at_its_budget_and_the_next_picks_up_there() {
     };
     let body = line("one") + &line("two") + &line("three") + r#"{"type":"user","mess"#;
     fs::write(transcript(&host, "s1"), &body).unwrap();
-    let one = Entry::Told { text: "one".into() }.line(0, machine::now(), "s1".into());
+    let one = Entry::Told { text: "one".into() }.line(0, sys::now(), "s1".into());
     let one = serde_json::to_string(&one).unwrap().len();
     let home = host.home("ana");
 
@@ -954,102 +901,32 @@ fn only_an_instant_in_utc_is_taken_as_one() {
     ] {
         assert!(!instant(at), "{at}");
     }
-    assert!(instant(&machine::now()));
-}
-
-fn repo_host(name: &str, program: &str) -> (Host, crate::workspace::tests::Repo) {
-    let repo = crate::workspace::tests::repo(&format!("worker-{name}"));
-    let repositories = BTreeMap::from([("widgets".to_string(), repo.checkout.clone())]);
-    (host_with(name, program, repositories), repo)
-}
-
-fn git_out(dir: &Path, args: &[&str]) -> String {
-    let out = Process::new("git")
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .unwrap();
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
-}
-
-#[test]
-fn a_worker_given_a_repository_has_a_worktree_of_it_on_its_own_branch() {
-    let (host, repo) = repo_host("worktree", FAKE_CLAUDE);
-    let widgets = ["widgets".to_string()];
-    host.create_with("w1", "ana", &widgets).unwrap();
-    host.create_with("w2", "bo", &widgets).unwrap();
-    host.create_with("w1", "ana", &widgets).unwrap();
-
-    for name in ["ana", "bo"] {
-        let tree = host.home(name).repo("widgets");
-        assert!(tree.join("README").is_file(), "the code is there");
-        assert_eq!(
-            git_out(&tree, &["branch", "--show-current"]),
-            format!("worker/{name}")
-        );
-    }
-    assert_eq!(
-        git_out(&repo.checkout, &["branch", "--show-current"]),
-        "main"
-    );
-    let rules = fs::read_to_string(host.home("ana").claude().join("CLAUDE.md")).unwrap();
-    assert!(
-        rules.contains("- `repos/widgets`, on branch `worker/ana`"),
-        "{rules}"
-    );
-    assert!(
-        rules.contains("## Push your branch"),
-        "the rules come with it"
-    );
-
-    host.workers
-        .start("w1", "s1", false, Some("fix the build"))
-        .unwrap();
-    assert_eq!(
-        host.fake_file("ana", "s1", "cwd"),
-        host.home("ana").dir.to_string_lossy(),
-        "it starts in its folder, with its code beneath"
-    );
+    assert!(instant(&sys::now()));
 }
 
 #[test]
 fn a_create_that_cannot_be_done_says_why() {
-    let (host, repo) = repo_host("uncreated", FAKE_CLAUDE);
-    let err = host
-        .create_with("w1", "ana", &["gadgets".to_string()])
-        .unwrap_err();
-    assert!(err.contains("no checkout of gadgets"), "{err}");
-    assert!(
-        !host.home("ana").dir.exists(),
-        "refused before anything was made"
-    );
-
-    crate::workspace::tests::sh(&repo.checkout, "git remote set-url origin /nonexistent");
-    let err = host
-        .create_with("w2", "bo", &["widgets".to_string()])
-        .unwrap_err();
-    assert!(err.contains("could not fetch from origin"), "{err}");
-
+    let host = host("uncreated", FAKE_CLAUDE);
+    host.create("w2", "bo");
     for (id, name, why) in [
         ("w3", "../up", "not a worker name"),
         ("w3", ".retired", "not a worker name"),
         ("w9", "bo", "already holds worker w2"),
         ("w2", "cy", "is here already, named bo"),
     ] {
-        let err = host.create_with(id, name, &[]).unwrap_err();
+        let err = host.workers.create(id, name).unwrap_err();
         assert!(err.contains(why), "{name}: {err}");
     }
 }
 
 #[test]
 fn a_stop_ends_the_session_and_leaves_its_work_where_it_is() {
-    let (host, repo) = repo_host("stop", FAKE_CLAUDE);
+    let host = host("stop", FAKE_CLAUDE);
     let workers = &host.workers;
-    host.create_with("w1", "ana", &["widgets".to_string()])
-        .unwrap();
+    host.create("w1", "ana");
     workers.start("w1", "s1", false, None).unwrap();
-    let tree = host.home("ana").repo("widgets");
-    crate::workspace::tests::sh(&tree, "echo half-done > WORK");
+    let work = host.home("ana").dir.join("WORK");
+    fs::write(&work, "half-done\n").unwrap();
     let stop = command(r#"{"id":"c1","kind":"stop","workerId":"w1"}"#);
     let mut deliveries = Deliveries::new(PATIENCE);
 
@@ -1057,29 +934,18 @@ fn a_stop_ends_the_session_and_leaves_its_work_where_it_is() {
     assert!(report.ok, "{report:?}");
     assert!(workers.live().is_empty(), "no session is left");
     assert_eq!(host.state("ana", false), (State::Idle, None));
-    assert_eq!(
-        fs::read_to_string(tree.join("WORK")).unwrap(),
-        "half-done\n"
-    );
-    assert!(
-        git_out(&repo.checkout, &["branch", "--list", "worker/ana"]).contains("worker/ana"),
-        "the branch is kept"
-    );
+    assert_eq!(fs::read_to_string(&work).unwrap(), "half-done\n");
     let again = commands::take(&stop, workers, &mut deliveries).unwrap();
     assert!(again.ok, "stopping one not running is done: {again:?}");
 }
 
 #[test]
 fn a_retired_worker_is_kept_aside_and_its_name_can_be_given_again() {
-    let (host, repo) = repo_host("retire", CHAT_CLAUDE);
+    let host = host("retire", CHAT_CLAUDE);
     let workers = &host.workers;
-    let widgets = ["widgets".to_string()];
-    host.create_with("w1", "ana", &widgets).unwrap();
+    host.create("w1", "ana");
     workers.start("w1", "s1", false, Some("hello")).unwrap();
-    crate::workspace::tests::sh(
-        &host.home("ana").repo("widgets"),
-        "echo kept > WORK && git add WORK && git commit -qm work",
-    );
+    fs::write(host.home("ana").dir.join("WORK"), "kept\n").unwrap();
 
     let mut deliveries = Deliveries::new(PATIENCE);
     let retire = command(r#"{"id":"c1","kind":"retire","workerId":"w1"}"#);
@@ -1087,27 +953,19 @@ fn a_retired_worker_is_kept_aside_and_its_name_can_be_given_again() {
     assert!(report.ok, "{report:?}");
     assert!(workers.live().is_empty(), "its session was stopped");
     assert!(workers.all().is_empty(), "no longer reported");
-    let tree = host.dir.join("workers/.retired/ana-w1/repos/widgets");
-    assert_eq!(fs::read_to_string(tree.join("WORK")).unwrap(), "kept\n");
-    assert_eq!(
-        git_out(&tree, &["branch", "--show-current"]),
-        "worker/ana-retired-w1",
-        "its worktree still works where it was moved"
-    );
+    let aside = host.dir.join("workers/.retired/ana-w1");
+    assert_eq!(fs::read_to_string(aside.join("WORK")).unwrap(), "kept\n");
     let again = commands::take(&retire, workers, &mut deliveries).unwrap();
     assert!(again.ok, "retiring one retired is done: {again:?}");
     let err = workers.start("w1", "s2", true, None).unwrap_err();
     assert!(err.contains("worker w1 is retired"), "{err}");
-    let err = host.create_with("w1", "ana", &widgets).unwrap_err();
+    let err = workers.create("w1", "ana").unwrap_err();
     assert!(err.contains("retired here"), "{err}");
 
-    host.create_with("w2", "ana", &widgets).unwrap();
-    let tree = host.home("ana").repo("widgets");
-    assert_eq!(git_out(&tree, &["branch", "--show-current"]), "worker/ana");
-    assert!(!tree.join("WORK").exists(), "a new worker, a new start");
-    assert_eq!(
-        git_out(&repo.checkout, &["worktree", "prune", "--dry-run"]),
-        ""
+    host.create("w2", "ana");
+    assert!(
+        !host.home("ana").dir.join("WORK").exists(),
+        "a new worker, a new start"
     );
 }
 
@@ -1132,100 +990,16 @@ fn a_brief_too_long_for_tmux_reaches_the_worker_whole() {
 }
 
 #[test]
-fn the_rules_say_how_to_act_on_the_service_as_oneself_and_never_with_a_token() {
-    for heading in ["## The service, as yourself", "## If a worker created you"] {
-        assert!(CONDUCT.contains(heading), "{heading}");
-    }
-    let blocks: Vec<&str> = CONDUCT
-        .split("```sh\n")
-        .skip(1)
-        .map(|b| b.split("```").next().unwrap())
-        .collect();
-    assert!(blocks.len() >= 4, "{blocks:?}");
-    for block in blocks {
-        let curls = block.matches("curl ").count();
-        assert!(curls > 0, "{block}");
-        assert_eq!(
-            block
-                .matches(r#"-H "Authorization: Bearer $WORKER_TOKEN""#)
-                .count(),
-            curls,
-            "every call is as the worker itself: {block}"
-        );
-        assert!(block.contains("$WORKER_SERVICE_URL/fleet/"), "{block}");
-        assert!(!block.contains("wkr_"), "{block}");
-        let syntax = Process::new("sh")
-            .args(["-n", "-c", block])
-            .output()
-            .unwrap();
-        assert!(syntax.status.success(), "{block}: {syntax:?}");
-    }
-    for gone in ["ticket", "pod", "level", "FLEET_TOKEN", "AGENT_ID"] {
-        assert!(!CONDUCT.contains(gone), "{gone}");
-    }
-}
-
-#[test]
-fn a_session_has_its_own_credential_its_own_state_and_the_users_login() {
+fn a_session_has_its_own_state_and_the_users_login() {
     let host = host("env", ENV_CLAUDE);
-    let first: crate::protocol::Credential = serde_json::from_str(r#""wkr_w1_first""#).unwrap();
-    let later: crate::protocol::Credential = serde_json::from_str(r#""wkr_w1_later""#).unwrap();
-    for credential in [&first, &later] {
-        host.workers
-            .create(&Create {
-                id: "w1",
-                name: "ana",
-                role: "x",
-                repositories: &[],
-                credential: Some(credential),
-            })
-            .unwrap();
-    }
+    host.create("w1", "ana");
     host.workers.start("w1", "s1", false, None).unwrap();
     let state = host.home("ana").claude();
     assert_eq!(
         host.fake_file("ana", "s1", "env"),
-        format!("http://service.test|w1|wkr_w1_first|{}|", state.display()),
-        "the first credential it was given, its own state, the default login"
+        format!("{}|", state.display()),
+        "its own state, the default login"
     );
-    let ps = Process::new("ps")
-        .args(["-axww", "-o", "args="])
-        .output()
-        .unwrap();
-    assert!(!String::from_utf8_lossy(&ps.stdout).contains("wkr_w1_first"));
-}
-
-#[test]
-fn a_worker_given_no_credential_holds_none() {
-    let host = host("no-credential", ENV_CLAUDE);
-    host.workers
-        .tmux
-        .start(
-            "other",
-            "other",
-            Path::new("/"),
-            &["sleep".into(), "60".into()],
-            &[],
-            None,
-        )
-        .unwrap();
-    // Whatever the tmux server was started with, the worker has no token that
-    // is not its own.
-    Process::new("tmux")
-        .args([
-            "-L",
-            &host.socket,
-            "set-environment",
-            "-g",
-            "WORKER_TOKEN",
-            "someone-elses",
-        ])
-        .status()
-        .unwrap();
-    host.create("w1", "ana");
-    host.workers.start("w1", "s1", false, None).unwrap();
-    let env = host.fake_file("ana", "s1", "env");
-    assert!(env.starts_with("http://service.test|w1|unset|"), "{env}");
 }
 
 /// A worker for a test against Claude Code itself, in a folder and on a tmux
@@ -1240,18 +1014,8 @@ fn real(name: &str) -> (Workers, Home) {
         )),
         Claude::from_env(|k| std::env::var(k).ok()),
         dir.clone(),
-        BTreeMap::new(),
-        "http://service.test",
     );
-    workers
-        .create(&Create {
-            id: name,
-            name,
-            role: "test",
-            repositories: &[],
-            credential: None,
-        })
-        .unwrap();
+    workers.create(name, name).unwrap();
     (workers, Home::new(dir.join(name)))
 }
 

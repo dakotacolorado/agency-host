@@ -12,40 +12,14 @@ pub struct Command {
     pub id: String,
     pub kind: String,
     pub worker_id: Option<String>,
-    /// `create`: who the worker is, and the repositories it works in.
+    /// `create`: what the worker is called.
     pub name: Option<String>,
-    pub role: Option<String>,
-    pub repositories: Option<Vec<String>>,
-    /// `create`: the worker's own bearer token for the service. The same one
-    /// comes on every redelivery, and the first is the one kept.
-    pub credential: Option<Credential>,
     /// `start`: the session the service has opened, and whether it carries
     /// on the worker's last conversation.
     pub session_id: Option<String>,
     pub resume: Option<bool>,
-    /// `start`, `message`, `interrupt`: what to say to the worker. Who sent
-    /// it is the service's record, not the worker's: a person, a worker, and
-    /// an answer to a question are all carried the same way.
+    /// `start`, `message`, `interrupt`: what to say to the worker.
     pub text: Option<String>,
-}
-
-/// A worker's bearer token for the service, as the service issued it on its
-/// `create`. It has no `Display`, and its `Debug` names it without showing
-/// it, so no log line or error message can carry it by accident.
-#[derive(Deserialize)]
-#[serde(transparent)]
-pub struct Credential(String);
-
-impl Credential {
-    pub fn expose(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Debug for Credential {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Credential(..)")
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -59,9 +33,6 @@ pub enum State {
     /// waiting on someone, whether on a question or with its work done,
     /// which its transcript does not tell apart, so the host does not guess.
     Waiting,
-    /// A live session held on a question Claude Code is asking at its
-    /// terminal: a permission, a tool's choice, a dialog of its own.
-    Blocked,
     /// Its last session ended without a stop: a crash, the machine going
     /// down. It can be resumed.
     Interrupted,
@@ -160,17 +131,10 @@ mod tests {
     #[test]
     fn each_command_kind_is_read_with_its_fields() {
         let create: Command = serde_json::from_value(json!({
-            "id":"c1","kind":"create","workerId":"w1","name":"ana","role":"frontend",
-            "repositories":["workplace-ui"],"credential":"wkr_w1_secret","later":"ignored"
+            "id":"c1","kind":"create","workerId":"w1","name":"ana","later":"ignored"
         }))
         .unwrap();
         assert_eq!(create.name.as_deref(), Some("ana"));
-        assert_eq!(create.repositories, Some(vec!["workplace-ui".into()]));
-        assert_eq!(
-            create.credential.as_ref().unwrap().expose(),
-            "wkr_w1_secret"
-        );
-        assert!(!format!("{create:?}").contains("secret"), "{create:?}");
 
         let start: Command = serde_json::from_value(json!({
             "id":"c2","kind":"start","workerId":"w1","sessionId":"s1","resume":true,"text":"go"

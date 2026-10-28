@@ -67,20 +67,13 @@ impl Claude {
     /// tmux refuses a command longer than a few kilobytes and a message may be
     /// far longer. It is still one argument, never shell syntax: a quoted
     /// substitution is not read again.
-    ///
-    /// `credential` names the file holding the worker's credential, which is
-    /// read into `WORKER_TOKEN` the same way, so that the token itself is in
-    /// no process's arguments: those are readable by everyone on the machine.
-    /// Without one, any `WORKER_TOKEN` the tmux server inherited is unset, so
-    /// a worker never holds a credential that is not its own.
-    pub fn argv(&self, begin: Begin, prompt: &Path, credential: Option<&Path>) -> Vec<String> {
+    pub fn argv(&self, begin: Begin, prompt: &Path) -> Vec<String> {
         let mut argv: Vec<String> = [
             "sh",
             "-c",
-            r#"p=$1 c=$2; shift 2; unset WORKER_TOKEN; [ -z "$c" ] || export WORKER_TOKEN="$(cat -- "$c")"; exec "$@" "$(cat -- "$p")""#,
+            r#"p=$1; shift; exec "$@" "$(cat -- "$p")""#,
             "sh",
             &prompt.to_string_lossy(),
-            &credential.map(Path::to_string_lossy).unwrap_or_default(),
             &self.program,
             "--dangerously-skip-permissions",
         ]
@@ -215,31 +208,6 @@ pub fn transcript(state: &Path, session: &str) -> Option<PathBuf> {
         .flatten()
         .map(|project| project.path().join(&name))
         .find(|path| path.is_file())
-}
-
-/// What Claude Code shows at the foot of a question it is holding the session
-/// on: a permission, a choice a tool asked for, a dialog of its own. Nothing
-/// in the transcript says so -- the question is not written until answered --
-/// so the screen is read. Only its last lines are, where Claude Code draws a
-/// question, so the same words in the conversation above do not count.
-const ASKING: &[&str] = &[
-    "Enter to confirm",
-    "Esc to cancel",
-    "Do you want to proceed?",
-];
-
-/// How many of the screen's last lines with anything on them are read for a
-/// question.
-const FOOT: usize = 12;
-
-/// Whether the screen shows Claude Code holding the session on a question.
-pub fn asking(screen: &str) -> bool {
-    screen
-        .lines()
-        .rev()
-        .filter(|l| !l.trim().is_empty())
-        .take(FOOT)
-        .any(|l| ASKING.iter().any(|m| l.contains(m)))
 }
 
 /// Claude Code wants a uuid for a session. The service's session id is used
@@ -598,9 +566,9 @@ mod tests {
     #[test]
     fn a_session_begins_new_or_carries_on() {
         let claude = Claude::new("claude", None);
-        let fresh = claude.argv(Begin::Fresh("s1"), Path::new("/p"), None);
+        let fresh = claude.argv(Begin::Fresh("s1"), Path::new("/p"));
         assert_eq!(
-            fresh[6..],
+            fresh[5..],
             [
                 "claude",
                 "--dangerously-skip-permissions",
@@ -608,35 +576,15 @@ mod tests {
                 "s1"
             ]
         );
-        let resumed = claude.argv(Begin::Continue, Path::new("/p"), Some(Path::new("/c")));
+        let resumed = claude.argv(Begin::Continue, Path::new("/p"));
         assert_eq!(
             resumed[4..],
             [
                 "/p",
-                "/c",
                 "claude",
                 "--dangerously-skip-permissions",
                 "--continue"
             ]
-        );
-    }
-
-    #[test]
-    fn a_question_at_the_foot_of_the_screen_holds_the_session() {
-        let dialog = "\u{23fa} working\n\n  Claude in Chrome extension detected\n  \u{276f} No, keep browser tools off\n    Yes, use my browser\n  Enter to confirm \u{b7} Esc to keep browser tools off\n\n";
-        assert!(asking(dialog));
-        assert!(asking(
-            "Bash command\n  rm -rf x\n Do you want to proceed?\n \u{276f} 1. Yes\n   2. No\n"
-        ));
-        let idle = "\u{23fa} done\n\u{2500}\u{2500}\n\u{276f} \n\u{2500}\u{2500}\n  \u{23f5}\u{23f5} bypass permissions on (shift+tab to cycle)\n";
-        assert!(!asking(idle));
-        let quoted = format!(
-            "Do you want to proceed?\n{}",
-            "said something\n".repeat(FOOT + 1)
-        );
-        assert!(
-            !asking(&quoted),
-            "words far up the conversation are not a question"
         );
     }
 

@@ -2,14 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 use crate::config::Config;
-use crate::machine::Sample;
 use crate::protocol::{Command, CommandReport, LineReport, WorkerReport};
-
-/// The worker-service host contract this heartbeat body matches. Raise it
-/// only with the body, the reply, a command, a report or the socket's
-/// messages. Sent as the `fleet-contract` header, as hosts of agent-service
-/// did, so the service can refuse a host it cannot speak to with 426.
-pub const CONTRACT: u32 = 1;
 
 /// Every field but the reports may be left out, and one left out keeps the
 /// value the service last had: a host that could not read something says
@@ -22,8 +15,6 @@ pub struct Heartbeat<'a> {
     pub labels: Option<&'a [String]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capacity: Option<u32>,
-    /// Samples taken since the last heartbeat that landed.
-    pub samples: &'a [Sample],
     /// Every worker here that is not retired.
     pub workers: &'a [WorkerReport],
     /// What workers have done since the last heartbeat that landed, so a
@@ -42,17 +33,9 @@ pub struct Reply {
     pub socket_url: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct Unsupported {
-    error: String,
-    minimum: u32,
-}
-
 pub enum Failure {
-    /// The service no longer accepts the contract this host speaks.
-    Unsupported { minimum: u32, error: String },
-    /// The service refused the heartbeat or this host: it is too old, not
-    /// allowed, or configured with something the service cannot take, such as a
+    /// The service refused the heartbeat or this host: it is not allowed, or
+    /// configured with something the service cannot take, such as a
     /// label it cannot match on. Retrying soon will not change the answer.
     Refused(u16, String),
     /// Anything that might be different on the next try: no network, a
@@ -85,21 +68,14 @@ impl Client {
             .agent
             .post(&self.url)
             .set("Authorization", &self.authorization)
-            .set("fleet-contract", &CONTRACT.to_string())
             .send_json(heartbeat);
         match response {
             Ok(response) => response
                 .into_json()
                 .map_err(|e| Failure::Transient(format!("unreadable reply: {e}"))),
-            Err(ureq::Error::Status(code @ (400 | 401 | 403 | 410 | 426), response)) => {
-                let body = response.into_string().unwrap_or_default();
-                Err(match serde_json::from_str::<Unsupported>(&body) {
-                    Ok(Unsupported { error, minimum }) if code == 426 => {
-                        Failure::Unsupported { minimum, error }
-                    }
-                    _ => Failure::Refused(code, body),
-                })
-            }
+            Err(ureq::Error::Status(code @ (400 | 401 | 403 | 410), response)) => Err(
+                Failure::Refused(code, response.into_string().unwrap_or_default()),
+            ),
             Err(ureq::Error::Status(code, response)) => Err(Failure::Transient(format!(
                 "{code} {}",
                 response.into_string().unwrap_or_default()
@@ -157,7 +133,6 @@ mod tests {
             host_id: "studio".into(),
             capacity: None,
             labels: None,
-            repositories: Default::default(),
             tmux_socket: "worker-host-test".into(),
             workers_dir: "/nonexistent".into(),
         })
@@ -167,7 +142,7 @@ mod tests {
     fn a_heartbeat_carries_reports_up_and_brings_commands_and_the_socket_down() {
         let (url, server) = serve_once(
             "200 OK",
-            r#"{"contract":1,"heartbeatInterval":30,"socketUrl":"wss://socket.example/beta",
+            r#"{"heartbeatInterval":30,"socketUrl":"wss://socket.example/beta",
                 "commands":[{"id":"c1","kind":"stop","workerId":"w1"}]}"#,
         );
         let results = [CommandReport::new("c0".into(), None)];
@@ -202,16 +177,11 @@ mod tests {
             "{head}"
         );
         assert!(head.contains("Authorization: Bearer secret"), "{head}");
-        assert!(
-            head.contains(&format!("fleet-contract: {CONTRACT}\r\n")),
-            "{head}"
-        );
         let sent: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(
             sent,
             serde_json::json!({
                 "version":"9.9.9",
-                "samples":[],
                 "workers":[{"id":"w1","state":"waiting","sessionId":"s1"}],
                 "lines":[{"workerId":"w1","seq":0,"at":"2026-10-28T12:00:00.000Z","sessionId":"s1","from":"agent","text":"hi"}],
                 "commandResults":[{"commandId":"c0","ok":true}]
@@ -224,21 +194,6 @@ mod tests {
         );
         assert_eq!(reply.commands[0].id, "c1");
         assert_eq!(reply.commands[0].worker_id.as_deref(), Some("w1"));
-    }
-
-    #[test]
-    fn an_unsupported_contract_is_refused_with_the_minimum() {
-        let (url, _) = serve_once(
-            "426 Upgrade Required",
-            r#"{"error":"This host speaks contract 0, and the oldest this service accepts is 1. Upgrade worker-host.","minimum":1,"current":1}"#,
-        );
-        match client(url).heartbeat(&Heartbeat {
-            version: "0.1.0",
-            ..Default::default()
-        }) {
-            Err(Failure::Unsupported { minimum: 1, error }) => assert!(error.contains("Upgrade")),
-            _ => panic!("expected an unsupported contract"),
-        }
     }
 
     #[test]
@@ -266,38 +221,21 @@ mod tests {
     }
 
     #[test]
-    fn a_heartbeat_says_what_the_host_will_run_and_how_loaded_it_is() {
+    fn a_heartbeat_says_what_the_host_will_run() {
         let (url, server) = serve_once("200 OK", "{}");
-        let labels = ["macos".to_string(), "repo:workplace-ui".to_string()];
-        let samples = [Sample {
-            at: "2026-10-27T12:00:00.000Z".into(),
-            cpu: 0.25,
-            memory_used: 3,
-            memory_total: 8,
-            disk_used: 40,
-            disk_total: 100,
-        }];
+        let labels = ["macos".to_string(), "linux".to_string()];
         assert!(client(url)
             .heartbeat(&Heartbeat {
                 version: "9.9.9",
                 capacity: Some(2),
                 labels: Some(&labels),
-                samples: &samples,
                 ..Default::default()
             })
             .is_ok());
         let (_, body) = server.join().unwrap();
         let sent: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(sent["capacity"], 2);
-        assert_eq!(
-            sent["labels"],
-            serde_json::json!(["macos", "repo:workplace-ui"])
-        );
-        assert_eq!(
-            sent["samples"],
-            serde_json::json!([{"at":"2026-10-27T12:00:00.000Z","cpu":0.25,
-                "memoryUsed":3,"memoryTotal":8,"diskUsed":40,"diskTotal":100}])
-        );
+        assert_eq!(sent["labels"], serde_json::json!(["macos", "linux"]));
     }
 
     #[test]

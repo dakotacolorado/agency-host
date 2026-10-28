@@ -128,11 +128,6 @@ impl Tmux {
         Ok(())
     }
 
-    /// What the session's pane shows now, as text.
-    pub fn screen(&self, session: &str) -> Option<String> {
-        self.run(&["capture-pane", "-p", "-t", session], None).ok()
-    }
-
     /// The tags of every session running, mapped to tmux's id for each.
     pub fn sessions(&self) -> Vec<(String, String)> {
         // With no session there is no server, and asking is an error.
