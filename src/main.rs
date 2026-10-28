@@ -8,7 +8,7 @@ mod tmux;
 mod workspace;
 
 use agent::{Agents, Deliveries};
-use beat::{Beat, Client, Failure, Present, Report, Session, CONTRACT};
+use beat::{Beat, Client, Failure, Present, Report, CONTRACT};
 use config::Config;
 use machine::{Meter, Sample};
 use std::collections::HashMap;
@@ -149,7 +149,6 @@ fn run(
     meter: &mut Meter,
     limit: Option<u64>,
 ) -> ExitCode {
-    let persons = tmux::Tmux::persons();
     let mut reports: Vec<Report> = Vec::new();
     let mut samples: Vec<Sample> = Vec::new();
     let mut cursors: HashMap<String, agent::Cursor> = HashMap::new();
@@ -189,12 +188,9 @@ fn run(
                     None => Present::running(id.clone(), from.waiting, &[]),
                 })
                 .collect(),
-            reports: &reports,
+            command_results: &reports,
             capacity: config.capacity,
             labels: config.labels.as_deref(),
-            sessions: persons
-                .names()
-                .map(|names| names.into_iter().map(|name| Session { name }).collect()),
             samples: &samples,
         }) {
             Ok(reply) => {
@@ -234,7 +230,7 @@ fn run(
                     Duration::ZERO
                 } else {
                     let wait = Duration::from_secs_f64(
-                        reply.come_back_in.unwrap_or(30.0).clamp(1.0, 300.0),
+                        reply.heartbeat_interval.unwrap_or(30.0).clamp(1.0, 300.0),
                     );
                     if deliveries.is_empty() {
                         wait

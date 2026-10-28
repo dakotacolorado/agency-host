@@ -8,42 +8,36 @@ use crate::machine::Sample;
 /// The agent-service host contract this beat body matches: `reports` arrived
 /// in 2, `labels`, `sessions` and `samples` in 3, and `capacity` in 4 (see
 /// agent-service `contracts/`). Raise it only with the body. At 5 the body is
-/// unchanged, and each `start` comes with the agent's credential.
-pub const CONTRACT: u32 = 5;
+/// unchanged, and each `start` comes with the agent's credential. At 6 the
+/// beat is `heartbeat`, `reports` are `commandResults`, `sessions` are gone,
+/// the states are `running` and `waiting`, the reply says `heartbeatInterval`,
+/// and a `start` names its `workItemId`.
+pub const CONTRACT: u32 = 6;
 
-/// Every field but the agents and reports may be left out, and one left out
-/// keeps the value the service last had: a host that could not read something
-/// says nothing about it rather than sending a zero or an empty list.
+/// Every field but the agents and command results may be left out, and one
+/// left out keeps the value the service last had: a host that could not read
+/// something says nothing about it rather than sending a zero or an empty list.
 #[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Beat<'a> {
     pub host_version: &'a str,
     pub host_commit: &'a str,
     pub agents: Vec<Present<'a>>,
-    pub reports: &'a [Report],
+    pub command_results: &'a [Report],
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capacity: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub labels: Option<&'a [String]>,
-    /// The tmux sessions a person has open on the machine. Agents run on the
-    /// host's own server and are listed in `agents`, never here.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sessions: Option<Vec<Session>>,
     /// Samples taken since the last beat that landed.
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     pub samples: &'a [Sample],
 }
 
-#[derive(Debug, PartialEq, Serialize)]
-pub struct Session {
-    pub name: String,
-}
-
 /// An agent whose session is running here, by the id the service gave it.
-/// `asking` when its last turn ended and nothing has been said to it since:
+/// `waiting` when its last turn ended and nothing has been said to it since:
 /// it is waiting on someone, whether it ended on a question or on its work
 /// being done, which its transcript does not tell apart, so the host does not
-/// guess which. Otherwise `working`.
+/// guess which. Otherwise `running`.
 #[derive(Debug, Serialize)]
 pub struct Present<'a> {
     pub id: String,
@@ -58,7 +52,7 @@ impl<'a> Present<'a> {
     pub fn running(id: String, waiting: bool, transcript: &'a [Line]) -> Self {
         Present {
             id,
-            state: if waiting { "asking" } else { "working" },
+            state: if waiting { "waiting" } else { "running" },
             transcript,
         }
     }
@@ -69,7 +63,7 @@ impl<'a> Present<'a> {
 pub struct Reply {
     #[serde(default)]
     pub commands: Vec<Command>,
-    pub come_back_in: Option<f64>,
+    pub heartbeat_interval: Option<f64>,
 }
 
 /// What routes a command, and the fields of each kind the host handles.
@@ -142,7 +136,10 @@ impl Client {
             agent: ureq::AgentBuilder::new()
                 .timeout(Duration::from_secs(30))
                 .build(),
-            url: format!("{}/fleet/hosts/{}/beat", config.service_url, config.host_id),
+            url: format!(
+                "{}/fleet/hosts/{}/heartbeat",
+                config.service_url, config.host_id
+            ),
             authorization: format!("Bearer {}", config.token),
         }
     }
@@ -267,10 +264,10 @@ mod tests {
     }
 
     #[test]
-    fn a_beat_carries_reports_up_and_brings_commands_down() {
+    fn a_beat_carries_command_results_up_and_brings_commands_down() {
         let (url, server) = serve_once(
             "200 OK",
-            r#"{"commands":[{"id":"c1","kind":"place","agent":{"id":"a1"}}],"comeBackIn":3}"#,
+            r#"{"commands":[{"id":"c1","kind":"place","agent":{"id":"a1"}}],"heartbeatInterval":3}"#,
         );
         let reports = [Report {
             command_id: "c0".into(),
@@ -281,14 +278,17 @@ mod tests {
             host_version: "9.9.9",
             host_commit: "0123abc",
             agents: vec![Present::running("a1".into(), false, &[])],
-            reports: &reports,
+            command_results: &reports,
             ..Default::default()
         }) else {
             panic!("beat failed")
         };
         let (head, body) = server.join().unwrap();
 
-        assert!(head.starts_with("POST /fleet/hosts/studio/beat "), "{head}");
+        assert!(
+            head.starts_with("POST /fleet/hosts/studio/heartbeat "),
+            "{head}"
+        );
         assert!(head.contains("Authorization: Bearer secret"), "{head}");
         assert!(
             head.contains(&format!("fleet-contract: {CONTRACT}\r\n")),
@@ -300,11 +300,11 @@ mod tests {
             serde_json::json!({
                 "hostVersion":"9.9.9",
                 "hostCommit":"0123abc",
-                "agents":[{"id":"a1","state":"working"}],
-                "reports":[{"commandId":"c0","ok":true}]
+                "agents":[{"id":"a1","state":"running"}],
+                "commandResults":[{"commandId":"c0","ok":true}]
             })
         );
-        assert_eq!(reply.come_back_in, Some(3.0));
+        assert_eq!(reply.heartbeat_interval, Some(3.0));
         assert_eq!(reply.commands[0].id, "c1");
     }
 
@@ -391,10 +391,10 @@ mod tests {
         assert_eq!(
             sent["agents"],
             serde_json::json!([
-                {"id":"a1","state":"working","transcript":[
+                {"id":"a1","state":"running","transcript":[
                     {"seq":0,"at":"2026-10-27T12:00:00.000Z","from":"agent","text":"hi"}
                 ]},
-                {"id":"a2","state":"asking"}
+                {"id":"a2","state":"waiting"}
             ])
         );
     }
@@ -417,9 +417,6 @@ mod tests {
                 host_commit: "0123abc",
                 capacity: Some(2),
                 labels: Some(&labels),
-                sessions: Some(vec![Session {
-                    name: "dotfiles".into(),
-                }]),
                 samples: &samples,
                 ..Default::default()
             })
@@ -431,7 +428,6 @@ mod tests {
             sent["labels"],
             serde_json::json!(["macos", "repo:agent-service"])
         );
-        assert_eq!(sent["sessions"], serde_json::json!([{"name":"dotfiles"}]));
         assert_eq!(
             sent["samples"],
             serde_json::json!([{"at":"2026-10-27T12:00:00.000Z","cpu":0.25,
@@ -446,7 +442,6 @@ mod tests {
             .beat(&Beat {
                 capacity: Some(0),
                 labels: Some(&[]),
-                sessions: Some(vec![]),
                 ..Default::default()
             })
             .is_ok());
@@ -454,7 +449,6 @@ mod tests {
         let sent: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(sent["capacity"], 0);
         assert_eq!(sent["labels"], serde_json::json!([]));
-        assert_eq!(sent["sessions"], serde_json::json!([]));
     }
 
     #[test]

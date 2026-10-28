@@ -7,8 +7,8 @@
 #   AGENT_HOST_SERVICE_URL=… AGENT_HOST_TOKEN=… AGENT_HOST_ID=… beat-cycle.sh BINARY
 #
 # Give it an id no run has beaten as before. Its agent is left stopped -- or,
-# should the cycle break first, given up on -- so nothing it placed keeps
-# holding a place. The agent is a stand-in for Claude Code, under tmux on a
+# should the cycle break first, force-stopped -- so nothing it placed stays
+# active. The agent is a stand-in for Claude Code, under tmux on a
 # socket, config and folders of the run's own, so nothing a real host on the
 # same machine has is read or touched.
 #
@@ -55,7 +55,7 @@ api() {
 }
 agent_is() {
   [ "$(api GET "/fleet/agents/$agent")" = 200 ] || fail "reading agent $agent: $(cat "$out")"
-  jq -r '.agent | "\(.state) \(if has("active") then .active else .holdsPlace end)"' "$out"
+  jq -r '.agent | "\(.state) \(.active)"' "$out"
 }
 
 mkdir -p "$scratch/bin" "$scratch/data" "$scratch/claude"
@@ -68,8 +68,8 @@ unset AGENT_HOST_LABELS AGENT_HOST_REPOSITORIES
 
 cleanup() {
   if [ -n "$agent" ] && [ "$(agent_is 2> /dev/null | cut -d' ' -f2)" = true ]; then
-    api POST "/fleet/agents/$agent/give-up" > /dev/null || true
-    echo "gave up on $agent, which still held its place"
+    api POST "/fleet/agents/$agent/stop" '{"force":true}' > /dev/null || true
+    echo "force-stopped $agent, which was still active"
   fi
   tmux -L "$host" kill-server 2> /dev/null || true
   rm -rf "$scratch"
@@ -79,7 +79,7 @@ trap cleanup EXIT
 beat() {
   if ! "$bin" --beats 1 2> "$log"; then
     cat "$log"
-    grep -q '^beat failed: 404 ' "$log" && not_yet "the service does not serve POST /fleet/hosts/{id}/beat yet"
+    grep -q '^beat failed: 404 ' "$log" && not_yet "the service does not serve POST /fleet/hosts/{id}/heartbeat yet"
     fail "a beat did not land"
   fi
   cat "$log"
@@ -88,7 +88,7 @@ beat() {
 beat
 echo "registered $host"
 
-status=$(api POST /fleet/agents "{\"hostId\":\"$host\",\"ticketId\":null,\"role\":\"ci\",\"level\":0,\
+status=$(api POST /fleet/agents "{\"hostId\":\"$host\",\"workItemId\":null,\"role\":\"ci\",\
 \"createdBy\":null,\"brief\":\"A stand-in, placed by agent-host CI to prove a beat cycle.\"}")
 [ "$status" = 201 ] || fail "placing an agent on $host: $status $(cat "$out")"
 agent=$(jq -er .id "$out")
@@ -102,16 +102,16 @@ grep -q "^command $start (start): done$" "$log" || fail "the host did not take s
 delivery=$(jq -r --arg id "$start" '.commands[] | select(.command.id == $id) | .delivery' "$out")
 [ "$delivery" = done ] || fail "start $start is $delivery, not done: $(cat "$out")"
 state=$(agent_is)
-[ "$state" = "working true" ] || fail "agent $agent is '$state' once started, not 'working true'"
-echo "started $agent: start $start reported done, and the agent is working"
+[ "$state" = "running true" ] || fail "agent $agent is '$state' once started, not 'running true'"
+echo "started $agent: start $start reported done, and the agent is running"
 
-status=$(api DELETE "/fleet/agents/$agent")
+status=$(api POST "/fleet/agents/$agent/stop" '{}')
 [ "$status" = 202 ] || fail "stopping $agent: $status $(cat "$out")"
 stop=$(jq -er .command.id "$out")
 beat
 grep -q "^command $stop (stop): done$" "$log" || fail "the host did not take stop $stop from its beat"
 state=$(agent_is)
 [ "$state" = "stopped false" ] || fail "agent $agent is '$state' once stopped, not 'stopped false'"
-echo "stopped $agent: stop $stop reported done, and the agent holds no place"
+echo "stopped $agent: stop $stop reported done, and the agent is no longer active"
 
 proved true
