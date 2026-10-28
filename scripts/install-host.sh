@@ -1,35 +1,36 @@
 #!/bin/sh
-# Makes this machine a fleet host, or takes it back out. The same script on
+# Makes this machine a worker host, or takes it back out. The same script on
 # every machine, mac or linux; run it again to take a newer release.
 #
-# The service url and token come from AGENT_HOST_SERVICE_URL and
-# AGENT_HOST_TOKEN, else the config file an earlier install wrote, else a
+# The service url and token come from WORKER_HOST_SERVICE_URL and
+# WORKER_HOST_TOKEN, else the config file an earlier install wrote, else a
 # prompt. The token is written to that file alone, readable by this user alone.
-# Capacity, labels and repositories come from the environment, else that file;
-# there is no prompt for them, since a host with none still sends heartbeats,
-# and is offered nothing.
+# Capacity, labels, repositories and the workers folder come from the
+# environment, else that file; there is no prompt for them, since a host with
+# none still sends heartbeats, and is offered nothing.
 set -eu
 
 usage="usage: install-host.sh [install] [--release TAG | --binary PATH]
        install-host.sh rollback   back to the binary installed before this one
-       install-host.sh remove     stop and remove agent-host and its config
+       install-host.sh remove     stop and remove worker-host and its config
 
-  --release TAG  a release of dakotacolorado/agent-host (default: the latest)
+  --release TAG  a release of dakotacolorado/worker-host (default: the latest)
   --binary PATH  a binary built here instead of a release
 
-  AGENT_HOST_SERVICE_URL  the fleet api, https only
-  AGENT_HOST_TOKEN        its token
-  AGENT_HOST_ID           this host's name (default: the hostname)
-  AGENT_HOST_CAPACITY     how many agents it will run (unset: none are placed here)
-  AGENT_HOST_LABELS       what it can run, comma-separated, such as repo:agent-service
-  AGENT_HOST_REPOSITORIES the checkouts agents get worktrees of, as name=/path,..."
+  WORKER_HOST_SERVICE_URL  the worker-service api, https only
+  WORKER_HOST_TOKEN        its token
+  WORKER_HOST_ID           this host's name (default: the hostname)
+  WORKER_HOST_CAPACITY     how many workers it will run sessions for (unset: none are put here)
+  WORKER_HOST_LABELS       what it can run, comma-separated, such as repo:workplace-ui
+  WORKER_HOST_REPOSITORIES the checkouts workers get worktrees of, as name=/path,...
+  WORKER_HOST_WORKERS_DIR  where workers' folders are, an absolute path (default: ~/workers)"
 
-repo=dakotacolorado/agent-host
-label=com.dakotacolorado.agent-host
-bin=$HOME/.local/bin/agent-host
-previous=$HOME/.local/share/agent-host/agent-host.previous
-config=${XDG_CONFIG_HOME:-$HOME/.config}/agent-host/config.toml
-unit=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/agent-host.service
+repo=dakotacolorado/worker-host
+label=com.dakotacolorado.worker-host
+bin=$HOME/.local/bin/worker-host
+previous=$HOME/.local/share/worker-host/worker-host.previous
+config=${XDG_CONFIG_HOME:-$HOME/.config}/worker-host/config.toml
+unit=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/worker-host.service
 plist=/Library/LaunchDaemons/$label.plist
 os=$(uname -s)
 
@@ -49,10 +50,10 @@ target() {
     case $(uname -m) in
     x86_64) echo x86_64-unknown-linux-musl ;;
     aarch64 | arm64) echo aarch64-unknown-linux-musl ;;
-    *) die "there is no agent-host build for $(uname -m)" ;;
+    *) die "there is no worker-host build for $(uname -m)" ;;
     esac
     ;;
-  *) die "there is no agent-host build for $os" ;;
+  *) die "there is no worker-host build for $os" ;;
   esac
 }
 
@@ -80,34 +81,40 @@ ask() {
 }
 
 settings() {
-  url=${AGENT_HOST_SERVICE_URL:-$(from_config service_url)}
-  [ -n "$url" ] || url=$(ask "fleet api url" AGENT_HOST_SERVICE_URL)
+  url=${WORKER_HOST_SERVICE_URL:-$(from_config service_url)}
+  [ -n "$url" ] || url=$(ask "worker-service api url" WORKER_HOST_SERVICE_URL)
   url=${url%/}
   case $url in
   https://?*) ;;
-  *) die "the fleet api is reached over https only, not '$url'" ;;
+  *) die "the worker-service api is reached over https only, not '$url'" ;;
   esac
-  token=${AGENT_HOST_TOKEN:-$(from_config token)}
-  [ -n "$token" ] || token=$(ask token AGENT_HOST_TOKEN)
+  token=${WORKER_HOST_TOKEN:-$(from_config token)}
+  [ -n "$token" ] || token=$(ask token WORKER_HOST_TOKEN)
   [ -n "$token" ] || die "no token"
-  host_id=${AGENT_HOST_ID:-$(from_config host_id)}
+  host_id=${WORKER_HOST_ID:-$(from_config host_id)}
   # Written into TOML strings without escaping.
   case $url$token$host_id in *[\"\\]*) die "the url, token and host id cannot hold a quote or a backslash" ;; esac
-  capacity=${AGENT_HOST_CAPACITY:-$(config_line capacity | sed 's/^[^=]*= *//')}
-  case $capacity in *[!0-9]*) die "the capacity is a whole number of agents, not '$capacity'" ;; esac
-  [ -n "$capacity" ] || say "no capacity: set AGENT_HOST_CAPACITY, or no agent will be placed on this host"
-  if [ -n "${AGENT_HOST_LABELS:-}" ]; then
-    case $AGENT_HOST_LABELS in *[\"\\]*) die "labels cannot hold a quote or a backslash" ;; esac
-    labels="labels = [\"$(echo "$AGENT_HOST_LABELS" | sed 's/ *, */", "/g')\"]"
+  capacity=${WORKER_HOST_CAPACITY:-$(config_line capacity | sed 's/^[^=]*= *//')}
+  case $capacity in *[!0-9]*) die "the capacity is a whole number of workers, not '$capacity'" ;; esac
+  [ -n "$capacity" ] || say "no capacity: set WORKER_HOST_CAPACITY, or no worker will be put on this host"
+  workers_dir=${WORKER_HOST_WORKERS_DIR:-$(from_config workers_dir)}
+  case $workers_dir in
+  '' | /*) ;;
+  *) die "the workers folder is an absolute path, not '$workers_dir'" ;;
+  esac
+  case $workers_dir in *[\"\\]*) die "the workers folder cannot hold a quote or a backslash" ;; esac
+  if [ -n "${WORKER_HOST_LABELS:-}" ]; then
+    case $WORKER_HOST_LABELS in *[\"\\]*) die "labels cannot hold a quote or a backslash" ;; esac
+    labels="labels = [\"$(echo "$WORKER_HOST_LABELS" | sed 's/ *, */", "/g')\"]"
   else
     labels=$(config_line labels)
   fi
-  if [ -n "${AGENT_HOST_REPOSITORIES:-}" ]; then
-    case $AGENT_HOST_REPOSITORIES in *[\"\\]*) die "repositories cannot hold a quote or a backslash" ;; esac
-    pairs=$(echo "$AGENT_HOST_REPOSITORIES" | tr ',' '\n' |
+  if [ -n "${WORKER_HOST_REPOSITORIES:-}" ]; then
+    case $WORKER_HOST_REPOSITORIES in *[\"\\]*) die "repositories cannot hold a quote or a backslash" ;; esac
+    pairs=$(echo "$WORKER_HOST_REPOSITORIES" | tr ',' '\n' |
       sed -n 's/^ *\([A-Za-z0-9][A-Za-z0-9._-]*\) *= *\(\/.*[^ ]\) *$/"\1" = "\2"/p' | paste -sd, -)
-    [ "$(echo "$pairs" | tr ',' '\n' | grep -c .)" = "$(echo "$AGENT_HOST_REPOSITORIES" | tr ',' '\n' | grep -c .)" ] ||
-      die "repositories are name=/absolute/path, comma-separated, not '$AGENT_HOST_REPOSITORIES'"
+    [ "$(echo "$pairs" | tr ',' '\n' | grep -c .)" = "$(echo "$WORKER_HOST_REPOSITORIES" | tr ',' '\n' | grep -c .)" ] ||
+      die "repositories are name=/absolute/path, comma-separated, not '$WORKER_HOST_REPOSITORIES'"
     repositories="repositories = { $pairs }"
   else
     repositories=$(config_line repositories)
@@ -122,7 +129,7 @@ tailscale_cli() {
 
 reachable() { nc -z -w 3 "$1" "$2" > /dev/null 2>&1; }
 
-# Attaching to a worker is ssh over the tailnet, then tmux. The agent itself
+# Attaching to a worker is ssh over the tailnet, then tmux. The host itself
 # only ever calls out, so nothing has to reach this machine but that.
 tailnet() {
   ts=$(tailscale_cli) || die "tailscale is not installed: get it from https://tailscale.com/download, sign in, and run this again"
@@ -168,15 +175,15 @@ sha256_check() {
 
 fetch() {
   if [ -n "$from" ]; then
-    cp "$from" "$stage/agent-host"
+    cp "$from" "$stage/worker-host"
   else
     command -v gh > /dev/null || die "gh downloads the release: install it and gh auth login, or pass --binary"
-    gh release download ${tag:+"$tag"} --repo "$repo" --pattern "agent-host-$t" --pattern SHA256SUMS --dir "$stage"
-    (cd "$stage" && grep " agent-host-$t\$" SHA256SUMS | sha256_check) > /dev/null ||
-      die "agent-host-$t does not match its release's SHA256SUMS"
-    mv "$stage/agent-host-$t" "$stage/agent-host"
+    gh release download ${tag:+"$tag"} --repo "$repo" --pattern "worker-host-$t" --pattern SHA256SUMS --dir "$stage"
+    (cd "$stage" && grep " worker-host-$t\$" SHA256SUMS | sha256_check) > /dev/null ||
+      die "worker-host-$t does not match its release's SHA256SUMS"
+    mv "$stage/worker-host-$t" "$stage/worker-host"
   fi
-  chmod +x "$stage/agent-host"
+  chmod +x "$stage/worker-host"
 }
 
 write_config() {
@@ -188,13 +195,14 @@ write_config() {
     if [ -n "$capacity" ]; then printf 'capacity = %s\n' "$capacity"; fi
     if [ -n "$labels" ]; then printf '%s\n' "$labels"; fi
     if [ -n "$repositories" ]; then printf '%s\n' "$repositories"; fi
+    if [ -n "$workers_dir" ]; then printf 'workers_dir = "%s"\n' "$workers_dir"; fi
   ) > "$1"
 }
 
 # A mac LaunchAgent stops at logout and waits for a login after a reboot; a
 # daemon run as this user does neither.
 service_darwin() {
-  log=$HOME/Library/Logs/agent-host.log
+  log=$HOME/Library/Logs/worker-host.log
   mkdir -p "$(dirname "$log")"
   touch "$log"
   cat > "$stage/plist" << EOF
@@ -232,7 +240,7 @@ service_linux() {
   mkdir -p "$(dirname "$unit")"
   cat > "$unit" << EOF
 [Unit]
-Description=agent-host: this machine's place in the fleet
+Description=worker-host: this machine's place among the workers' hosts
 
 [Service]
 ExecStart=$bin --config $config
@@ -247,14 +255,14 @@ EOF
   # after a reboot.
   loginctl enable-linger "$(id -un)" 2> /dev/null || sudo loginctl enable-linger "$(id -un)"
   systemctl --user daemon-reload
-  systemctl --user enable agent-host
-  systemctl --user restart agent-host
+  systemctl --user enable worker-host
+  systemctl --user restart worker-host
 }
 
 restart() {
   case $os in
   Darwin) sudo launchctl kickstart -k "system/$label" ;;
-  Linux) systemctl --user restart agent-host ;;
+  Linux) systemctl --user restart worker-host ;;
   esac
 }
 
@@ -268,15 +276,15 @@ install_host() {
   trap 'rm -rf "$stage"' EXIT
   fetch
   # One heartbeat from the new binary before it replaces anything: a host that
-  # cannot reach the fleet api is not ready, and the one running stays put.
+  # cannot reach the service is not ready, and the one running stays put.
   write_config "$stage/config.toml"
-  "$stage/agent-host" --config "$stage/config.toml" --heartbeats 1 ||
+  "$stage/worker-host" --config "$stage/config.toml" --heartbeats 1 ||
     die "the new binary could not send a heartbeat to $url; nothing was replaced"
 
   mkdir -p "$(dirname "$bin")" "$(dirname "$previous")" "$(dirname "$config")"
   mv "$stage/config.toml" "$config"
-  if [ -f "$bin" ] && ! cmp -s "$bin" "$stage/agent-host"; then cp -p "$bin" "$previous"; fi
-  cp "$stage/agent-host" "$bin.new"
+  if [ -f "$bin" ] && ! cmp -s "$bin" "$stage/worker-host"; then cp -p "$bin" "$previous"; fi
+  cp "$stage/worker-host" "$bin.new"
   mv "$bin.new" "$bin"
 
   # The service gets none of the login shell's PATH, and Claude Code installs
@@ -284,7 +292,7 @@ install_host() {
   path="$(dirname "$claude"):$(dirname "$(command -v tmux)"):/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
   "service_$(echo "$os" | tr '[:upper:]' '[:lower:]')"
   say "$("$bin" --version) is running as a service, sending heartbeats to $url"
-  say "attach from the tailnet: ssh $(id -un)@$ip, then tmux attach"
+  say "attach from the tailnet: ssh $(id -un)@$ip, then tmux -L worker-host attach -t worker-<name>"
 }
 
 rollback() {
@@ -303,14 +311,14 @@ remove() {
     sudo rm -f "$plist"
     ;;
   Linux)
-    systemctl --user disable --now agent-host 2> /dev/null || true
+    systemctl --user disable --now worker-host 2> /dev/null || true
     rm -f "$unit"
     systemctl --user daemon-reload
     ;;
   esac
   rm -f "$bin" "$previous" "$config"
   # Interactive sessions use them too.
-  say "agent-host and its config are gone; tmux, tailscale, ssh and linger are left as they were"
+  say "worker-host and its config are gone; tmux, tailscale, ssh and linger are left as they were"
 }
 
 command=install
