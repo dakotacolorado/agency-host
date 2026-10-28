@@ -72,6 +72,15 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // Two hosts on one workers folder would each take every command and run it
+    // twice, so the second is refused while the first holds the lock.
+    let _lock = match hold(&config.workers_dir) {
+        Ok(lock) => lock,
+        Err(e) => {
+            log!("worker-host: {e}");
+            return ExitCode::from(3);
+        }
+    };
     sys::ignore_hangup();
     log!(
         "worker-host {VERSION}: host {} sending heartbeats to {}",
@@ -101,6 +110,22 @@ fn main() -> ExitCode {
     }
     let socket = Socket::spawn(&config.host_id, &config.token);
     run(&Client::new(&config), &config, &workers, &socket)
+}
+
+/// The workers folder's lock, held for as long as this host runs; the system
+/// lets it go when the process ends, however it ends.
+fn hold(workers_dir: &std::path::Path) -> Result<std::fs::File, String> {
+    std::fs::create_dir_all(workers_dir).map_err(|e| format!("{}: {e}", workers_dir.display()))?;
+    let path = workers_dir.join(".worker-host.lock");
+    let file = std::fs::File::create(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => Err(format!(
+            "another worker-host is already running on {}: stop it first",
+            workers_dir.display()
+        )),
+        Err(std::fs::TryLockError::Error(e)) => Err(format!("{}: {e}", path.display())),
+    }
 }
 
 /// Command results not yet written on a socket, each once.
