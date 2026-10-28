@@ -113,6 +113,8 @@ jobs:
         with:
           name: agent-host-x86_64-unknown-linux-musl
       - run: chmod +x agent-host-x86_64-unknown-linux-musl
+      # The cycle starts a stand-in agent, which the host runs under tmux.
+      - run: command -v tmux || (sudo apt-get update -q && sudo apt-get install -y -q tmux)
       - if: vars.AWS_DEPLOY_ROLE != ''
         uses: aws-actions/configure-aws-credentials@v4
         with:
