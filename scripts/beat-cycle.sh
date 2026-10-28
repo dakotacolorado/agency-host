@@ -55,7 +55,7 @@ api() {
 }
 agent_is() {
   [ "$(api GET "/fleet/agents/$agent")" = 200 ] || fail "reading agent $agent: $(cat "$out")"
-  jq -r '.agent | "\(.state) \(.holdsPlace)"' "$out"
+  jq -r '.agent | "\(.state) \(if has("active") then .active else .holdsPlace end)"' "$out"
 }
 
 mkdir -p "$scratch/bin" "$scratch/data" "$scratch/claude"
