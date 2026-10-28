@@ -1348,6 +1348,41 @@ sleep 60
         assert!(host.agents.ids().is_empty(), "no agent was started anyway");
     }
 
+    #[test]
+    fn the_rules_say_how_to_act_on_the_fleet_by_role_and_never_with_a_token() {
+        for heading in [
+            "## The fleet, as yourself",
+            "## If an agent placed you",
+            "## If your role is `lead`",
+        ] {
+            assert!(CONDUCT.contains(heading), "{heading}");
+        }
+        let blocks: Vec<&str> = CONDUCT
+            .split("```sh\n")
+            .skip(1)
+            .map(|b| b.split("```").next().unwrap())
+            .collect();
+        assert!(blocks.len() >= 4, "{blocks:?}");
+        for block in blocks {
+            let curls = block.matches("curl ").count();
+            assert!(curls > 0, "{block}");
+            assert_eq!(
+                block
+                    .matches(r#"-H "Authorization: Bearer $FLEET_TOKEN""#)
+                    .count(),
+                curls,
+                "every call is as the agent itself: {block}"
+            );
+            assert!(block.contains("$FLEET_URL/fleet/"), "{block}");
+            assert!(!block.contains("agt_"), "{block}");
+            let syntax = std::process::Command::new("sh")
+                .args(["-n", "-c", block])
+                .output()
+                .unwrap();
+            assert!(syntax.status.success(), "{block}: {syntax:?}");
+        }
+    }
+
     /// What the stand-in for Claude Code found in its environment.
     fn fleet_env(host: &Host, id: &str) -> String {
         let file = host.dir.join(format!(

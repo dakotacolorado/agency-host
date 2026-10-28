@@ -133,8 +133,21 @@ that reason and no agent runs.
 
 Every agent is started with the standing rules in `src/conduct.md` -- push
 its own branch and nothing else, never force, merge or deploy, run the
-repository's own checks, ask when stuck -- and then its brief, exactly as placed. The prompt is kept at
+repository's own checks, ask when stuck, and how to act on the fleet by role
+-- and then its brief, exactly as placed. The prompt is kept at
 `agents/<id>/prompt.md`.
+
+Each agent's session has `FLEET_URL`, the service this host beats to,
+`AGENT_ID`, and `FLEET_TOKEN`, its own credential, with which it acts on the
+fleet as itself: places agents under itself, messages them and the agent that
+placed it, stops them. The host beats at contract 5, so each `start` carries
+the credential; the first one sent is kept, at `agents/<id>/credential`, mode
+600, beside the prompt and outside the worktree, where nothing the agent
+commits can reach it. The session's shell reads it into the environment as
+Claude Code starts, so it is never a process's argument, which anyone on the
+machine can list; it is in no prompt and no log; and where an agent prints it,
+the transcript the host sends says `[credential]` instead. The host itself
+keeps beating with its own token: a credential cannot beat.
 
 A workspace is kept when its agent ends, for inspection, and its worktree is
 locked so that `git worktree prune` in the checkout cannot take it by
