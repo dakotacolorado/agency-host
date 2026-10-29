@@ -10,7 +10,10 @@ use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use std::collections::BTreeMap;
+
 use crate::claude::{self, Begin, Claude};
+use crate::context::{self, Context};
 use crate::home::{self, Home, Record, Session};
 use crate::protocol::{Line, State};
 use crate::sys;
@@ -162,8 +165,12 @@ impl Workers {
             name: name.into(),
         };
         home.make(&record)?;
-        self.claude
-            .prepare(&home.claude(), &home.dir, &rules(&home, &record))
+        // A create sent again keeps the context a start has since written.
+        let rules = context::rules(
+            &rules(&home, &record),
+            context::written(&home.claude()).as_ref(),
+        );
+        self.claude.prepare(&home.claude(), &home.dir, &rules)
     }
 
     /// Runs a session for the worker, in tmux, in its folder: a new
@@ -173,12 +180,27 @@ impl Workers {
     /// A start is sent again until it is reported, so one the host has done
     /// already -- before a restart that lost the report -- is done, not
     /// repeated: its session is running, or it ran and has ended since.
+    #[cfg(test)]
     pub fn start(
         &self,
         id: &str,
         session_id: &str,
         resume: bool,
         text: Option<&str>,
+    ) -> Result<(), String> {
+        self.start_with(id, session_id, resume, text, Given::default())
+    }
+
+    /// `start`, with what the start carries besides its message: a context
+    /// written into the worker's Claude Code folder first, and variables for
+    /// its session.
+    pub fn start_with(
+        &self,
+        id: &str,
+        session_id: &str,
+        resume: bool,
+        text: Option<&str>,
+        given: Given<'_>,
     ) -> Result<(), String> {
         let (home, record) = self.find(id)?;
         let sessions = home.sessions();
@@ -233,12 +255,18 @@ impl Workers {
         }
         let prompt = home.prompt();
         fs::write(&prompt, text).map_err(|e| format!("{}: {e}", prompt.display()))?;
+        // A start without a context keeps the last one the worker was given.
+        let written = match given.context {
+            Some(c) => Some(context::write(&home.claude(), c)?),
+            None => context::written(&home.claude()),
+        };
         // The rules follow the host's version, so each session is told the
-        // ones of the host it runs on.
-        self.claude
-            .prepare(&home.claude(), &home.dir, &rules(&home, &record))?;
+        // ones of the host it runs on, then the context's.
+        let rules = context::rules(&rules(&home, &record), written.as_ref());
+        self.claude.prepare(&home.claude(), &home.dir, &rules)?;
         let argv = self.claude.argv(begin, &prompt);
-        let env = self.claude.env(&home.claude());
+        let mut env = self.claude.env(&home.claude());
+        env.extend(context::env(given.env));
         // Written before tmux is asked, so a machine that dies between the two
         // leaves a session it knows of, which then reads as interrupted.
         home.begin(&session)?;
@@ -521,6 +549,13 @@ impl Workers {
         }
         (next != from).then_some(Batch { lines, next })
     }
+}
+
+/// What a start carries besides its message.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Given<'a> {
+    pub context: Option<&'a Context>,
+    pub env: Option<&'a BTreeMap<String, String>>,
 }
 
 /// The worker's standing rules, Claude Code's user memory.

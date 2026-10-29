@@ -1,6 +1,7 @@
 mod claude;
 mod commands;
 mod config;
+mod context;
 mod heartbeat;
 mod home;
 mod protocol;
