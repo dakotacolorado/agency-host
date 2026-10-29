@@ -111,9 +111,17 @@ impl Tmux {
     }
 
     /// Appends everything the session's pane shows to `log`, from now on.
-    /// `-o` opens a pipe only where there is none, so a host that restarts
-    /// and asks again does not end the one already writing.
+    /// `pipe-pane -o` is a toggle: on a pane that already has a pipe it closes
+    /// it and opens none. A host that restarts asks again of panes still
+    /// writing to the last host's pipe, so those are left as they are.
     pub fn log_to(&self, session: &str, log: &Path) -> Result<(), String> {
+        let piped = self.run(
+            &["display-message", "-p", "-t", session, "#{pane_pipe}"],
+            None,
+        )?;
+        if piped.trim() == "1" {
+            return Ok(());
+        }
         let quoted = format!("'{}'", log.to_string_lossy().replace('\'', r"'\''"));
         self.run(
             &[
