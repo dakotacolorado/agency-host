@@ -21,6 +21,15 @@ if [ ! -f "$config" ]; then
     "$1" "$2" "$(hostname -s)" "$(uname -s | tr 'A-Z' 'a-z' | sed s/darwin/macos/)" "$HOME/workers" > "$config")
   echo "wrote $config: edit capacity and labels to suit this machine"
 fi
+# Under systemd, stopping the unit kills its whole cgroup, and the tmux server
+# holding every worker's session is in it: stop only the host, which picks the
+# live sessions up again when it starts.
+if command -v systemctl >/dev/null && systemctl --user cat worker-host.service >/dev/null 2>&1; then
+  units=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
+  mkdir -p "$units/worker-host.service.d"
+  printf '[Service]\nKillMode=process\n' > "$units/worker-host.service.d/keep-sessions.conf"
+  systemctl --user daemon-reload
+fi
 # Workers' context now comes with each session's start, so the skills clone
 # and its sync, from before, are taken away: the marked cron entry, and a
 # clone at <workers_dir>/.claude left clean.

@@ -734,6 +734,37 @@ fn a_session_logs_everything_its_terminal_shows() {
     }
 }
 
+#[test]
+fn a_host_that_restarts_keeps_logging_each_live_session() {
+    let host = host("relog", CHAT_CLAUDE);
+    host.create("w1", "ana");
+    host.workers
+        .start("w1", "s1", false, Some("hello"))
+        .unwrap();
+    let log = host.home("ana").log("s1");
+    let logged = |text: &str| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !fs::read_to_string(&log).is_ok_and(|t| t.contains(text)) {
+            assert!(
+                Instant::now() < deadline,
+                "{text:?} not logged at {}",
+                log.display()
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+    };
+    logged("said: on hello");
+    let restarted = workers_at(
+        &host.dir,
+        &host.socket,
+        &host.dir.join("claude").to_string_lossy(),
+    );
+    restarted.reconcile();
+    let tmux = restarted.live()["w1"].clone();
+    restarted.tmux.type_in(&tmux, "after the restart").unwrap();
+    logged("after the restart");
+}
+
 /// A transcript for a session begun for worker `ana`, made if need be.
 fn transcript(host: &Host, session: &str) -> PathBuf {
     let home = host.home("ana");
