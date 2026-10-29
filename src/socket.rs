@@ -39,8 +39,9 @@ const STEADY: Duration = Duration::from_secs(60);
 
 /// API Gateway takes a frame of 32 KB at most, and closes the socket on a
 /// longer one; a message, up to 128 KB, may come in as many frames as it
-/// needs. tungstenite writes a message as one frame, so `write` splits it.
-const FRAME: usize = 32_000;
+/// needs. tungstenite writes a message as one frame, so `write` splits it,
+/// leaving room for each frame's header.
+const FRAME: usize = 31 << 10;
 
 /// A message to write, and where to say whether it was written.
 type Outgoing = (String, Sender<bool>);

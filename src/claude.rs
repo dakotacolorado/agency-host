@@ -290,6 +290,14 @@ pub fn read(line: &str) -> Read {
             .map(|reason| reason == "end_turn"),
         _ => None,
     };
+    // The texts of one line share one allowance: a read takes a line whole,
+    // so it is the line, not each text in it, that must fit a report.
+    let room = std::cell::Cell::new(LONGEST_TEXT);
+    let carried = |text: &str| {
+        let text = cut(text, room.get(), json_len);
+        room.set(room.get().saturating_sub(text.chars().map(json_len).sum()));
+        text
+    };
     let entries = match v["type"].as_str() {
         Some("user") => match &message["content"] {
             Value::String(text) => vec![Entry::Told {
@@ -355,7 +363,8 @@ fn cut(text: &str, longest: usize, size: fn(char) -> usize) -> String {
     if text.chars().map(size).sum::<usize>() <= longest {
         return text.to_string();
     }
-    let room = longest - NOTE_ROOM;
+    // An allowance shorter than the note keeps the note alone.
+    let room = longest.saturating_sub(NOTE_ROOM);
     let (mut used, mut end, mut kept) = (0, 0, 0);
     for (at, c) in text.char_indices() {
         used += size(c);
@@ -530,6 +539,33 @@ mod tests {
             let (kept, count, total) = note(text);
             assert_eq!((kept.chars().count(), total), (count, LONGEST_TEXT));
             assert!(long.starts_with(kept) && count > LONGEST_TEXT / 7);
+        }
+    }
+
+    #[test]
+    fn the_texts_of_one_line_share_one_allowance_and_each_cut_says_so() {
+        let block = "y".repeat(60_000);
+        let blocks: Vec<Value> = (0..3)
+            .map(|_| json!({"type":"text","text":block}))
+            .collect();
+        let entries =
+            read_all(&[json!({"type":"user","message":{"role":"user","content":blocks}})]);
+        let texts: Vec<&str> = entries
+            .iter()
+            .map(|e| match e {
+                Entry::Told { text } => text.as_str(),
+                e => panic!("{e:?}"),
+            })
+            .collect();
+        assert_eq!(texts[0], block);
+        let size: usize = texts
+            .iter()
+            .map(|t| serde_json::to_string(t).unwrap().len())
+            .sum();
+        assert!(size <= LONGEST_TEXT + 2 * NOTE_ROOM, "{size}");
+        for cut in &texts[1..] {
+            let (kept, count, total) = note(cut);
+            assert_eq!((kept.chars().count(), total), (count, 60_000));
         }
     }
 

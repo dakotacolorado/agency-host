@@ -775,6 +775,31 @@ fn a_long_reply_and_the_message_it_answers_are_read_whole() {
 }
 
 #[test]
+fn one_transcript_line_of_many_long_texts_still_fits_one_report() {
+    let host = host("blocks", FAKE_CLAUDE);
+    let path = transcript(&host, "s1");
+    let block = "y".repeat(60_000);
+    let line = serde_json::json!({"type":"user","message":{"role":"user","content":[
+        {"type":"text","text":block},{"type":"text","text":block},{"type":"text","text":block}]}});
+    append(&path, format!("{line}\n").as_bytes());
+    let batch = host
+        .workers
+        .read(&host.home("ana"), Cursor::default(), 32 << 10)
+        .unwrap();
+    let size: usize = batch
+        .lines
+        .iter()
+        .map(|l| serde_json::to_string(l).unwrap().len())
+        .sum();
+    assert_eq!(batch.lines.len(), 3);
+    assert!(size < 100 << 10, "{size} bytes");
+    assert_eq!(batch.lines[0].text, block);
+    for cut in &batch.lines[1..] {
+        assert!(cut.text.ends_with(" of 60000 characters]"), "{}", cut.text);
+    }
+}
+
+#[test]
 fn a_line_an_ended_transcript_left_torn_is_passed_over() {
     let host = host("torn", FAKE_CLAUDE);
     let first = transcript(&host, "s1");
