@@ -458,11 +458,11 @@ mod tests {
         assert!(socket.is_up());
         assert_eq!(socket.opened(), 1);
 
-        let workers = [WorkerReport {
-            id: "w1".into(),
-            state: crate::protocol::State::Waiting,
-            session_id: Some("s1".into()),
-        }];
+        let workers = [WorkerReport::new(
+            "w1".into(),
+            crate::protocol::State::Waiting,
+            Some("s1".into()),
+        )];
         let results = [CommandReport::new("c1".into(), None)];
         assert!(socket.send(&Up::Report {
             workers: &workers,
@@ -476,6 +476,7 @@ mod tests {
         assert_eq!(sent["type"], "report");
         assert_eq!(sent["commandResults"][0]["commandId"], "c1");
         assert_eq!(sent["workers"][0]["state"], "waiting");
+        assert_eq!(sent["workers"][0]["turn"], "ended");
     }
 
     #[test]
