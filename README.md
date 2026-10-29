@@ -17,7 +17,11 @@ scripts/install-host.sh https://… <token>
 ```
 
 The script puts the latest release in `~/.local/bin` and, if there is none,
-writes the config file below. Run it again for a newer release.
+writes the config file below. It also clones
+[worker-skills](https://github.com/dakotacolorado/worker-skills) to
+`<workers_dir>/.claude`, the shared context and skills Claude Code finds above
+every worker's folder (`WORKER_SKILLS=owner/repo` for another, empty for
+none). Run it again for a newer release and the latest skills.
 
 ## Configure
 
