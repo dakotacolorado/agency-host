@@ -82,7 +82,9 @@ pub fn take(
             Some(session) => {
                 let given = Given {
                     context: command.context.as_ref(),
+                    documents: command.documents.as_deref(),
                     env: command.env.as_ref(),
+                    secrets: command.secrets.as_ref(),
                 };
                 workers
                     .start_with(

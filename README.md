@@ -56,6 +56,7 @@ A `create` makes `<workers_dir>/<name>/`:
 worker.json       id and name
 sessions.jsonl    each session started, and each stopped
 prompt.md         the opening message of the latest session
+credentials.env   the latest session's tokens, readable by the host's user alone
 home/.claude/     its own Claude Code (CLAUDE_CONFIG_DIR): settings, CLAUDE.md, transcripts
 logs/<id>.log     everything each session's terminal showed
 ```
@@ -64,9 +65,12 @@ A `start` may carry a context: files written into `home/.claude/` before
 Claude Code starts, `skills/...` as files (scripts executable) and a
 `CLAUDE.md` appended to the host's own rules, in place of the last context's
 (listed in `home/.claude/.context.json`); a start without one keeps the last.
-It may also carry variables to set in the session, such as what the context's
-scripts need to reach the services. The host does not know where either comes
-from.
+With it may come `documents`, written after it the same way, each `CLAUDE.md`
+after the one before. It may also carry variables to set in the session, such
+as the services' addresses, and `secrets`, their tokens: those are written to
+`credentials.env`, mode 600, and read into the session's environment as it
+starts, so no token is on tmux's or any other command line. The host does not
+know where any of it comes from.
 
 The worker clones whatever code it needs itself. A `start` runs Claude Code
 as tmux session `worker-<name>` in that folder, a new conversation or, with

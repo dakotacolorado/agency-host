@@ -102,6 +102,11 @@ impl Home {
         self.dir.join("prompt.md")
     }
 
+    /// The session's tokens, read into its environment as it starts.
+    pub fn credentials(&self) -> PathBuf {
+        self.dir.join("credentials.env")
+    }
+
     fn record_file(&self) -> PathBuf {
         self.dir.join("worker.json")
     }

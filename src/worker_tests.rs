@@ -387,6 +387,111 @@ fn a_start_writes_its_context_before_claude_code_starts_and_sets_its_variables()
 }
 
 #[test]
+fn a_start_writes_its_documents_after_its_context_and_their_rules_after_its_own() {
+    let host = host("documents", CONTEXT_CLAUDE);
+    let mut deliveries = Deliveries::new(PATIENCE);
+    let take = |json: &str, deliveries: &mut Deliveries| {
+        let report = commands::take(&command(json), &host.workers, deliveries).unwrap();
+        assert!(report.ok, "{report:?}");
+    };
+    take(
+        r#"{"id":"c1","kind":"create","workerId":"w1","name":"ana"}"#,
+        &mut deliveries,
+    );
+    take(
+        r#"{"id":"c2","kind":"start","workerId":"w1","sessionId":"s1","resume":false,
+        "context":{"key":"global","version":4,"files":[
+          {"path":"CLAUDE.md","content":"Shared by every worker.","executable":false},
+          {"path":"skills/tracker/SKILL.md","content":"Use wt.","executable":false}]},
+        "documents":[{"key":"approval","version":2,"files":[
+          {"path":"CLAUDE.md","content":"Approve or reject the PR.","executable":false},
+          {"path":"skills/approve/SKILL.md","content":"How to approve.","executable":false}]}]}"#,
+        &mut deliveries,
+    );
+    assert_eq!(
+        host.fake_file("ana", "s1", "rules"),
+        "Approve or reject the PR."
+    );
+    let state = host.home("ana").claude();
+    let rules = fs::read_to_string(state.join("CLAUDE.md")).unwrap();
+    assert!(
+        rules.contains("Shared by every worker.\nApprove or reject the PR."),
+        "{rules}"
+    );
+    assert_eq!(
+        fs::read_to_string(state.join("skills/approve/SKILL.md")).unwrap(),
+        "How to approve."
+    );
+    let manifest = fs::read_to_string(state.join(".context.json")).unwrap();
+    let first = |field: &str| {
+        manifest
+            .lines()
+            .find(|l| l.trim_start().starts_with(&format!("\"{field}\"")))
+            .unwrap()
+            .to_string()
+    };
+    assert!(first("key").contains("global") && first("version").contains('4'));
+    assert!(manifest.contains("\"approval\""), "{manifest}");
+}
+
+/// Records the tokens and the address it was started with, then waits.
+const SECRET_CLAUDE: &str = r#"
+printf '%s|%s' "$WT_TOKEN" "$WT_URL" > "$dir/$s.env"
+while IFS= read -r line; do :; done
+"#;
+
+#[test]
+fn a_start_gives_its_session_tokens_from_a_file_only_the_host_can_read_and_never_on_a_command_line()
+{
+    let host = host("secrets", SECRET_CLAUDE);
+    let mut deliveries = Deliveries::new(PATIENCE);
+    let take = |json: &str, deliveries: &mut Deliveries| {
+        let report = commands::take(&command(json), &host.workers, deliveries).unwrap();
+        assert!(report.ok, "{report:?}");
+    };
+    take(
+        r#"{"id":"c1","kind":"create","workerId":"w1","name":"ana"}"#,
+        &mut deliveries,
+    );
+    take(
+        r#"{"id":"c2","kind":"start","workerId":"w1","sessionId":"s1","resume":false,
+        "env":{"WT_URL":"https://wt.example"},"credentials":["work-tracker"],
+        "secrets":{"WT_TOKEN":"it's $ecret `x`"}}"#,
+        &mut deliveries,
+    );
+    assert_eq!(
+        host.fake_file("ana", "s1", "env"),
+        "it's $ecret `x`|https://wt.example"
+    );
+    let file = host.home("ana").credentials();
+    assert_eq!(
+        fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let shown = Process::new("tmux")
+        .args(["-L", &host.socket, "show-environment", "-t", "worker-ana"])
+        .output()
+        .unwrap();
+    let shown = String::from_utf8_lossy(&shown.stdout);
+    assert!(shown.contains("WT_URL=https://wt.example"));
+    let names: Vec<&str> = shown
+        .lines()
+        .map(|l| l.split('=').next().unwrap_or(l))
+        .collect();
+    assert!(
+        !shown.contains("WT_TOKEN") && !shown.contains("$ecret"),
+        "a token among {names:?}"
+    );
+
+    host.workers.stop("w1").unwrap();
+    take(
+        r#"{"id":"c3","kind":"start","workerId":"w1","sessionId":"s2","resume":true}"#,
+        &mut deliveries,
+    );
+    assert!(!file.exists(), "a start without tokens leaves none behind");
+}
+
+#[test]
 fn a_worker_reports_idle_working_waiting_interrupted_and_idle_again() {
     let host = host("states", CHAT_CLAUDE);
     let workers = &host.workers;
