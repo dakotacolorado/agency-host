@@ -744,6 +744,37 @@ fn a_read_stops_at_its_budget_and_the_next_picks_up_there() {
 }
 
 #[test]
+fn a_long_reply_and_the_message_it_answers_are_read_whole() {
+    let host = host("whole", FAKE_CLAUDE);
+    let path = transcript(&host, "s1");
+    let message = "Read the whole design, then say what you make of it. ".repeat(300);
+    let reply = "Here is what I make of it, point by point.\n".repeat(466);
+    assert!(reply.chars().count() >= 20_000);
+    let too_long = "z".repeat(claude::LONGEST_TEXT + 1);
+    for line in [
+        serde_json::json!({"type":"user","message":{"role":"user","content":message}}),
+        serde_json::json!({"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":reply}],"stop_reason":"end_turn"}}),
+        serde_json::json!({"type":"assistant","message":{"id":"m2","content":[{"type":"text","text":too_long}],"stop_reason":"end_turn"}}),
+    ] {
+        append(&path, format!("{line}\n").as_bytes());
+    }
+    let home = host.home("ana");
+    let (mut seen, mut cursor) = (vec![], Cursor::default());
+    while let Some(batch) = host.workers.read(&home, cursor, 32 << 10) {
+        take(&mut seen, &mut cursor, batch);
+    }
+    assert_eq!(seen[..2], [told(&message), said(&reply)]);
+    let (from, cut) = &seen[2];
+    assert_eq!(*from, "agent");
+    let note = format!(" of {} characters]", claude::LONGEST_TEXT + 1);
+    assert!(
+        cut.starts_with("zzz") && cut.ends_with(&note),
+        "{}",
+        &cut[cut.len() - 40..]
+    );
+}
+
+#[test]
 fn a_line_an_ended_transcript_left_torn_is_passed_over() {
     let host = host("torn", FAKE_CLAUDE);
     let first = transcript(&host, "s1");

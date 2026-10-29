@@ -21,10 +21,12 @@ use worker::{Cursor, Deliveries, Workers};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Bytes of transcript lines in one report, for every worker together. API
-/// Gateway takes a frame of 32 KB at most, and tungstenite sends a message as
-/// one frame; what does not fit goes in the next report.
-const TRANSCRIPT_PER_REPORT: usize = 20 << 10;
+/// Bytes of transcript lines in one report, for every worker together; what
+/// does not fit goes in the next report. A report is one socket message, which
+/// API Gateway takes up to 128 KB, and one line may go past this budget, up to
+/// `claude::LONGEST_TEXT`, so that a line longer than it is not held up for
+/// ever: the two together stay well inside the message.
+const TRANSCRIPT_PER_REPORT: usize = 32 << 10;
 
 /// How often the host looks at what its workers are doing, so that a change
 /// is on the socket within about this long.
@@ -179,6 +181,8 @@ fn run(client: &Client, config: &Config, workers: &Workers, socket: &Socket) -> 
     let mut sent_at: HashMap<String, Cursor> = HashMap::new();
     // What the socket was last told of the workers, and on which socket.
     let mut told: Option<(u64, Vec<WorkerReport>)> = None;
+    // Which worker's transcript is read first in the next report.
+    let mut turn = 0;
     let mut deliveries = Deliveries::new(worker::PATIENCE);
     let mut taken = Taken::default();
     let mut waiting: Vec<Command> = Vec::new();
@@ -200,7 +204,14 @@ fn run(client: &Client, config: &Config, workers: &Workers, socket: &Socket) -> 
         }
 
         if socket.is_up() {
-            report(workers, socket, &mut unsent, &mut sent_at, &mut told);
+            report(
+                workers,
+                socket,
+                &mut unsent,
+                &mut sent_at,
+                &mut told,
+                &mut turn,
+            );
         }
 
         if Instant::now() >= next_heartbeat {
@@ -246,20 +257,30 @@ fn run(client: &Client, config: &Config, workers: &Workers, socket: &Socket) -> 
 /// is a socket not told before or the states have changed, transcript lines
 /// past what was written, and command results not yet written. Nothing is
 /// counted as sent until the write is.
+///
+/// A read takes its first line however long it is, so once the report's
+/// budget is spent no more are read: two long lines could not share one
+/// message. The workers take turns at being read first, so one with much to
+/// say holds none of the others up for long.
 fn report(
     workers: &Workers,
     socket: &Socket,
     unsent: &mut Unsent,
     sent_at: &mut HashMap<String, Cursor>,
     told: &mut Option<(u64, Vec<WorkerReport>)>,
+    turn: &mut usize,
 ) {
-    let all = workers.all();
+    let mut all = workers.all();
+    let first = *turn % all.len().max(1);
+    *turn = turn.wrapping_add(1);
+    all.rotate_left(first);
     let live = workers.live();
     let mut read: Vec<(String, Cursor, Vec<Line>)> = Vec::new();
     let mut room = TRANSCRIPT_PER_REPORT;
     for (home, record) in &all {
         let from = sent_at.get(&record.id).copied().unwrap_or_default();
-        let (next, lines) = match workers.read(home, from, room.max(1)) {
+        let batch = (room > 0).then(|| workers.read(home, from, room)).flatten();
+        let (next, lines) = match batch {
             Some(batch) => (batch.next, batch.lines),
             None => (from, vec![]),
         };
@@ -271,6 +292,10 @@ fn report(
         );
         read.push((record.id.clone(), next, lines));
     }
+    // Back in the order the states were last told in, so that an order is
+    // not taken for a change.
+    all.rotate_right(first);
+    read.rotate_right(first);
     let states: Vec<WorkerReport> = all
         .iter()
         .zip(&read)
