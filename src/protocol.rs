@@ -2,6 +2,9 @@
 //! down, reports up.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
+use crate::context::Context;
 
 /// A command for one worker. Every kind names it; the rest is each kind's
 /// own. Unknown fields are ignored, so the service can add one before the
@@ -20,6 +23,10 @@ pub struct Command {
     pub resume: Option<bool>,
     /// `start`, `message`, `interrupt`: what to say to the worker.
     pub text: Option<String>,
+    /// `start`: files to write into the worker's Claude Code folder first,
+    /// and variables to set in its session.
+    pub context: Option<Context>,
+    pub env: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -148,6 +155,16 @@ mod tests {
             ),
             (Some("s1"), Some(true), Some("go"))
         );
+        assert!(start.context.is_none() && start.env.is_none());
+
+        let given: Command = serde_json::from_value(json!({
+            "id":"c3","kind":"start","workerId":"w1","sessionId":"s1","resume":false,
+            "context":{"key":"global","version":4,"files":[{"path":"skills/a/SKILL.md","content":"a","executable":false}]},
+            "env":{"DS_URL":"https://ds"}
+        }))
+        .unwrap();
+        assert_eq!(given.context.unwrap().version, 4);
+        assert_eq!(given.env.unwrap()["DS_URL"], "https://ds");
     }
 
     #[test]

@@ -6,7 +6,7 @@
 use std::collections::VecDeque;
 
 use crate::protocol::{Command, CommandReport};
-use crate::worker::{Deliveries, Workers};
+use crate::worker::{Deliveries, Given, Workers};
 
 /// How many settled commands are remembered. A command is sent again only
 /// until its report is in, which is the next report on an open socket, so
@@ -79,9 +79,21 @@ pub fn take(
             None => Some("a create needs a name".into()),
         },
         ("start", Some(worker)) => match &command.session_id {
-            Some(session) => workers
-                .start(worker, session, command.resume.unwrap_or(false), text)
-                .err(),
+            Some(session) => {
+                let given = Given {
+                    context: command.context.as_ref(),
+                    env: command.env.as_ref(),
+                };
+                workers
+                    .start_with(
+                        worker,
+                        session,
+                        command.resume.unwrap_or(false),
+                        text,
+                        given,
+                    )
+                    .err()
+            }
             None => Some("a start needs a sessionId".into()),
         },
         ("message", Some(worker)) => match text {

@@ -62,6 +62,14 @@ home/.claude/     its own Claude Code (CLAUDE_CONFIG_DIR): settings, CLAUDE.md, 
 logs/<id>.log     everything each session's terminal showed
 ```
 
+A `start` may carry a context: files written into `home/.claude/` before
+Claude Code starts, `skills/...` as files (scripts executable) and a
+`CLAUDE.md` appended to the host's own rules, in place of the last context's
+(listed in `home/.claude/.context.json`); a start without one keeps the last.
+It may also carry variables to set in the session, such as what the context's
+scripts need to reach the services. The host does not know where either comes
+from.
+
 The worker clones whatever code it needs itself. A `start` runs Claude Code
 as tmux session `worker-<name>` in that folder, a new conversation or, with
 `resume`, `claude --continue`. Each session shares the host user's Claude

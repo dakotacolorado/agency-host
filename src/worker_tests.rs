@@ -320,6 +320,54 @@ fn create_and_start_commands_run_a_worker_in_its_own_folder_and_session() {
     assert!(rules.contains("You are worker `ana`"), "{rules}");
 }
 
+/// Records what it was started with: its environment, and the context's
+/// skill and rules as they stood when it began.
+const CONTEXT_CLAUDE: &str = r#"
+printf '%s' "$DS_URL" > "$dir/$s.env"
+cat "$CLAUDE_CONFIG_DIR/skills/tracker/SKILL.md" > "$dir/$s.skill" 2>/dev/null || echo none > "$dir/$s.skill"
+tail -n 1 "$CLAUDE_CONFIG_DIR/CLAUDE.md" > "$dir/$s.rules"
+while IFS= read -r line; do :; done
+"#;
+
+#[test]
+fn a_start_writes_its_context_before_claude_code_starts_and_sets_its_variables() {
+    let host = host("context", CONTEXT_CLAUDE);
+    let mut deliveries = Deliveries::new(PATIENCE);
+    let start = |session: &str, version: u64, skill: &str| {
+        format!(
+            r#"{{"id":"c-{session}","kind":"start","workerId":"w1","sessionId":"{session}","resume":false,
+            "context":{{"key":"global","version":{version},"files":[
+              {{"path":"CLAUDE.md","content":"Give feedback before you finish.","executable":false}},
+              {{"path":"skills/tracker/SKILL.md","content":"{skill}","executable":false}}]}},
+            "env":{{"DS_URL":"https://ds.example","CLAUDE_CONFIG_DIR":"/elsewhere"}}}}"#
+        )
+    };
+    let take = |json: &str, deliveries: &mut Deliveries| {
+        let report = commands::take(&command(json), &host.workers, deliveries).unwrap();
+        assert!(report.ok, "{report:?}");
+    };
+    take(
+        r#"{"id":"c1","kind":"create","workerId":"w1","name":"ana"}"#,
+        &mut deliveries,
+    );
+    take(&start("s1", 1, "Use wt."), &mut deliveries);
+    assert_eq!(host.fake_file("ana", "s1", "env"), "https://ds.example");
+    assert_eq!(host.fake_file("ana", "s1", "skill"), "Use wt.");
+    assert_eq!(
+        host.fake_file("ana", "s1", "rules"),
+        "Give feedback before you finish."
+    );
+    let rules = fs::read_to_string(host.home("ana").claude().join("CLAUDE.md")).unwrap();
+    assert!(
+        rules.starts_with("You are worker `ana`"),
+        "the host's rules come first: {rules}"
+    );
+
+    host.workers.stop("w1").unwrap();
+    take(&start("s2", 2, "Use wt, then docs."), &mut deliveries);
+    assert_eq!(host.fake_file("ana", "s2", "skill"), "Use wt, then docs.");
+}
+
 #[test]
 fn a_worker_reports_idle_working_waiting_interrupted_and_idle_again() {
     let host = host("states", CHAT_CLAUDE);
