@@ -404,6 +404,14 @@ impl Workers {
         })
     }
 
+    /// Whether a dialog is open in the worker's terminal, which a message
+    /// typed now would answer. A screen that cannot be read counts as one.
+    fn asking(&self, id: &str) -> bool {
+        self.running(id)
+            .and_then(|session| self.tmux.screen(&session))
+            .map_or(true, |screen| claude::dialog(&screen))
+    }
+
     /// Where the latest session's transcript ends now, so what is written
     /// after can be told apart.
     fn end(&self, id: &str) -> u64 {
@@ -592,6 +600,9 @@ struct Delivery {
     since: Instant,
     /// Where the transcript ended when it was typed, once it has been.
     typed: Option<u64>,
+    /// Whether a dialog was open in the worker's terminal when it was last
+    /// to be typed, and so kept it back.
+    asked: bool,
 }
 
 impl Deliveries {
@@ -632,6 +643,7 @@ impl Deliveries {
             text: text.into(),
             since: Instant::now(),
             typed: None,
+            asked: false,
         };
         let done = delivery.step(workers, self.patience);
         if done.is_none() {
@@ -667,17 +679,25 @@ impl Delivery {
             return Some(Err(e));
         }
         if self.typed.is_none() && workers.listening(&self.worker) {
-            let offset = workers.end(&self.worker);
-            if let Err(e) = workers.say(&self.worker, &self.text) {
-                return Some(Err(e));
+            self.asked = workers.asking(&self.worker);
+            if !self.asked {
+                let offset = workers.end(&self.worker);
+                if let Err(e) = workers.say(&self.worker, &self.text) {
+                    return Some(Err(e));
+                }
+                self.typed = Some(offset);
             }
-            self.typed = Some(offset);
         }
         if self.since.elapsed() < patience {
             return None;
         }
         let waited = patience.as_secs();
         Some(Err(match self.typed {
+            None if self.asked => format!(
+                "a dialog was open in worker {}'s terminal for {waited}s, so the message was \
+                 never typed: Enter would have answered it",
+                self.worker
+            ),
             None => format!(
                 "worker {} was not yet reading input after {waited}s, so the message was never \
                  typed",
