@@ -15,6 +15,8 @@ use std::time::{Duration, Instant};
 
 use tungstenite::client::ClientRequestBuilder;
 use tungstenite::http::Uri;
+use tungstenite::protocol::frame::coding::{Data, OpCode};
+use tungstenite::protocol::frame::Frame;
 use tungstenite::{Message, WebSocket};
 
 use crate::protocol::{Command, Down, Up};
@@ -34,6 +36,12 @@ const PATIENCE: Duration = Duration::from_secs(15);
 /// ends every socket after two hours, so a reconnect is routine.
 const BACKOFF: (Duration, Duration) = (Duration::from_secs(1), Duration::from_secs(60));
 const STEADY: Duration = Duration::from_secs(60);
+
+/// API Gateway takes a frame of 32 KB at most, and closes the socket on a
+/// longer one; a message, up to 128 KB, may come in as many frames as it
+/// needs. tungstenite writes a message as one frame, so `write` splits it,
+/// leaving room for each frame's header.
+const FRAME: usize = 31 << 10;
 
 /// A message to write, and where to say whether it was written.
 type Outgoing = (String, Sender<bool>);
@@ -234,6 +242,29 @@ fn quiet(e: &tungstenite::Error) -> bool {
         if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut))
 }
 
+/// Writes `text` as one message in frames of at most `FRAME` bytes, each
+/// ending on a character, so no frame is text that is not whole.
+fn write<S: Read + Write>(socket: &mut WebSocket<S>, text: &str) -> tungstenite::Result<()> {
+    let (mut rest, mut opcode) = (text, OpCode::Data(Data::Text));
+    loop {
+        let mut end = rest.len().min(FRAME);
+        while !rest.is_char_boundary(end) {
+            end -= 1;
+        }
+        let (part, after) = rest.split_at(end);
+        let last = after.is_empty();
+        socket.write(Message::Frame(Frame::message(
+            part.to_owned(),
+            opcode,
+            last,
+        )))?;
+        if last {
+            return socket.flush();
+        }
+        (rest, opcode) = (after, OpCode::Data(Data::Continue));
+    }
+}
+
 /// The thread's side.
 struct Link {
     shared: Arc<Shared>,
@@ -303,7 +334,7 @@ impl Link {
             loop {
                 match self.outgoing.try_recv() {
                     Ok((text, done)) => {
-                        let sent = socket.send(Message::text(text));
+                        let sent = write(&mut socket, &text);
                         let _ = done.send(sent.is_ok());
                         if let Err(e) = sent {
                             return e.to_string();
@@ -366,8 +397,16 @@ mod tests {
         );
     }
 
-    /// A stand-in for the service's socket: checks how the host connects,
-    /// pushes `pushed`, and hands back the first text the host sends.
+    /// API Gateway's limits on what a socket sends it.
+    fn api_gateway() -> tungstenite::protocol::WebSocketConfig {
+        tungstenite::protocol::WebSocketConfig::default()
+            .max_frame_size(Some(32 << 10))
+            .max_message_size(Some(128 << 10))
+    }
+
+    /// A stand-in for the service's socket, which takes what API Gateway
+    /// does: checks how the host connects, pushes `pushed`, and hands back
+    /// the first text the host sends.
     // tungstenite's callback answers a refusal with a whole HTTP response.
     #[allow(clippy::result_large_err)]
     fn stand_in(pushed: &'static str) -> (String, thread::JoinHandle<(String, String, String)>) {
@@ -376,11 +415,15 @@ mod tests {
         let handle = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
             let (mut path, mut authorization) = (String::new(), String::new());
-            let mut socket = tungstenite::accept_hdr(stream, |req: &Request, res: Response| {
-                path = req.uri().to_string();
-                authorization = req.headers()["authorization"].to_str().unwrap().into();
-                Ok(res)
-            })
+            let mut socket = tungstenite::accept_hdr_with_config(
+                stream,
+                |req: &Request, res: Response| {
+                    path = req.uri().to_string();
+                    authorization = req.headers()["authorization"].to_str().unwrap().into();
+                    Ok(res)
+                },
+                Some(api_gateway()),
+            )
             .unwrap();
             socket.send(Message::text(pushed)).unwrap();
             let sent = loop {
@@ -433,6 +476,38 @@ mod tests {
         assert_eq!(sent["type"], "report");
         assert_eq!(sent["commandResults"][0]["commandId"], "c1");
         assert_eq!(sent["workers"][0]["state"], "waiting");
+    }
+
+    #[test]
+    fn a_report_longer_than_a_frame_goes_up_whole_in_frames_api_gateway_takes() {
+        let (url, service) = stand_in(r#"{"type":"hello"}"#);
+        let socket = Socket::spawn("studio", "t");
+        socket.point_at(Some(&url));
+        let start = Instant::now();
+        while !socket.is_up() && start.elapsed() < Duration::from_secs(10) {
+            thread::sleep(POLL);
+        }
+        // Several frames' worth, with characters of every width across them.
+        let text = "A reply, é and 日本 and 🦀.\n".repeat(2_500);
+        let lines = [(
+            "w1".to_string(),
+            vec![crate::protocol::Line {
+                seq: 0,
+                at: "2026-10-28T00:00:00.000Z".into(),
+                session_id: "s1".into(),
+                from: "agent",
+                text: text.clone(),
+            }],
+        )];
+        assert!(socket.send(&Up::Report {
+            workers: &[],
+            lines: crate::protocol::line_reports(&lines),
+            command_results: &[],
+        }));
+        let (_, _, sent) = service.join().expect("the report, taken whole");
+        assert!(sent.len() > 2 * FRAME);
+        let sent: serde_json::Value = serde_json::from_str(&sent).unwrap();
+        assert_eq!(sent["lines"][0]["text"], text);
     }
 
     #[test]

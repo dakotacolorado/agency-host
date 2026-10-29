@@ -426,7 +426,7 @@ impl Workers {
         let Some(latest) = home.latest() else {
             return false;
         };
-        let typed = [claude::cut(text), claude::cut(text.trim())];
+        let typed = [claude::carried(text), claude::carried(text.trim())];
         self.scan(&home, &latest, offset, |entries| {
             entries
                 .iter()

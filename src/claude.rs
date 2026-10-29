@@ -21,9 +21,20 @@ use std::{env, fs, io};
 
 use crate::worker::Entry;
 
-/// Longer than this, a text is cut: one tool input can be a whole file, and a
-/// transcript is for following a worker, not for recovering its work.
-const LONGEST: usize = 4096;
+/// What a worker says or is told is carried whole up to this many bytes, as
+/// the JSON its line goes up in. A report is one socket message, which API
+/// Gateway takes up to 128 KB, and a report may hold one such line past its
+/// own budget (`TRANSCRIPT_PER_REPORT`), so this leaves room for both. As
+/// characters, it is far past the longest answer a person reads.
+pub const LONGEST_TEXT: usize = 64 << 10;
+
+/// A tool's input is shown on one line and can be a whole file, and a
+/// transcript is for following a worker, not for recovering its work: longer
+/// than this many characters, it is cut.
+const LONGEST_INPUT: usize = 4096;
+
+/// More than the note a cut text ends with can take, at its longest numbers.
+const NOTE_ROOM: usize = 64;
 
 pub struct Claude {
     program: String,
@@ -279,16 +290,28 @@ pub fn read(line: &str) -> Read {
             .map(|reason| reason == "end_turn"),
         _ => None,
     };
+    // The texts of one line share one allowance: a read takes a line whole,
+    // so it is the line, not each text in it, that must fit a report.
+    let room = std::cell::Cell::new(LONGEST_TEXT);
+    let carried = |text: &str| {
+        let text = cut(text, room.get(), json_len);
+        room.set(room.get().saturating_sub(text.chars().map(json_len).sum()));
+        text
+    };
     let entries = match v["type"].as_str() {
         Some("user") => match &message["content"] {
-            Value::String(text) => vec![Entry::Told { text: cut(text) }],
+            Value::String(text) => vec![Entry::Told {
+                text: carried(text),
+            }],
             // Tool results come back as the user's turn; they are the
             // worker's own work, not something said to it.
             Value::Array(blocks) => blocks
                 .iter()
                 .filter(|b| b["type"] == "text")
                 .filter_map(|b| b["text"].as_str())
-                .map(|text| Entry::Told { text: cut(text) })
+                .map(|text| Entry::Told {
+                    text: carried(text),
+                })
                 .collect(),
             _ => vec![],
         },
@@ -296,7 +319,9 @@ pub fn read(line: &str) -> Read {
         Some("attachment") if v["attachment"]["type"] == "queued_command" => v["attachment"]
             ["prompt"]
             .as_str()
-            .map(|text| Entry::Told { text: cut(text) })
+            .map(|text| Entry::Told {
+                text: carried(text),
+            })
             .into_iter()
             .collect(),
         // One message is written as a line per block.
@@ -306,11 +331,11 @@ pub fn read(line: &str) -> Read {
             .flatten()
             .filter_map(|b| match b["type"].as_str() {
                 Some("text") => Some(Entry::Said {
-                    text: cut(b["text"].as_str()?),
+                    text: carried(b["text"].as_str()?),
                 }),
                 Some("tool_use") => Some(Entry::Ran {
                     tool: b["name"].as_str()?.into(),
-                    input: cut(&b["input"].to_string()),
+                    input: cut(&b["input"].to_string(), LONGEST_INPUT, |_| 1),
                 }),
                 _ => None,
             })
@@ -324,10 +349,40 @@ pub fn read(line: &str) -> Read {
     }
 }
 
-pub fn cut(text: &str) -> String {
-    match text.char_indices().nth(LONGEST) {
-        Some((at, _)) => format!("{}…", &text[..at]),
-        None => text.to_string(),
+/// What was said or told, as it is carried up: whole, unless it is longer
+/// than `LONGEST_TEXT` as JSON.
+pub fn carried(text: &str) -> String {
+    cut(text, LONGEST_TEXT, json_len)
+}
+
+/// `text` as it is when its `size` is at most `longest`; otherwise as much
+/// of it as fits with a note of how much that is, so whoever reads it knows
+/// it was cut and how long it was. The note is the service's shape for a cut
+/// text (`TranscriptLine` in worker-service), and counts in characters.
+fn cut(text: &str, longest: usize, size: fn(char) -> usize) -> String {
+    if text.chars().map(size).sum::<usize>() <= longest {
+        return text.to_string();
+    }
+    // An allowance shorter than the note keeps the note alone.
+    let room = longest.saturating_sub(NOTE_ROOM);
+    let (mut used, mut end, mut kept) = (0, 0, 0);
+    for (at, c) in text.char_indices() {
+        used += size(c);
+        if used > room {
+            break;
+        }
+        (end, kept) = (at + c.len_utf8(), kept + 1);
+    }
+    let total = text.chars().count();
+    format!("{}… [cut: {kept} of {total} characters]", &text[..end])
+}
+
+/// The bytes a character takes in a JSON string, as serde_json writes it.
+fn json_len(c: char) -> usize {
+    match c {
+        '"' | '\\' | '\n' | '\r' | '\t' | '\u{8}' | '\u{c}' => 2,
+        c if c < ' ' => 6,
+        c => c.len_utf8(),
     }
 }
 
@@ -447,15 +502,87 @@ mod tests {
     }
 
     #[test]
-    fn a_long_text_is_cut() {
-        let long = "é".repeat(LONGEST + 10);
-        let Entry::Said { text } = &read_all(&[json!({
-            "type":"assistant","message":{"id":"m","content":[{"type":"text","text":long}],"stop_reason":"tool_use"}
-        })])[0] else {
+    fn a_long_reply_and_a_long_message_are_read_whole() {
+        let reply = "A long answer, line after line.\n".repeat(625);
+        assert_eq!(reply.chars().count(), 20_000);
+        let message = "Do this, then that. ".repeat(819);
+        let entries = read_all(&[
+            json!({"type":"user","message":{"role":"user","content":message}}),
+            json!({"type":"attachment","attachment":{"type":"queued_command","prompt":message}}),
+            json!({"type":"assistant","message":{"id":"m","content":[{"type":"text","text":reply}],"stop_reason":"end_turn"}}),
+        ]);
+        assert_eq!(entries, [told(&message), told(&message), said(&reply)]);
+    }
+
+    /// The note a cut text ends with, and the text before it.
+    fn note(text: &str) -> (&str, usize, usize) {
+        let at = text.rfind("… [cut: ").expect(text);
+        let (kept, total) = text[at..]
+            .trim_start_matches("… [cut: ")
+            .trim_end_matches(" characters]")
+            .split_once(" of ")
+            .unwrap();
+        (&text[..at], kept.parse().unwrap(), total.parse().unwrap())
+    }
+
+    #[test]
+    fn a_text_too_long_to_carry_is_cut_and_says_so_and_how_long_it_was() {
+        // Two bytes each, and six as JSON: the cut is by what goes up.
+        for c in ['é', '\u{1}'] {
+            let long = c.to_string().repeat(LONGEST_TEXT);
+            let Entry::Said { text } = &read_all(&[json!({
+                "type":"assistant","message":{"id":"m","content":[{"type":"text","text":long}],"stop_reason":"end_turn"}
+            })])[0] else {
+                panic!()
+            };
+            assert!(serde_json::to_string(text).unwrap().len() <= LONGEST_TEXT);
+            let (kept, count, total) = note(text);
+            assert_eq!((kept.chars().count(), total), (count, LONGEST_TEXT));
+            assert!(long.starts_with(kept) && count > LONGEST_TEXT / 7);
+        }
+    }
+
+    #[test]
+    fn the_texts_of_one_line_share_one_allowance_and_each_cut_says_so() {
+        let block = "y".repeat(60_000);
+        let blocks: Vec<Value> = (0..3)
+            .map(|_| json!({"type":"text","text":block}))
+            .collect();
+        let entries =
+            read_all(&[json!({"type":"user","message":{"role":"user","content":blocks}})]);
+        let texts: Vec<&str> = entries
+            .iter()
+            .map(|e| match e {
+                Entry::Told { text } => text.as_str(),
+                e => panic!("{e:?}"),
+            })
+            .collect();
+        assert_eq!(texts[0], block);
+        let size: usize = texts
+            .iter()
+            .map(|t| serde_json::to_string(t).unwrap().len())
+            .sum();
+        assert!(size <= LONGEST_TEXT + 2 * NOTE_ROOM, "{size}");
+        for cut in &texts[1..] {
+            let (kept, count, total) = note(cut);
+            assert_eq!((kept.chars().count(), total), (count, 60_000));
+        }
+    }
+
+    #[test]
+    fn a_long_tool_input_is_cut_and_says_so_and_how_long_it_was() {
+        let input = json!({"content": "x".repeat(10_000)});
+        let entries = read_all(&[json!({
+            "type":"assistant","message":{"id":"m","content":[{"type":"tool_use","name":"Write","input":input}]}
+        })]);
+        let Entry::Ran { input: cut, .. } = &entries[0] else {
             panic!()
         };
-        assert_eq!(text.chars().count(), LONGEST + 1);
-        assert!(text.ends_with('…'));
+        assert!(cut.chars().count() <= LONGEST_INPUT);
+        let (kept, count, total) = note(cut);
+        assert_eq!(total, input.to_string().chars().count());
+        assert_eq!(kept.chars().count(), count);
+        assert!(input.to_string().starts_with(kept));
     }
 
     #[test]
