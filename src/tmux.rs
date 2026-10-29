@@ -172,6 +172,11 @@ impl Tmux {
         self.press(session, "Enter")
     }
 
+    /// What the session's terminal shows now, as text.
+    pub fn screen(&self, session: &str) -> Result<String, String> {
+        self.run(&["capture-pane", "-p", "-t", session], None)
+    }
+
     /// Ends the session and what runs in it, which tmux hangs up on.
     pub fn kill_session(&self, session: &str) -> Result<(), String> {
         self.run(&["kill-session", "-t", session], None)?;

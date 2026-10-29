@@ -83,6 +83,24 @@ while IFS= read -r line; do
 done
 "#;
 
+/// Ends its turn with a dialog open, as plan approval leaves one, until
+/// `closed` is made beside its transcript; whatever is typed meanwhile is
+/// kept in `answers`. Then it answers each line typed.
+const DIALOG_CLAUDE: &str = r#"
+w '{"type":"assistant","message":{"id":"m0","content":[{"type":"text","text":"plan ready"}],"stop_reason":"end_turn"}}'
+printf ' Would you like to proceed?\n\n ❯ 1. Yes\n   2. No\n'
+stty -icanon -echo min 0 time 0
+until [ -e "$dir/closed" ]; do cat >> "$dir/answers"; sleep 0.1; done
+cat >> "$dir/answers"; stty icanon echo
+printf '\033[2J\033[H────────\n❯ \n────────\n'
+n=0
+while IFS= read -r line; do
+  n=$((n+1))
+  w "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"$line\"}}"
+  w "{\"type\":\"assistant\",\"message\":{\"id\":\"m$n\",\"content\":[{\"type\":\"text\",\"text\":\"on $line\"}],\"stop_reason\":\"end_turn\"}}"
+done
+"#;
+
 /// Never gets far enough to write a transcript.
 const STUCK_CLAUDE: &str = "sleep 60\n";
 
@@ -661,6 +679,74 @@ fn a_message_that_cannot_be_delivered_in_time_fails_with_why() {
         panic!("expected one failure")
     };
     assert!(why.contains("not in its transcript"), "{why}");
+}
+
+#[test]
+fn a_message_waits_while_a_dialog_is_open_and_is_typed_once_it_closes() {
+    let host = host("dialog", DIALOG_CLAUDE);
+    let workers = &host.workers;
+    host.create("w1", "ana");
+    workers.start("w1", "s1", false, None).unwrap();
+    let home = host.home("ana");
+    let (mut seen, mut cursor) = (vec![], Cursor::default());
+    read_until(workers, &home, &mut seen, &mut cursor, |s| {
+        s.contains(&said("plan ready"))
+    });
+    let fake = home.claude().join("projects/-fake");
+    let session = workers.running("w1").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !claude::dialog(&workers.tmux.screen(&session).unwrap()) {
+        assert!(Instant::now() < deadline, "the dialog never opened");
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    let mut deliveries = Deliveries::new(PATIENCE);
+    assert_eq!(deliveries.hold(workers, "c1", "w1", "hello"), None);
+    for _ in 0..10 {
+        assert_eq!(deliveries.settle(workers), []);
+        thread::sleep(Duration::from_millis(100));
+    }
+    let answers = fs::read_to_string(fake.join("answers")).unwrap_or_default();
+    assert_eq!(answers, "", "nothing typed into the dialog");
+
+    fs::write(fake.join("closed"), "").unwrap();
+    assert_eq!(
+        settle_all(workers, &mut deliveries),
+        [("c1".to_string(), Ok(()))]
+    );
+    read_until(workers, &home, &mut seen, &mut cursor, |s| {
+        s.contains(&said("on hello"))
+    });
+    assert_eq!(seen.iter().filter(|e| **e == told("hello")).count(), 1);
+    assert_eq!(fs::read_to_string(fake.join("answers")).unwrap(), "");
+}
+
+#[test]
+fn a_message_kept_back_by_a_dialog_that_stays_open_fails_with_why() {
+    let host = host("asking", DIALOG_CLAUDE);
+    let workers = &host.workers;
+    host.create("w1", "ana");
+    workers.start("w1", "s1", false, None).unwrap();
+    let home = host.home("ana");
+    let (mut seen, mut cursor) = (vec![], Cursor::default());
+    read_until(workers, &home, &mut seen, &mut cursor, |s| {
+        s.contains(&said("plan ready"))
+    });
+    let session = workers.running("w1").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !claude::dialog(&workers.tmux.screen(&session).unwrap()) {
+        assert!(Instant::now() < deadline, "the dialog never opened");
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    let mut deliveries = Deliveries::new(Duration::from_millis(300));
+    assert_eq!(deliveries.hold(workers, "c1", "w1", "hello"), None);
+    let [(_, Err(why))] = &settle_all(workers, &mut deliveries)[..] else {
+        panic!("expected one failure")
+    };
+    assert!(why.contains("a dialog was open"), "{why}");
+    let answers = home.claude().join("projects/-fake/answers");
+    assert_eq!(fs::read_to_string(answers).unwrap_or_default(), "");
 }
 
 #[test]

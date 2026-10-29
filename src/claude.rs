@@ -36,6 +36,9 @@ const LONGEST_INPUT: usize = 4096;
 /// More than the note a cut text ends with can take, at its longest numbers.
 const NOTE_ROOM: usize = 64;
 
+/// Tools a worker is not given; see `Claude::prepare`.
+const DENIED: [&str; 3] = ["AskUserQuestion", "EnterPlanMode", "ExitPlanMode"];
+
 pub struct Claude {
     program: String,
     /// The host user's own `CLAUDE_CONFIG_DIR`, if they set one: where their
@@ -172,10 +175,11 @@ impl Claude {
             settings
                 .entry("skipDangerousModePermissionPrompt")
                 .or_insert(Value::Bool(true));
-            // AskUserQuestion's dialog is seen only at the terminal, and the
-            // Enter that types a message picks its first option. Denied, the
-            // tool is gone, even with permissions skipped, so a worker asks in
-            // words and ends its turn.
+            // These tools' dialogs are seen only at the terminal, and the
+            // Enter that types a message picks their first option: answers
+            // AskUserQuestion, approves ExitPlanMode's plan. Denied, a tool is
+            // gone, even with permissions skipped, so a worker asks in words
+            // and ends its turn.
             let deny = settings
                 .entry("permissions")
                 .or_insert_with(|| Value::Object(Map::new()))
@@ -185,9 +189,11 @@ impl Claude {
                 .or_insert_with(|| Value::Array(vec![]))
                 .as_array_mut()
                 .ok_or("permissions.deny is not an array")?;
-            let ask = Value::from("AskUserQuestion");
-            if !deny.contains(&ask) {
-                deny.push(ask);
+            for tool in DENIED {
+                let tool = Value::from(tool);
+                if !deny.contains(&tool) {
+                    deny.push(tool);
+                }
             }
             Ok(())
         })?;
@@ -223,6 +229,40 @@ fn merge(
         fs::rename(&aside, path)
     };
     write().map_err(|e| at(&e))
+}
+
+/// Whether `screen`, what a session's terminal shows, has a dialog open: a
+/// question that the Enter which sends a message would answer. Read from
+/// Claude Code's screen, which it redraws as it likes, so this is a guard
+/// behind `DENIED`, not a promise. Below its input box -- a rule, then a line
+/// at its `❯` -- Claude Code shows only its status; a dialog takes the
+/// box's place, and is told by its numbered options, the chosen one at `❯`,
+/// or by the footer its lists share. With no box on screen, all of it is
+/// looked at, so a message typed earlier that reads like a list keeps the
+/// next one back only until a box is drawn again.
+pub fn dialog(screen: &str) -> bool {
+    let rule = |line: &str| line.trim().starts_with("───");
+    let lines: Vec<&str> = screen.lines().collect();
+    let below = lines
+        .windows(2)
+        .rposition(|w| rule(w[0]) && w[1].trim_start().starts_with('❯') && !option(w[1]))
+        .map_or(0, |at| at + 2);
+    lines[below..].iter().any(|line| {
+        option(line)
+            || ["Enter to select", "Esc to cancel"]
+                .iter()
+                .any(|f| line.contains(f))
+    })
+}
+
+/// Whether `line` is a dialog's chosen option: `❯ 1. Yes`.
+fn option(line: &str) -> bool {
+    let Some(rest) = line.trim_start().strip_prefix('❯') else {
+        return false;
+    };
+    let rest = rest.trim_start();
+    let digits = rest.chars().take_while(char::is_ascii_digit).count();
+    digits > 0 && rest[digits..].starts_with(". ")
 }
 
 /// Where a session's transcript is in a worker's state, once Claude Code has
@@ -615,6 +655,59 @@ mod tests {
         assert_eq!(&derived[14..15], "4");
     }
 
+    /// Screens as Claude Code 2.1.312 drew them, cut to their ends.
+    const IDLE: &str = "\
+❯ 1. Create hello.txt
+  2. Tell me when done
+● Done.
+✻ Churned for 4s · done 3:46 PM
+
+────────────────────────────────────────
+❯ 
+────────────────────────────────────────
+  ⏸ plan mode on (shift+tab to cycle)
+";
+    const PLAN: &str = "\
+● Updated plan
+  ⎿  /plan to preview
+
+────────────────────────────────────────
+ Claude has written up a plan and is ready to execute. Would you like to proceed?
+
+ ❯ 1. Yes, and switch to BYPASS PERMISSIONS (no further prompts) for this session
+   2. Yes, manually approve edits
+   3. Tell Claude what to change
+      shift+tab to approve with this feedback
+
+ ctrl+g to edit in Vim ·
+";
+    const QUESTION: &str = "\
+❯ Use the AskUserQuestion tool to ask me red or blue. Nothing else.
+────────────────────────────────────────
+ ☐ Color
+Red or blue?
+❯ 1. Red
+     Choose red
+  2. Blue
+     Choose blue
+  3. Type something.
+────────────────────────────────────────
+  4. Chat about this
+Enter to select · ↑/↓ to navigate · Esc to cancel
+";
+
+    #[test]
+    fn a_dialog_is_told_from_the_input_box_whatever_was_said_above_it() {
+        assert!(!dialog(IDLE), "a list typed earlier is not a dialog");
+        assert!(dialog(PLAN), "plan approval");
+        assert!(dialog(QUESTION), "a question");
+        assert!(dialog(
+            "Pick a model\n  Default\nEnter to confirm · Esc to cancel\n"
+        ));
+        assert!(!dialog(""), "nothing drawn yet");
+        assert!(!dialog("❯ 1 thing\n❯ 1.5 things\n"));
+    }
+
     fn scratch(name: &str) -> PathBuf {
         // Apart from the worker tests' folders, which run beside these and share names.
         let dir =
@@ -646,8 +739,8 @@ mod tests {
         assert_eq!(settings["skipDangerousModePermissionPrompt"], true);
         assert_eq!(
             settings["permissions"]["deny"],
-            json!(["AskUserQuestion"]),
-            "a question in a dialog is one nobody away from the terminal sees"
+            json!(["AskUserQuestion", "EnterPlanMode", "ExitPlanMode"]),
+            "a dialog is one nobody away from the terminal sees"
         );
         assert_eq!(
             fs::read_to_string(state.join("CLAUDE.md")).unwrap(),
@@ -692,7 +785,12 @@ mod tests {
         assert_eq!(settings["skipDangerousModePermissionPrompt"], true);
         assert_eq!(
             settings["permissions"]["deny"],
-            json!(["WebFetch", "AskUserQuestion"]),
+            json!([
+                "WebFetch",
+                "AskUserQuestion",
+                "EnterPlanMode",
+                "ExitPlanMode"
+            ]),
             "denied once, alongside what the worker denied itself"
         );
         assert_eq!(
