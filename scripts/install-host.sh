@@ -21,28 +21,20 @@ if [ ! -f "$config" ]; then
     "$1" "$2" "$(hostname -s)" "$(uname -s | tr 'A-Z' 'a-z' | sed s/darwin/macos/)" "$HOME/workers" > "$config")
   echo "wrote $config: edit capacity and labels to suit this machine"
 fi
-# The workers' shared context and skills: Claude Code reads the .claude folder
-# above every worker's own, so the host never needs to know what is in it.
-# WORKER_SKILLS names another repo, or empty for none.
-skills_repo=${WORKER_SKILLS-dakotacolorado/worker-skills}
+# Workers' context now comes with each session's start, so the skills clone
+# and its sync, from before, are taken away: the marked cron entry, and a
+# clone at <workers_dir>/.claude left clean.
+if command -v crontab >/dev/null && crontab -l 2>/dev/null | grep -qF "# worker-host: sync "; then
+  crontab -l | grep -vF "# worker-host: sync " | crontab -
+fi
 workers_dir=$(sed -n 's/^workers_dir *= *"\(.*\)"/\1/p' "$config")
 skills=${workers_dir:-$HOME/workers}/.claude
-if [ -z "$skills_repo" ]; then
-  :
-elif [ -d "$skills/.git" ]; then
-  (cd "$skills" && gh repo sync) || echo "install-host: $skills not updated; see git -C $skills status" >&2
-elif [ -e "$skills" ]; then
-  echo "install-host: $skills is there and not a clone; skills left alone" >&2
-else
-  gh repo clone "$skills_repo" "$skills" -- --quiet
-fi
-# Kept current between runs of this script by cron, which macOS and linux both
-# have. The entry is marked so a later run replaces it rather than adding one;
-# gh by full path, since cron's PATH does not reach Homebrew's.
-if [ -n "$skills_repo" ] && [ -d "$skills/.git" ] && command -v crontab >/dev/null; then
-  mark="# worker-host: sync $skills"
-  entry="*/15 * * * * cd '$skills' && '$(command -v gh)' repo sync >/dev/null 2>> '$HOME/worker-skills-sync.log' $mark"
-  { crontab -l 2>/dev/null | grep -vF "$mark" || true; echo "$entry"; } | crontab -
+if [ -d "$skills/.git" ]; then
+  if [ -z "$(git -C "$skills" status --porcelain)" ]; then
+    rm -rf "$skills"
+  else
+    echo "install-host: $skills has local changes; left in place, remove it once they are saved" >&2
+  fi
 fi
 "$HOME/.local/bin/worker-host" --version
 echo "start it:   ~/.local/bin/worker-host 2>> ~/worker-host.log &"

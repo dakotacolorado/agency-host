@@ -17,12 +17,10 @@ scripts/install-host.sh https://… <token>
 ```
 
 The script puts the latest release in `~/.local/bin` and, if there is none,
-writes the config file below. It also clones
-[worker-skills](https://github.com/dakotacolorado/worker-skills) to
-`<workers_dir>/.claude`, the shared context and skills Claude Code finds above
-every worker's folder (`WORKER_SKILLS=owner/repo` for another, empty for
-none), and a crontab entry that syncs it every 15 minutes, failures logged to
-`~/worker-skills-sync.log`. Run it again for a newer release.
+writes the config file below. Workers' shared context comes with each
+session's start (see Workers), so nothing else is installed; a run also takes
+away the worker-skills clone at `<workers_dir>/.claude` and its cron sync that
+earlier versions installed. Run it again for a newer release.
 
 ## Configure
 
