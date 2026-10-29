@@ -172,6 +172,23 @@ impl Claude {
             settings
                 .entry("skipDangerousModePermissionPrompt")
                 .or_insert(Value::Bool(true));
+            // AskUserQuestion's dialog is seen only at the terminal, and the
+            // Enter that types a message picks its first option. Denied, the
+            // tool is gone, even with permissions skipped, so a worker asks in
+            // words and ends its turn.
+            let deny = settings
+                .entry("permissions")
+                .or_insert_with(|| Value::Object(Map::new()))
+                .as_object_mut()
+                .ok_or("permissions is not an object")?
+                .entry("deny")
+                .or_insert_with(|| Value::Array(vec![]))
+                .as_array_mut()
+                .ok_or("permissions.deny is not an array")?;
+            let ask = Value::from("AskUserQuestion");
+            if !deny.contains(&ask) {
+                deny.push(ask);
+            }
             Ok(())
         })?;
         let memory = state.join("CLAUDE.md");
@@ -628,6 +645,11 @@ mod tests {
                 .unwrap();
         assert_eq!(settings["skipDangerousModePermissionPrompt"], true);
         assert_eq!(
+            settings["permissions"]["deny"],
+            json!(["AskUserQuestion"]),
+            "a question in a dialog is one nobody away from the terminal sees"
+        );
+        assert_eq!(
             fs::read_to_string(state.join("CLAUDE.md")).unwrap(),
             "the rules"
         );
@@ -649,7 +671,11 @@ mod tests {
             r#"{"oauthAccount":{"id":"x"},"claudeInChromeDefaultEnabled":true,"projects":{"/elsewhere":{"a":1}}}"#,
         )
         .unwrap();
-        fs::write(state.join("settings.json"), r#"{"theme":"dark"}"#).unwrap();
+        fs::write(
+            state.join("settings.json"),
+            r#"{"theme":"dark","permissions":{"deny":["WebFetch"]}}"#,
+        )
+        .unwrap();
         let claude = Claude::new("claude", None);
         claude.prepare(&state, &work, "old").unwrap();
         claude.prepare(&state, &work, "new").unwrap();
@@ -664,6 +690,11 @@ mod tests {
                 .unwrap();
         assert_eq!(settings["theme"], "dark");
         assert_eq!(settings["skipDangerousModePermissionPrompt"], true);
+        assert_eq!(
+            settings["permissions"]["deny"],
+            json!(["WebFetch", "AskUserQuestion"]),
+            "denied once, alongside what the worker denied itself"
+        );
         assert_eq!(
             fs::read_to_string(state.join("CLAUDE.md")).unwrap(),
             "new",

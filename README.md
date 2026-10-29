@@ -73,6 +73,9 @@ as tmux session `worker-<name>` in that folder, a new conversation or, with
 `resume`, `claude --continue`. Each session shares the host user's Claude
 login: HOME stays the user's, and `CLAUDE_SECURESTORAGE_CONFIG_DIR` points at
 the user's own store (see `src/claude.rs`).
+Its settings deny the `AskUserQuestion` tool: that dialog is seen only at
+the terminal, and a message typed into it picks its first option, so a
+worker asks in words and ends its turn instead.
 
 States: `working`, `waiting` (its last turn ended, nothing said since),
 `idle` (no session), `interrupted` (its session ended without a stop; can be
