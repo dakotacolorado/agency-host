@@ -21,7 +21,8 @@ writes the config file below. It also clones
 [worker-skills](https://github.com/dakotacolorado/worker-skills) to
 `<workers_dir>/.claude`, the shared context and skills Claude Code finds above
 every worker's folder (`WORKER_SKILLS=owner/repo` for another, empty for
-none). Run it again for a newer release and the latest skills.
+none), and a crontab entry that syncs it every 15 minutes, failures logged to
+`~/worker-skills-sync.log`. Run it again for a newer release.
 
 ## Configure
 

@@ -36,6 +36,14 @@ elif [ -e "$skills" ]; then
 else
   gh repo clone "$skills_repo" "$skills" -- --quiet
 fi
+# Kept current between runs of this script by cron, which macOS and linux both
+# have. The entry is marked so a later run replaces it rather than adding one;
+# gh by full path, since cron's PATH does not reach Homebrew's.
+if [ -n "$skills_repo" ] && [ -d "$skills/.git" ] && command -v crontab >/dev/null; then
+  mark="# worker-host: sync $skills"
+  entry="*/15 * * * * cd '$skills' && '$(command -v gh)' repo sync >/dev/null 2>> '$HOME/worker-skills-sync.log' $mark"
+  { crontab -l 2>/dev/null | grep -vF "$mark" || true; echo "$entry"; } | crontab -
+fi
 "$HOME/.local/bin/worker-host" --version
 echo "start it:   ~/.local/bin/worker-host 2>> ~/worker-host.log &"
 echo "attach:     tmux -L worker-host attach -t worker-<name>"
