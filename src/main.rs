@@ -305,11 +305,7 @@ fn report(
             .map(|((home, record), (_, _, next, _))| {
                 let (state, session_id) =
                     workers.state(home, live.get(&record.id).map(String::as_str), next.waiting);
-                WorkerReport {
-                    id: record.id.clone(),
-                    state,
-                    session_id,
-                }
+                WorkerReport::new(record.id.clone(), state, session_id)
             })
             .collect()
     });
@@ -424,14 +420,13 @@ mod tests {
         let unsent = Unsent(vec![CommandReport::new("c1".into(), None)]);
         let states_of = |read: &[Read]| -> Vec<WorkerReport> {
             read.iter()
-                .map(|(id, _, next, _)| WorkerReport {
-                    id: id.clone(),
-                    state: if next.offset > 0 {
+                .map(|(id, _, next, _)| {
+                    let state = if next.offset > 0 {
                         protocol::State::Working
                     } else {
                         protocol::State::Idle
-                    },
-                    session_id: None,
+                    };
+                    WorkerReport::new(id.clone(), state, None)
                 })
                 .collect()
         };

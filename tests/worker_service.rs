@@ -200,7 +200,7 @@ fn a_worker_is_created_spoken_to_stopped_and_retired_over_the_socket() {
     let worker = created["id"].as_str().unwrap().to_string();
     host.worker = Some(worker.clone());
     service.until(&worker, PUSHED, "created and started by push", |w| {
-        w["state"] == "waiting" && !w["reportedAt"].is_null()
+        w["state"] == "waiting" && w["turn"] == "ended" && !w["reportedAt"].is_null()
     });
 
     let sent = service.call(

@@ -36,13 +36,22 @@ pub enum State {
     Idle,
     /// A live session, at work.
     Working,
-    /// A live session whose turn ended with nothing said to it since: it is
-    /// waiting on someone, whether on a question or with its work done,
-    /// which its transcript does not tell apart, so the host does not guess.
+    /// A live session whose turn ended with nothing said to it since. Whether
+    /// that is on a question, with its work done or on its own subagents its
+    /// transcript does not tell apart, so the host does not guess: the worker
+    /// tells the service itself.
     Waiting,
     /// Its last session ended without a stop: a crash, the machine going
     /// down. It can be resumed.
     Interrupted,
+}
+
+/// What a live session's transcript says of its turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Turn {
+    Active,
+    Ended,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -52,6 +61,24 @@ pub struct WorkerReport {
     pub state: State,
     /// The live session, or for `interrupted` the session that ended.
     pub session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn: Option<Turn>,
+}
+
+impl WorkerReport {
+    pub fn new(id: String, state: State, session_id: Option<String>) -> Self {
+        let turn = match state {
+            State::Working => Some(Turn::Active),
+            State::Waiting => Some(Turn::Ended),
+            State::Idle | State::Interrupted => None,
+        };
+        WorkerReport {
+            id,
+            state,
+            session_id,
+            turn,
+        }
+    }
 }
 
 /// One step of a worker's conversation. `seq` counts every line before it in
@@ -189,16 +216,9 @@ mod tests {
     #[test]
     fn a_report_is_workers_lines_and_results_under_its_type() {
         let workers = [
-            WorkerReport {
-                id: "w1".into(),
-                state: State::Working,
-                session_id: Some("s1".into()),
-            },
-            WorkerReport {
-                id: "w2".into(),
-                state: State::Idle,
-                session_id: None,
-            },
+            WorkerReport::new("w1".into(), State::Working, Some("s1".into())),
+            WorkerReport::new("w2".into(), State::Idle, None),
+            WorkerReport::new("w3".into(), State::Waiting, Some("s3".into())),
         ];
         let lines = [(
             "w1".to_string(),
@@ -221,8 +241,9 @@ mod tests {
             json!({
                 "type":"report",
                 "workers":[
-                    {"id":"w1","state":"working","sessionId":"s1"},
-                    {"id":"w2","state":"idle","sessionId":null}
+                    {"id":"w1","state":"working","sessionId":"s1","turn":"active"},
+                    {"id":"w2","state":"idle","sessionId":null},
+                    {"id":"w3","state":"waiting","sessionId":"s3","turn":"ended"}
                 ],
                 "lines":[{"workerId":"w1","seq":4,"at":"2026-10-28T00:00:00.000Z","sessionId":"s1","from":"agent","text":"hi"}],
                 "commandResults":[{"commandId":"c1","ok":false,"error":"no"}]
