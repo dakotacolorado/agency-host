@@ -363,7 +363,10 @@ impl Link {
                         }
                     }
                     Ok(Down::Other) => {}
-                    Err(e) => crate::log!("socket: unreadable message ({e}): {text}"),
+                    // Not the text: a start carries its session's tokens.
+                    Err(e) => {
+                        crate::log!("socket: unreadable message of {} bytes: {e}", text.len())
+                    }
                 },
                 Ok(Message::Close(frame)) => {
                     return frame.map_or("closed by the service".into(), |f| {

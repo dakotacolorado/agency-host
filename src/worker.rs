@@ -257,14 +257,19 @@ impl Workers {
         fs::write(&prompt, text).map_err(|e| format!("{}: {e}", prompt.display()))?;
         // A start without a context keeps the last one the worker was given.
         let written = match given.context {
-            Some(c) => Some(context::write(&home.claude(), c)?),
+            Some(c) => Some(context::write(
+                &home.claude(),
+                c,
+                given.documents.unwrap_or_default(),
+            )?),
             None => context::written(&home.claude()),
         };
         // The rules follow the host's version, so each session is told the
         // ones of the host it runs on, then the context's.
         let rules = context::rules(&rules(&home, &record), written.as_ref());
         self.claude.prepare(&home.claude(), &home.dir, &rules)?;
-        let argv = self.claude.argv(begin, &prompt);
+        context::credentials(&home.credentials(), given.secrets)?;
+        let argv = self.claude.argv(begin, &prompt, &home.credentials());
         let mut env = self.claude.env(&home.claude());
         env.extend(context::env(given.env));
         // Written before tmux is asked, so a machine that dies between the two
@@ -563,7 +568,9 @@ impl Workers {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Given<'a> {
     pub context: Option<&'a Context>,
+    pub documents: Option<&'a [Context]>,
     pub env: Option<&'a BTreeMap<String, String>>,
+    pub secrets: Option<&'a BTreeMap<String, String>>,
 }
 
 /// The worker's standing rules, Claude Code's user memory.
@@ -571,8 +578,8 @@ fn rules(home: &Home, record: &Record) -> String {
     format!(
         "You are worker `{}`, and your folder is `{}`. A person reads everything you \
          write, and what to do comes to you as messages. Clone whatever you need into \
-         your folder; `home/`, `logs/`, `prompt.md`, `sessions.jsonl` and `worker.json` \
-         are the host's records of you, so leave them be.\n",
+         your folder; `home/`, `logs/`, `credentials.env`, `prompt.md`, `sessions.jsonl` \
+         and `worker.json` are the host's records of you, so leave them be.\n",
         record.name,
         home.dir.display()
     )

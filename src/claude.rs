@@ -80,14 +80,16 @@ impl Claude {
     /// The opening message is read from `prompt` as the session starts, since
     /// tmux refuses a command longer than a few kilobytes and a message may be
     /// far longer. It is still one argument, never shell syntax: a quoted
-    /// substitution is not read again.
-    pub fn argv(&self, begin: Begin, prompt: &Path) -> Vec<String> {
+    /// substitution is not read again. The session's tokens are read from
+    /// `credentials`, when there is one, so that none is on a command line.
+    pub fn argv(&self, begin: Begin, prompt: &Path, credentials: &Path) -> Vec<String> {
         let mut argv: Vec<String> = [
             "sh",
             "-c",
-            r#"p=$1; shift; exec "$@" "$(cat -- "$p")""#,
+            r#"p=$1 c=$2; shift 2; if [ -f "$c" ]; then set -a; . "$c"; set +a; fi; exec "$@" "$(cat -- "$p")""#,
             "sh",
             &prompt.to_string_lossy(),
+            &credentials.to_string_lossy(),
             &self.program,
             "--dangerously-skip-permissions",
         ]
@@ -822,9 +824,9 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
     #[test]
     fn a_session_begins_new_or_carries_on() {
         let claude = Claude::new("claude", None);
-        let fresh = claude.argv(Begin::Fresh("s1"), Path::new("/p"));
+        let fresh = claude.argv(Begin::Fresh("s1"), Path::new("/p"), Path::new("/c"));
         assert_eq!(
-            fresh[5..],
+            fresh[6..],
             [
                 "claude",
                 "--dangerously-skip-permissions",
@@ -832,11 +834,12 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
                 "s1"
             ]
         );
-        let resumed = claude.argv(Begin::Continue, Path::new("/p"));
+        let resumed = claude.argv(Begin::Continue, Path::new("/p"), Path::new("/c"));
         assert_eq!(
             resumed[4..],
             [
                 "/p",
+                "/c",
                 "claude",
                 "--dangerously-skip-permissions",
                 "--continue"

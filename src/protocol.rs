@@ -26,7 +26,11 @@ pub struct Command {
     /// `start`: files to write into the worker's Claude Code folder first,
     /// and variables to set in its session.
     pub context: Option<Context>,
+    pub documents: Option<Vec<Context>>,
     pub env: Option<BTreeMap<String, String>>,
+    /// `start`: tokens for its session, which go only into a file only the
+    /// host's user can read, never onto a command line.
+    pub secrets: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
