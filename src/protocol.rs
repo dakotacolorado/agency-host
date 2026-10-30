@@ -50,14 +50,6 @@ pub enum State {
     Interrupted,
 }
 
-/// What a live session's transcript says of its turn.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Turn {
-    Active,
-    Ended,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkerReport {
@@ -65,22 +57,14 @@ pub struct WorkerReport {
     pub state: State,
     /// The live session, or for `interrupted` the session that ended.
     pub session_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub turn: Option<Turn>,
 }
 
 impl WorkerReport {
     pub fn new(id: String, state: State, session_id: Option<String>) -> Self {
-        let turn = match state {
-            State::Working => Some(Turn::Active),
-            State::Waiting => Some(Turn::Ended),
-            State::Idle | State::Interrupted => None,
-        };
         WorkerReport {
             id,
             state,
             session_id,
-            turn,
         }
     }
 }
@@ -245,9 +229,9 @@ mod tests {
             json!({
                 "type":"report",
                 "workers":[
-                    {"id":"w1","state":"working","sessionId":"s1","turn":"active"},
+                    {"id":"w1","state":"working","sessionId":"s1"},
                     {"id":"w2","state":"idle","sessionId":null},
-                    {"id":"w3","state":"waiting","sessionId":"s3","turn":"ended"}
+                    {"id":"w3","state":"waiting","sessionId":"s3"}
                 ],
                 "lines":[{"workerId":"w1","seq":4,"at":"2026-10-28T00:00:00.000Z","sessionId":"s1","from":"agent","text":"hi"}],
                 "commandResults":[{"commandId":"c1","ok":false,"error":"no"}]

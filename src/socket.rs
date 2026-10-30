@@ -479,7 +479,7 @@ mod tests {
         assert_eq!(sent["type"], "report");
         assert_eq!(sent["commandResults"][0]["commandId"], "c1");
         assert_eq!(sent["workers"][0]["state"], "waiting");
-        assert_eq!(sent["workers"][0]["turn"], "ended");
+        assert!(sent["workers"][0].get("turn").is_none());
     }
 
     #[test]
