@@ -20,7 +20,13 @@ use std::time::{Duration, Instant};
 use std::{env, path::PathBuf, process::ExitCode};
 use worker::{Cursor, Deliveries, Workers};
 
-const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// The release this binary is, as its heartbeat and `--version` say: the tag a
+/// release build is given in `WORKER_HOST_RELEASE` (e.g. `v0.1.0-48`), or
+/// Cargo.toml's version for any other build.
+const VERSION: &str = match option_env!("WORKER_HOST_RELEASE") {
+    Some(release) if !release.is_empty() => release,
+    _ => env!("CARGO_PKG_VERSION"),
+};
 
 /// Bytes of transcript lines in one report, for every worker together; what
 /// does not fit goes in the next report. One transcript line may go past it,
