@@ -99,6 +99,9 @@ tmux -L worker-host attach -t worker-<name>
 
 ## Develop
 
+The `test` skill (`.claude/skills/test/SKILL.md`) gives every command to set
+up, check, release and roll back.
+
 ```sh
 cargo fmt --check
 cargo clippy --all-targets --locked -- -D warnings
