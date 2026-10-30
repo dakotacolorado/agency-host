@@ -110,6 +110,6 @@ cargo test -- --ignored real_claude   # real Claude Code sessions
 WORKER_SERVICE_URL=… WORKER_SERVICE_TOKEN=… cargo test --test worker_service
 ```
 
-The tests need `tmux` and use tmux servers of their own. CI runs
-`tests/worker_service.rs` against beta and publishes a release on a merge to
-main only when that test ran against beta and passed.
+The tests need `tmux` and use tmux servers of their own. A reviewer runs
+`tests/worker_service.rs` against beta before a release, as the test skill
+(`.claude/skills/test/SKILL.md`) says.
