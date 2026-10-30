@@ -72,10 +72,11 @@ WORKER_SERVICE_URL=$(aws cloudformation describe-stacks --stack-name WorkerServi
 ```
 
 A pass: `create`, `start`, `message`, `stop` and `retire` each `done`, then
-`test result: ok. 1 passed`, exit 0. Once it failed with
-`POST /fleet/workers: 409 {"error":"test-<pid> is running all 1 sessions it will."}`
-after `create` and `start` were already done, and passed when run again: run
-it again once before calling that a failure.
+`test result: ok. 1 passed`, exit 0. Any failure is a failure. The test's host
+sets no capacity, so the service places no other worker on it: when it set
+`capacity = 1`, a document-service judge made on beta without a host once
+landed there and the test's own create got
+`409 test-<pid> is running all 1 sessions it will.`
 
 ## Prod read-only checks
 
@@ -88,7 +89,8 @@ dir=$(mktemp -d) && gh release download --repo dakotacolorado/worker-host --patt
 
 A pass: the Latest tag, the commit it was built from, `5` assets (four
 binaries and `SHA256SUMS`); then `worker-host-x86_64-unknown-linux-musl: OK`
-and `worker-host <Cargo.toml version>`.
+and `worker-host <the tag>` (`worker-host 0.1.0` for releases up to v0.1.0-47,
+built before the build was given its tag).
 
 Which hosts are connected to prod (`WS_URL`/`WS_TOKEN` are the session's):
 
@@ -97,37 +99,43 @@ printf 'Authorization: Bearer %s\n' "$WS_TOKEN" | curl -sf -H @- "$WS_URL/fleet/
 ```
 
 A pass: 200 and each host the person runs `"status":"connected"`. A host's
-`version` is Cargo.toml's (`0.1.0`), the same for every release, so it does
-not say which release a host runs.
+`version` is the release tag it runs (e.g. `v0.1.0-48`); `0.1.0` is a release
+up to v0.1.0-47, or a build that is not a release.
 
 ## Release to prod (reviewer only)
 
 At the merged commit on `main`, clean tree, after the checks and the beta test
-pass there. Build every target with zig (the macOS ones too):
+pass there. The tag is numbered one past the last release, and the build is
+given it in `WORKER_HOST_RELEASE`, so the binary reports it:
+
+```sh
+last=$(gh release list --repo dakotacolorado/worker-host --limit 1 --json tagName --jq '.[0].tagName') && tag="v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)-$((${last##*-} + 1))" && echo "$tag"
+```
+
+Build every target with zig (the macOS ones too), in the same shell:
 
 ```sh
 rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl aarch64-apple-darwin x86_64-apple-darwin
 cargo install --locked cargo-zigbuild@0.24.0
-for t in x86_64-unknown-linux-musl aarch64-unknown-linux-musl aarch64-apple-darwin x86_64-apple-darwin; do cargo zigbuild --release --locked --target $t || break; done
+for t in x86_64-unknown-linux-musl aarch64-unknown-linux-musl aarch64-apple-darwin x86_64-apple-darwin; do WORKER_HOST_RELEASE="$tag" cargo zigbuild --release --locked --target $t || break; done
 ```
 
 Each must end `Finished`; the macOS ones warn that `xcrun` is missing, which
 is harmless. zig may leave `.intentionally-empty-file.o` in the repo root:
 delete it.
 
-The linux binary must need nothing on the machine and print the version:
+The linux binary must need nothing on the machine and print `worker-host $tag`:
 
 ```sh
 file target/x86_64-unknown-linux-musl/release/worker-host | grep 'statically linked'
 target/x86_64-unknown-linux-musl/release/worker-host --version
 ```
 
-Publish, numbered one past the last release:
+Publish as `$tag`:
 
 ```sh
 rm -rf target/dist && mkdir target/dist && for t in x86_64-unknown-linux-musl aarch64-unknown-linux-musl aarch64-apple-darwin x86_64-apple-darwin; do cp target/$t/release/worker-host target/dist/worker-host-$t; done && chmod +x target/dist/* && (cd target/dist && sha256sum worker-host-* > SHA256SUMS)
-last=$(gh release list --repo dakotacolorado/worker-host --limit 1 --json tagName --jq '.[0].tagName') && tag="v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)-$((${last##*-} + 1))" && echo "$tag"
-gh release create "$tag" target/dist/* --repo dakotacolorado/worker-host --target "$(git rev-parse HEAD)" --title "worker-host $tag" --notes "Built from $(git rev-parse HEAD) by hand: cargo zigbuild --release --locked for each target. Proved against WorkerService-beta with tests/worker_service.rs. Install with scripts/install-host.sh; see the README."
+gh release create "$tag" target/dist/* --repo dakotacolorado/worker-host --target "$(git rev-parse HEAD)" --title "worker-host $tag" --notes "Built from $(git rev-parse HEAD) by hand: WORKER_HOST_RELEASE=$tag cargo zigbuild --release --locked for each target. Proved against WorkerService-beta with tests/worker_service.rs. Install with scripts/install-host.sh; see the README."
 ```
 
 Then run the prod read-only checks: the tag is `$tag` and the commit is the

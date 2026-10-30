@@ -38,7 +38,11 @@ tmux_socket = "worker-host"        # this is the default
 ```
 
 Two hosts on one machine (beta beside prod) each need their own `workers_dir`
-and `tmux_socket`. `worker-host --version` prints the version.
+and `tmux_socket`. `worker-host --version` prints the release it was built as
+(e.g. `worker-host v0.1.0-48`), which is also the `version` its heartbeats send,
+so `/fleet/hosts` shows which release each host runs. A build not given its
+tag in `WORKER_HOST_RELEASE` (`cargo build`, and every release up to
+v0.1.0-47) says Cargo.toml's version, `0.1.0`.
 
 ## Socket
 

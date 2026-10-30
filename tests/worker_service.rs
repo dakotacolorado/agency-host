@@ -153,8 +153,12 @@ fn a_worker_is_created_spoken_to_stopped_and_retired_over_the_socket() {
         dir.join("bin").display(),
         env::var("PATH").unwrap_or_default()
     );
+    // No capacity, so the service places no other worker here: a worker made
+    // without a host (document-service's judges, on beta) once landed on this
+    // one while it had room, and the test's own create then found it full.
+    // A worker named for this host is made and started here all the same.
     let config = format!(
-        "service_url = {:?}\ntoken = {token:?}\nhost_id = {id:?}\ncapacity = 1\ntmux_socket = {TMUX:?}\n",
+        "service_url = {:?}\ntoken = {token:?}\nhost_id = {id:?}\ntmux_socket = {TMUX:?}\n",
         service.url
     );
     fs::write(dir.join("config.toml"), config).unwrap();
