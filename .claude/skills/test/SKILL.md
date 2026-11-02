@@ -139,8 +139,9 @@ gh release create "$tag" target/dist/* --repo dakotacolorado/worker-host --targe
 ```
 
 Then run the prod read-only checks: the tag is `$tag` and the commit is the
-one you built. Record the beta release as the commit and the prod release as
-the tag. Tell the person a release is out: their hosts take it when they run
+one you built. Record both releases (`POST /releases`) at that commit's full
+40-character SHA (`git rev-parse HEAD`), never the tag, which approval-service
+refuses; name the tag in the prod release's `checked`. Tell the person a release is out: their hosts take it when they run
 `scripts/install-host.sh` and restart the host.
 
 ## Roll back (reviewer only)
