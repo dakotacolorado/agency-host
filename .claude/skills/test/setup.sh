@@ -2,14 +2,15 @@
 # Puts what `cargo` needs to check worker-host under TOOLS_DIR, for a machine
 # without it: rustup and a stable toolchain with rustfmt and clippy, and zig as
 # the C compiler and archiver (ring, which rustls needs, has C). Run it again
-# and it skips what is there. Prints the PATH line to use after it.
+# and it skips what is there. Prints the PATH line to use after it, and only
+# that on stdout, so `eval "$(setup.sh DIR)"` works: everything else goes to stderr.
 set -eu
 tools=$(mkdir -p "${1:?usage: setup.sh TOOLS_DIR}" && cd "$1" && pwd)
 zig_version=0.13.0
 export RUSTUP_HOME="$tools/rustup" CARGO_HOME="$tools/cargo"
 mkdir -p "$tools/bin"
 if [ ! -x "$CARGO_HOME/bin/cargo" ]; then
-  curl -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal -c rustfmt,clippy
+  curl -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal -c rustfmt,clippy >&2
 fi
 if ! command -v cc >/dev/null && [ ! -x "$tools/bin/cc" ]; then
   zig="$tools/zig-linux-x86_64-$zig_version/zig"
