@@ -27,8 +27,8 @@ worker-host is not deployed: it is a binary that each machine installs with
   `scripts/install-host.sh` again and restarts the host; nothing pushes it to
   them. Installing on a machine is the person's step, not the reviewer's.
 
-GitHub Actions is off, so `ci.yml`'s `build`, `integration` and `release` jobs
-no longer run; the commands below are them, by hand.
+GitHub Actions is off, so nothing builds, tests against beta or releases on
+its own; the commands below do it by hand.
 
 ## Setup
 
