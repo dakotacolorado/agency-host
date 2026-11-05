@@ -162,6 +162,7 @@ impl Unsent {
 }
 
 fn take(
+    client: &Client,
     command: &Command,
     workers: &Workers,
     deliveries: &mut Deliveries,
@@ -169,6 +170,25 @@ fn take(
     unsent: &mut Unsent,
 ) {
     let fresh = !deliveries.holds(&command.id) && !taken.knows(&command.id);
+    let whole;
+    let command = match (&command.context_url, fresh) {
+        (Some(path), true) => match client.context(path) {
+            Ok(read) => {
+                whole = command.with(read);
+                &whole
+            }
+            // What the start carried is still a context, and its session's
+            // record says what was left out of it.
+            Err(e) => {
+                log!(
+                    "command {} (start): its whole context could not be read, so it starts with what it carried: {e}",
+                    command.id
+                );
+                command
+            }
+        },
+        _ => command,
+    };
     match taken.take(command, workers, deliveries) {
         Some(report) => {
             if fresh {
@@ -210,7 +230,14 @@ fn run(client: &Client, config: &Config, workers: &Workers, socket: &Socket) -> 
     loop {
         waiting.extend(socket.commands.try_iter());
         for command in waiting.drain(..) {
-            take(&command, workers, &mut deliveries, &mut taken, &mut unsent);
+            take(
+                client,
+                &command,
+                workers,
+                &mut deliveries,
+                &mut taken,
+                &mut unsent,
+            );
         }
         for (command, result) in deliveries.settle(workers) {
             log!(

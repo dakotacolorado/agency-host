@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 use crate::config::Config;
+use crate::protocol::Whole;
 
 /// A field left out keeps the value the service last had: a host that could
 /// not read something says nothing about it rather than sending a zero or an
@@ -38,6 +39,7 @@ pub enum Failure {
 
 pub struct Client {
     agent: ureq::Agent,
+    base: String,
     url: String,
     authorization: String,
 }
@@ -48,11 +50,31 @@ impl Client {
             agent: ureq::AgentBuilder::new()
                 .timeout(Duration::from_secs(30))
                 .build(),
+            base: config.service_url.trim_end_matches('/').to_string(),
             url: format!(
                 "{}/fleet/hosts/{}/heartbeat",
                 config.service_url, config.host_id
             ),
             authorization: format!("Bearer {}", config.token),
+        }
+    }
+
+    /// A start's whole context, read at the `contextUrl` it named.
+    pub fn context(&self, path: &str) -> Result<Whole, String> {
+        let response = self
+            .agent
+            .get(&format!("{}{path}", self.base))
+            .set("Authorization", &self.authorization)
+            .call();
+        match response {
+            Ok(response) => response
+                .into_json()
+                .map_err(|e| format!("unreadable context: {e}")),
+            Err(ureq::Error::Status(code, response)) => Err(format!(
+                "{code} {}",
+                response.into_string().unwrap_or_default()
+            )),
+            Err(e) => Err(e.to_string()),
         }
     }
 
@@ -156,6 +178,32 @@ mod tests {
             reply.socket_url.as_deref(),
             Some("wss://socket.example/beta")
         );
+    }
+
+    #[test]
+    fn a_whole_context_is_read_at_the_path_the_start_named() {
+        let (url, server) = serve_once(
+            "200 OK",
+            r#"{"context":{"key":"global","version":4,"files":[{"path":"CLAUDE.md","content":"x","executable":false}]},"documents":[]}"#,
+        );
+        let whole = client(format!("{url}/"))
+            .context("/fleet/workers/w/sessions/s/context")
+            .unwrap();
+        let (head, _) = server.join().unwrap();
+        assert!(
+            head.starts_with("GET /fleet/workers/w/sessions/s/context "),
+            "{head}"
+        );
+        assert!(head.contains("Authorization: Bearer secret"), "{head}");
+        assert_eq!(whole.context.unwrap().version, 4);
+        assert!(whole.documents.is_empty());
+    }
+
+    #[test]
+    fn a_context_the_service_will_not_give_says_why() {
+        let (url, _) = serve_once("409 Conflict", r#"{"error":"not live"}"#);
+        let err = client(url).context("/x").unwrap_err();
+        assert!(err.starts_with("409 ") && err.contains("not live"), "{err}");
     }
 
     #[test]
