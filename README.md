@@ -28,7 +28,9 @@ On a mac the script also makes launchd run the host, as the LaunchAgent
 `com.github.dakotacolorado.worker-host`, whose plist in `~/Library/LaunchAgents`
 each run writes afresh. launchd starts the host at login and again whenever it
 exits, so `kill` restarts it rather than stopping it; it logs to
-`~/worker-host.log`. Each run of the script restarts it onto the new release.
+`~/worker-host.log`. It is started through your shell, interactive and login
+(`zsh -ilc`), so it and its sessions have the PATH and variables a terminal
+has: change those in your shell's startup files, then restart it. Each run of the script restarts it onto the new release.
 The first run stops any host started by hand and loads the agent in its place;
 after that, do not start one by hand, which would run beside it as a second
 host. To restart it, stop it until the next login, or start it again:
