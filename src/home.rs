@@ -6,11 +6,12 @@
 //! sessions.jsonl    each session the host started for it, and each it stopped
 //! prompt.md         the opening message of its latest session
 //! home/.claude/     its own Claude Code: settings, rules, history, transcripts
-//! logs/<id>.log     everything each session's terminal showed
+//! logs/<id>.jsonl   everything each session said on its stdout, as it came
+//! logs/<id>.log     everything each session wrote on its stderr
 //! ```
 //!
-//! The host remembers nothing between runs that is not here or in tmux, so a
-//! machine that dies at any point leaves a folder the next run can read.
+//! The host remembers nothing between runs that is not here, so a machine
+//! that dies at any point leaves a folder the next run can read.
 
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
@@ -29,23 +30,33 @@ pub struct Record {
 }
 
 /// One session the host started for a worker. `claude` is the Claude Code
-/// session whose transcript it writes to, and `from` how long that transcript
-/// was when it began: a session that carries on the last conversation writes
-/// on in the same transcript, and what comes after `from` is this session's.
+/// session it carries, and `from` how long Claude Code's own transcript of
+/// it was when it began: a session that carries on the last conversation
+/// writes on in the same transcript.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Session {
     pub session_id: String,
     pub claude: String,
     pub from: u64,
+    /// Whether it runs headless, its events kept in `Home::events`. A session
+    /// an older release began ran in tmux, and what it said is in Claude
+    /// Code's transcript up to where a headless one carried it on.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stream: bool,
     /// Whether it was ended by a `stop`, rather than by whatever else can end
     /// a session: a crash, the machine going down.
     #[serde(skip)]
     pub stopped: bool,
+    /// Whether the host saw it end without a stop. A session that was live
+    /// when the host went away is neither, and is resumed when it is back.
+    #[serde(skip)]
+    pub ended: bool,
 }
 
-/// A line of `sessions.jsonl`: a session begun, one stopped, or one that
-/// never began after all, since tmux would not run it.
+/// A line of `sessions.jsonl`: a session begun, one stopped, one that ended
+/// by itself, or one that never began after all, since it would not run. A
+/// session carried from tmux to headless is begun again under its own id.
 #[derive(Serialize, Deserialize)]
 #[serde(untagged)]
 enum Event {
@@ -54,6 +65,11 @@ enum Event {
     Stopped {
         session_id: String,
         stopped: bool,
+    },
+    #[serde(rename_all = "camelCase")]
+    Ended {
+        session_id: String,
+        ended: bool,
     },
     #[serde(rename_all = "camelCase")]
     Withdrawn {
@@ -94,7 +110,13 @@ impl Home {
         self.home().join(".claude")
     }
 
-    pub fn log(&self, session: &str) -> PathBuf {
+    /// The session's stdout, a JSON line per event, kept as it came.
+    pub fn events(&self, session: &str) -> PathBuf {
+        self.dir.join("logs").join(format!("{session}.jsonl"))
+    }
+
+    /// The session's stderr.
+    pub fn errors(&self, session: &str) -> PathBuf {
         self.dir.join("logs").join(format!("{session}.log"))
     }
 
@@ -152,11 +174,14 @@ impl Home {
         for line in text.lines() {
             match serde_json::from_str(line) {
                 Ok(Event::Begun(session)) => sessions.push(session),
-                Ok(Event::Stopped { session_id, .. }) => {
-                    if let Some(s) = sessions.iter_mut().find(|s| s.session_id == session_id) {
-                        s.stopped = true;
-                    }
-                }
+                Ok(Event::Stopped { session_id, .. }) => sessions
+                    .iter_mut()
+                    .filter(|s| s.session_id == session_id)
+                    .for_each(|s| s.stopped = true),
+                Ok(Event::Ended { session_id, .. }) => sessions
+                    .iter_mut()
+                    .filter(|s| s.session_id == session_id)
+                    .for_each(|s| s.ended = true),
                 Ok(Event::Withdrawn { session_id, .. }) => {
                     sessions.retain(|s| s.session_id != session_id)
                 }
@@ -181,7 +206,14 @@ impl Home {
         })
     }
 
-    /// Takes back a session tmux would not start, so that the start is tried
+    pub fn ended(&self, session_id: &str) -> Result<(), String> {
+        self.append(&Event::Ended {
+            session_id: session_id.into(),
+            ended: true,
+        })
+    }
+
+    /// Takes back a session that would not start, so that the start is tried
     /// again when it is sent again rather than taken for one already done.
     pub fn withdraw(&self, session_id: &str) -> Result<(), String> {
         self.append(&Event::Withdrawn {
@@ -291,7 +323,8 @@ mod tests {
             assert!(dir.join("ana").join(sub).is_dir(), "{sub}");
         }
         assert_eq!(home.claude(), dir.join("ana/home/.claude"));
-        assert_eq!(home.log("s1"), dir.join("ana/logs/s1.log"));
+        assert_eq!(home.events("s1"), dir.join("ana/logs/s1.jsonl"));
+        assert_eq!(home.errors("s1"), dir.join("ana/logs/s1.log"));
         assert_eq!(home.record(), Some(ana()));
         assert_eq!(all(&dir), [(home.clone(), ana())]);
 
@@ -315,7 +348,9 @@ mod tests {
             session_id: "s1".into(),
             claude: "c1".into(),
             from: 0,
+            stream: false,
             stopped: false,
+            ended: false,
         };
         home.begin(&one).unwrap();
         home.stopped("s1").unwrap();
@@ -323,7 +358,9 @@ mod tests {
             session_id: "s2".into(),
             claude: "c1".into(),
             from: 120,
+            stream: true,
             stopped: false,
+            ended: false,
         };
         home.begin(&two).unwrap();
         fs::OpenOptions::new()
@@ -337,7 +374,9 @@ mod tests {
             session_id: "s4".into(),
             claude: "c4".into(),
             from: 0,
+            stream: true,
             stopped: false,
+            ended: false,
         })
         .unwrap();
         home.withdraw("s4").unwrap();
@@ -355,5 +394,40 @@ mod tests {
             ]
         );
         assert_eq!(home.latest().map(|s| s.session_id), Some("s2".into()));
+    }
+
+    #[test]
+    fn a_session_carried_from_tmux_is_begun_again_and_ends_or_stops_as_one() {
+        let dir = scratch("carried");
+        let home = Home::new(dir.join("ana"));
+        home.make(&ana()).unwrap();
+        // As an older release wrote it.
+        fs::write(
+            dir.join("ana/sessions.jsonl"),
+            "{\"sessionId\":\"s1\",\"claude\":\"c1\",\"from\":0}\n",
+        )
+        .unwrap();
+        let tmux = Session {
+            session_id: "s1".into(),
+            claude: "c1".into(),
+            from: 0,
+            stream: false,
+            stopped: false,
+            ended: false,
+        };
+        assert_eq!(home.sessions(), std::slice::from_ref(&tmux));
+        let headless = Session {
+            from: 300,
+            stream: true,
+            ..tmux.clone()
+        };
+        home.begin(&headless).unwrap();
+        home.ended("s1").unwrap();
+        let line = fs::read_to_string(dir.join("ana/sessions.jsonl")).unwrap();
+        assert!(line.contains(r#""stream":true"#), "{line}");
+        let ended: Vec<bool> = home.sessions().iter().map(|s| s.ended).collect();
+        assert_eq!(ended, [true, true]);
+        home.stopped("s1").unwrap();
+        assert!(home.sessions().iter().all(|s| s.stopped));
     }
 }

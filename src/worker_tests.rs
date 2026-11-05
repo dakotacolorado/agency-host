@@ -1,135 +1,137 @@
 use super::*;
 use crate::commands;
+use crate::config::Permissions;
 use crate::protocol::Command;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command as Process;
 use std::time::{Duration, Instant};
 use std::{fs, thread};
 
 /// What every stand-in for Claude Code starts with: it takes its arguments as
-/// the host gives them -- a new session by id, or the folder's last one
-/// carried on -- and writes where Claude Code would, in the worker's own
-/// state. `$1` is then the opening message, and `w` appends a transcript line.
+/// the host gives them -- headless over stream-json, a new session by id or
+/// one resumed -- and keeps its own records in the worker's state, where
+/// Claude Code would keep its transcript. `next` reads a line from stdin
+/// into `$line`, and a message's text into `$text`, echoing the message back
+/// as taken; `said` and `ended` write a reply and a turn's end on stdout.
 const PRELUDE: &str = r#"#!/bin/sh
 dir="$CLAUDE_CONFIG_DIR/projects/-fake"; mkdir -p "$dir"
-[ "$1" = --dangerously-skip-permissions ] || exit 64
-case "$2" in
-  --session-id) s=$3; shift 3 ;;
-  --continue) s=$(cat "$dir/latest"); shift 2 ;;
+[ "$1 $2 $3 $4 $5 $6 $7 $8 $9" = "-p --input-format stream-json --output-format stream-json --verbose --replay-user-messages --permission-prompt-tool stdio" ] || exit 64
+shift 9
+case "$1" in
+  --session-id) how=new ;;
+  --resume) how=resume ;;
   *) exit 64 ;;
 esac
-printf '%s' "$s" > "$dir/latest"; t="$dir/$s.jsonl"
+s=$2; t="$dir/$s.jsonl"
+printf '%s %s\n' "$how" "$s" >> "$dir/begun"
+printf '%s' "$$" > "$dir/$s.pid"
 pwd > "$dir/$s.cwd"
-w() { printf '%s\n' "$1" >> "$t"; }
+e() { printf '%s\n' "$1"; }
+said() { e "{\"type\":\"assistant\",\"message\":{\"id\":\"m\",\"content\":[{\"type\":\"text\",\"text\":\"$1\"}],\"stop_reason\":null},\"parent_tool_use_id\":null}"; }
+ended() { e '{"type":"result","subtype":"success","is_error":false}'; }
+next() {
+  IFS= read -r line || exit 0
+  touch "$t"
+  text=$(printf '%s' "$line" | sed -n 's/^{"message":{"content":"\(.*\)","role":"user"},.*/\1/p')
+  if [ -n "$text" ]; then printf '%s\n' "$line" | sed 's/^{/{"isReplay":true,/'; fi
+}
 "#;
 
-/// Works one step, then takes what was typed while it worked -- its safe
-/// point -- and goes on; after that it stops and answers each line typed.
+/// Works one step, then takes what was said while it worked -- its next
+/// step -- and goes on; after that it answers each message.
 const FAKE_CLAUDE: &str = r#"
-w "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"$(printf '%s\n' "$1" | tail -n 1)\"}}"
-w '{"type":"assistant","message":{"id":"m0","content":[{"type":"text","text":"step one"}],"stop_reason":"tool_use"}}'
+next
+said "step one"
 sleep 1
-IFS= read -r line
-w "{\"type\":\"attachment\",\"attachment\":{\"type\":\"queued_command\",\"prompt\":\"$line\"}}"
-w '{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"which branch?"}],"stop_reason":"end_turn"}}'
-n=1
-while IFS= read -r line; do
-  n=$((n+1))
-  w "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"$line\"}}"
-  w "{\"type\":\"assistant\",\"message\":{\"id\":\"m$n\",\"content\":[{\"type\":\"text\",\"text\":\"on $line\"}],\"stop_reason\":\"end_turn\"}}"
-done
+next
+said "which branch?"; ended
+while next; do said "on $text"; ended; done
 "#;
 
-/// Answers its opening message and each line typed, and ends each turn.
+/// Answers each message, its opening one too, and ends each turn.
 const CHAT_CLAUDE: &str = r#"
-w "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"$1\"}}"
-w "{\"type\":\"assistant\",\"message\":{\"id\":\"m0\",\"content\":[{\"type\":\"text\",\"text\":\"on $1\"}],\"stop_reason\":\"end_turn\"}}"
-echo "said: on $1"
-while IFS= read -r line; do
-  w "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"$line\"}}"
-  w "{\"type\":\"assistant\",\"message\":{\"id\":\"m1\",\"content\":[{\"type\":\"text\",\"text\":\"on $line\"}],\"stop_reason\":\"end_turn\"}}"
+while next; do
+  [ -n "$text" ] || continue
+  said "on $text"; ended
+  echo "said: on $text" >&2
 done
 "#;
 
-/// A turn that runs until it is stopped: it gives up its turn only on
-/// Escape, and then answers each line typed.
+/// A turn that runs until it is stopped: it gives up its turn only when
+/// interrupted, and then answers each message.
 const BUSY_CLAUDE: &str = r#"
-stty -icanon -echo min 1
-w '{"type":"assistant","message":{"id":"m0","content":[{"type":"text","text":"working"}],"stop_reason":"tool_use"}}'
-[ "$(dd bs=1 count=1 2>/dev/null)" = "$(printf '\033')" ] || exit 65
-w '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}}'
-stty icanon
-n=0
-while IFS= read -r line; do
-  n=$((n+1))
-  w "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"$line\"}}"
-  w "{\"type\":\"assistant\",\"message\":{\"id\":\"m$n\",\"content\":[{\"type\":\"text\",\"text\":\"on $line\"}],\"stop_reason\":\"end_turn\"}}"
-done
+next
+said "working"
+next
+case "$line" in *'"subtype":"interrupt"'*) ;; *) exit 65 ;; esac
+e '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]},"parent_tool_use_id":null}'
+e '{"type":"result","subtype":"error_during_execution","is_error":true}'
+while next; do said "on $text"; ended; done
 "#;
 
-/// As Claude Code starts: what is typed before it is up is thrown away, as a
-/// terminal switched into raw mode discards it.
-const DEAF_CLAUDE: &str = r#"
+/// As Claude Code starts: nothing is read for a while.
+const SLOW_CLAUDE: &str = r#"
 sleep 1
-stty -icanon min 0 time 0; cat > /dev/null; stty icanon
-w '{"type":"user","message":{"role":"user","content":"wait to be told"}}'
-w '{"type":"assistant","message":{"id":"m0","content":[{"type":"text","text":"waiting"}],"stop_reason":"end_turn"}}'
-n=0
-while IFS= read -r line; do
-  n=$((n+1))
-  w "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"$line\"}}"
-  w "{\"type\":\"assistant\",\"message\":{\"id\":\"m$n\",\"content\":[{\"type\":\"text\",\"text\":\"on $line\"}],\"stop_reason\":\"end_turn\"}}"
-done
+while next; do said "on $text"; ended; done
 "#;
 
-/// Ends its turn with a dialog open, as plan approval leaves one, until
-/// `closed` is made beside its transcript; whatever is typed meanwhile is
-/// kept in `answers`. Then it answers each line typed.
-const DIALOG_CLAUDE: &str = r#"
-w '{"type":"assistant","message":{"id":"m0","content":[{"type":"text","text":"plan ready"}],"stop_reason":"end_turn"}}'
-printf ' Would you like to proceed?\n\n ❯ 1. Yes\n   2. No\n'
-stty -icanon -echo min 0 time 0
-until [ -e "$dir/closed" ]; do cat >> "$dir/answers"; sleep 0.1; done
-cat >> "$dir/answers"; stty icanon echo
-printf '\033[2J\033[H────────\n❯ \n────────\n'
-n=0
-while IFS= read -r line; do
-  n=$((n+1))
-  w "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"$line\"}}"
-  w "{\"type\":\"assistant\",\"message\":{\"id\":\"m$n\",\"content\":[{\"type\":\"text\",\"text\":\"on $line\"}],\"stop_reason\":\"end_turn\"}}"
-done
+/// Answers once and then never reads what is said to it.
+const AWAY_CLAUDE: &str = r#"
+next
+said "busy"
+sleep 60
 "#;
 
-/// Never gets far enough to write a transcript.
+/// Answers once, then ends by itself.
+const LEAVING_CLAUDE: &str = r#"
+next
+said "bye"
+sleep 1
+"#;
+
+/// Never reads its opening message, so Claude Code writes no transcript.
 const STUCK_CLAUDE: &str = "sleep 60\n";
 
-/// Answers once and then never reads what is typed to it.
-const AWAY_CLAUDE: &str = r#"
-w '{"type":"assistant","message":{"id":"m0","content":[{"type":"text","text":"busy"}],"stop_reason":"tool_use"}}'
-sleep 60
+/// Asks to run two tools and keeps the host's answers.
+const ASKING_CLAUDE: &str = r#"
+next
+e '{"type":"control_request","request_id":"r1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"}}}'
+next; printf '%s\n' "$line" > "$dir/$s.r1"
+e '{"type":"control_request","request_id":"r2","request":{"subtype":"can_use_tool","tool_name":"WebFetch","input":{"url":"https://x"}}}'
+next; printf '%s\n' "$line" > "$dir/$s.r2"
+said "asked"; ended
+while next; do :; done
 "#;
 
 /// Records Claude Code's part of its environment, then waits.
 const ENV_CLAUDE: &str = r#"
 printf '%s|%s' "$CLAUDE_CONFIG_DIR" "${CLAUDE_SECURESTORAGE_CONFIG_DIR-unset}" > "$dir/$s.env"
-sleep 60
+while next; do :; done
+"#;
+
+/// Records how its opening message ends, then waits.
+const LONG_CLAUDE: &str = r#"
+next
+printf '%s' "$text" | tail -c 7 > "$dir/$s.end"
+while next; do :; done
 "#;
 
 struct Host {
     workers: Workers,
     dir: PathBuf,
-    socket: String,
 }
 
 impl Drop for Host {
     fn drop(&mut self) {
-        self.workers.tmux.kill_server();
         let _ = fs::remove_dir_all(&self.dir);
     }
 }
 
 fn host(name: &str, program: &str) -> Host {
+    host_with(name, program, Permissions::default())
+}
+
+fn host_with(name: &str, program: &str, permissions: Permissions) -> Host {
     let dir = std::env::temp_dir().join(format!("worker-host-{}-{name}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -137,22 +139,37 @@ fn host(name: &str, program: &str) -> Host {
     let fake = dir.join("claude");
     fs::write(&fake, format!("{PRELUDE}{program}")).unwrap();
     fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
-    let socket = format!("worker-host-test-{}-{name}", std::process::id());
     Host {
-        workers: workers_at(&dir, &socket, &fake.to_string_lossy()),
+        workers: Workers::new(
+            Sessions::new(permissions),
+            Claude::new(fake.to_string_lossy(), None),
+            dir.join("workers"),
+        ),
         dir,
-        socket,
     }
 }
 
-/// The host as it would be on starting again: nothing but the folders and
-/// tmux to go on.
-fn workers_at(dir: &Path, socket: &str, program: &str) -> Workers {
+/// The host as it would be on starting again: nothing but the folders to go
+/// on.
+fn workers_at(dir: &Path, program: &str) -> Workers {
     Workers::new(
-        Tmux::new(socket),
+        Sessions::new(Permissions::default()),
         Claude::new(program, None),
         dir.join("workers"),
     )
+}
+
+/// No tmux server answers on this socket.
+fn no_tmux() -> String {
+    format!("worker-host-test-{}-none", std::process::id())
+}
+
+fn wait_for(what: &str, done: impl Fn() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !done() {
+        assert!(Instant::now() < deadline, "{what}");
+        thread::sleep(Duration::from_millis(50));
+    }
 }
 
 impl Host {
@@ -164,31 +181,54 @@ impl Host {
         self.workers.create(id, name).unwrap();
     }
 
-    /// The stand-in's own record of `session`, once it has written it.
-    fn fake_file(&self, name: &str, session: &str, ext: &str) -> String {
-        let file = self.home(name).claude().join(format!(
-            "projects/-fake/{}.{ext}",
-            claude::session_id(session)
-        ));
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !file.exists() {
-            assert!(
-                Instant::now() < deadline,
-                "never started: {}",
-                file.display()
-            );
-            thread::sleep(Duration::from_millis(50));
-        }
+    fn restarted(&self) -> Workers {
+        workers_at(&self.dir, &self.dir.join("claude").to_string_lossy())
+    }
+
+    fn fake(&self, name: &str) -> PathBuf {
+        self.home(name).claude().join("projects/-fake")
+    }
+
+    /// The stand-in's own record of the Claude Code session `claude`, once it
+    /// has written it.
+    fn fake_file(&self, name: &str, claude: &str, ext: &str) -> String {
+        let file = self.fake(name).join(format!("{claude}.{ext}"));
+        wait_for(&format!("never written: {}", file.display()), || {
+            file.exists()
+        });
         thread::sleep(Duration::from_millis(100));
         fs::read_to_string(file).unwrap().trim().to_string()
+    }
+
+    /// How each Claude Code session was begun, in order, once `n` have.
+    fn begun(&self, name: &str, n: usize) -> Vec<String> {
+        let read = || -> Vec<String> {
+            fs::read_to_string(self.fake(name).join("begun"))
+                .unwrap_or_default()
+                .lines()
+                .map(String::from)
+                .collect()
+        };
+        wait_for(&format!("{n} never begun: {:?}", read()), || {
+            read().len() >= n
+        });
+        thread::sleep(Duration::from_millis(100));
+        read()
+    }
+
+    /// Ends the stand-in for `claude` as the machine going down would, with
+    /// the host none the wiser.
+    fn kill(&self, name: &str, claude: &str) {
+        let pid: u32 = self.fake_file(name, claude, "pid").parse().unwrap();
+        sys::signal_group(pid, sys::SIGKILL);
+        thread::sleep(Duration::from_millis(200));
     }
 
     fn state(&self, name: &str, waiting: bool) -> (State, Option<String>) {
         let home = self.home(name);
         let id = home.record().unwrap().id;
         let live = self.workers.live();
-        self.workers
-            .state(&home, live.get(&id).map(String::as_str), waiting)
+        self.workers.state(&home, live.contains_key(&id), waiting)
     }
 }
 
@@ -252,17 +292,6 @@ fn command(json: &str) -> Command {
     serde_json::from_str(json).unwrap()
 }
 
-fn tmux_names(socket: &str) -> Vec<String> {
-    let out = Process::new("tmux")
-        .args(["-L", socket, "list-sessions", "-F", "#{session_name}"])
-        .output()
-        .unwrap();
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .map(String::from)
-        .collect()
-}
-
 #[test]
 fn a_worker_is_spoken_to_while_it_works_and_answered_in_the_same_session() {
     let host = host("session", FAKE_CLAUDE);
@@ -286,7 +315,7 @@ fn a_worker_is_spoken_to_while_it_works_and_answered_in_the_same_session() {
         (State::Working, Some("s1".into()))
     );
 
-    workers.say("w1", "use the release branch").unwrap();
+    workers.say("w1", "use the release branch", "u1").unwrap();
     read_until(workers, &home, &mut seen, &mut cursor, |s| {
         s.contains(&said("which branch?"))
     });
@@ -301,13 +330,14 @@ fn a_worker_is_spoken_to_while_it_works_and_answered_in_the_same_session() {
         "the message reached it before it stopped"
     );
 
-    // Answering continues the session: same tmux session, same transcript.
-    workers.say("w1", "main").unwrap();
+    // Answering continues the session: the same process, the same events.
+    workers.say("w1", "main", "u2").unwrap();
     read_until(workers, &home, &mut seen, &mut cursor, |s| {
         s.contains(&said("on main"))
     });
     assert_eq!(seen[4..], [told("main"), said("on main")]);
     assert_eq!(workers.live().len(), 1);
+    assert_eq!(host.begun("ana", 1).len(), 1);
 }
 
 #[test]
@@ -321,9 +351,17 @@ fn create_and_start_commands_run_a_worker_in_its_own_folder_and_session() {
         let report = commands::take(&command(json), &host.workers, &mut deliveries).unwrap();
         assert!(report.ok, "{report:?}");
     }
-    assert_eq!(tmux_names(&host.socket), ["worker-ana"]);
+    assert_eq!(
+        host.workers.live(),
+        [("w1".to_string(), "s1".to_string())].into()
+    );
     let folder = host.dir.join("workers/ana");
-    assert_eq!(host.fake_file("ana", "s1", "cwd"), folder.to_string_lossy());
+    let claude = claude::uuid("s1");
+    assert_eq!(
+        host.fake_file("ana", &claude, "cwd"),
+        folder.to_string_lossy()
+    );
+    assert_eq!(host.begun("ana", 1), [format!("new {claude}")]);
     let home = host.home("ana");
     let (mut seen, mut cursor) = (vec![], Cursor::default());
     read_until(&host.workers, &home, &mut seen, &mut cursor, |s| {
@@ -344,7 +382,7 @@ const CONTEXT_CLAUDE: &str = r#"
 printf '%s' "$DS_URL" > "$dir/$s.env"
 cat "$CLAUDE_CONFIG_DIR/skills/tracker/SKILL.md" > "$dir/$s.skill" 2>/dev/null || echo none > "$dir/$s.skill"
 tail -n 1 "$CLAUDE_CONFIG_DIR/CLAUDE.md" > "$dir/$s.rules"
-while IFS= read -r line; do :; done
+while next; do :; done
 "#;
 
 #[test]
@@ -369,10 +407,11 @@ fn a_start_writes_its_context_before_claude_code_starts_and_sets_its_variables()
         &mut deliveries,
     );
     take(&start("s1", 1, "Use wt."), &mut deliveries);
-    assert_eq!(host.fake_file("ana", "s1", "env"), "https://ds.example");
-    assert_eq!(host.fake_file("ana", "s1", "skill"), "Use wt.");
+    let s1 = claude::uuid("s1");
+    assert_eq!(host.fake_file("ana", &s1, "env"), "https://ds.example");
+    assert_eq!(host.fake_file("ana", &s1, "skill"), "Use wt.");
     assert_eq!(
-        host.fake_file("ana", "s1", "rules"),
+        host.fake_file("ana", &s1, "rules"),
         "Give feedback before you finish."
     );
     let rules = fs::read_to_string(host.home("ana").claude().join("CLAUDE.md")).unwrap();
@@ -383,7 +422,10 @@ fn a_start_writes_its_context_before_claude_code_starts_and_sets_its_variables()
 
     host.workers.stop("w1").unwrap();
     take(&start("s2", 2, "Use wt, then docs."), &mut deliveries);
-    assert_eq!(host.fake_file("ana", "s2", "skill"), "Use wt, then docs.");
+    assert_eq!(
+        host.fake_file("ana", &claude::uuid("s2"), "skill"),
+        "Use wt, then docs."
+    );
 }
 
 #[test]
@@ -409,7 +451,7 @@ fn a_start_writes_its_documents_after_its_context_and_their_rules_after_its_own(
         &mut deliveries,
     );
     assert_eq!(
-        host.fake_file("ana", "s1", "rules"),
+        host.fake_file("ana", &claude::uuid("s1"), "rules"),
         "Approve or reject the PR."
     );
     let state = host.home("ana").claude();
@@ -434,10 +476,12 @@ fn a_start_writes_its_documents_after_its_context_and_their_rules_after_its_own(
     assert!(manifest.contains("\"approval\""), "{manifest}");
 }
 
-/// Records the tokens and the address it was started with, then waits.
+/// Records the tokens, the address and the arguments it was started with,
+/// then waits.
 const SECRET_CLAUDE: &str = r#"
 printf '%s|%s' "$WT_TOKEN" "$WT_URL" > "$dir/$s.env"
-while IFS= read -r line; do :; done
+ps -o args= -p $$ > "$dir/$s.args"
+while next; do :; done
 "#;
 
 #[test]
@@ -459,28 +503,29 @@ fn a_start_gives_its_session_tokens_from_a_file_only_the_host_can_read_and_never
         "secrets":{"WT_TOKEN":"it's $ecret `x`"}}"#,
         &mut deliveries,
     );
+    let s1 = claude::uuid("s1");
     assert_eq!(
-        host.fake_file("ana", "s1", "env"),
+        host.fake_file("ana", &s1, "env"),
         "it's $ecret `x`|https://wt.example"
+    );
+    let args = host.fake_file("ana", &s1, "args");
+    assert!(
+        !args.contains("$ecret"),
+        "a token on its command line: {args}"
     );
     let file = host.home("ana").credentials();
     assert_eq!(
         fs::metadata(&file).unwrap().permissions().mode() & 0o777,
         0o600
     );
-    let shown = Process::new("tmux")
-        .args(["-L", &host.socket, "show-environment", "-t", "worker-ana"])
-        .output()
-        .unwrap();
-    let shown = String::from_utf8_lossy(&shown.stdout);
-    assert!(shown.contains("WT_URL=https://wt.example"));
-    let names: Vec<&str> = shown
-        .lines()
-        .map(|l| l.split('=').next().unwrap_or(l))
-        .collect();
-    assert!(
-        !shown.contains("WT_TOKEN") && !shown.contains("$ecret"),
-        "a token among {names:?}"
+    assert_eq!(
+        context::written_credentials(&file),
+        [
+            ("WT_TOKEN".to_string(), "it's $ecret `x`".to_string()),
+            ("WT_URL".to_string(), "https://wt.example".to_string()),
+        ]
+        .into(),
+        "kept for a session resumed after the host restarts"
     );
 
     host.workers.stop("w1").unwrap();
@@ -489,6 +534,36 @@ fn a_start_gives_its_session_tokens_from_a_file_only_the_host_can_read_and_never
         &mut deliveries,
     );
     assert!(!file.exists(), "a start without tokens leaves none behind");
+}
+
+#[test]
+fn a_permission_asked_for_is_answered_by_the_hosts_rule() {
+    let permissions = Permissions {
+        allow: vec!["*".into()],
+        deny: vec!["WebFetch".into()],
+    };
+    let host = host_with("asking", ASKING_CLAUDE, permissions);
+    host.create("w1", "ana");
+    host.workers.start("w1", "s1", false, None).unwrap();
+    let s1 = claude::uuid("s1");
+    let answer = |r: &str| -> serde_json::Value {
+        serde_json::from_str(&host.fake_file("ana", &s1, r)).unwrap()
+    };
+    let (allowed, denied) = (answer("r1"), answer("r2"));
+    assert_eq!(allowed["type"], "control_response");
+    assert_eq!(allowed["response"]["request_id"], "r1");
+    assert_eq!(
+        allowed["response"]["response"],
+        serde_json::json!({"behavior":"allow","updatedInput":{"command":"ls"}})
+    );
+    assert_eq!(denied["response"]["request_id"], "r2");
+    assert_eq!(denied["response"]["response"]["behavior"], "deny");
+    let home = host.home("ana");
+    let (mut seen, mut cursor) = (vec![], Cursor::default());
+    read_until(&host.workers, &home, &mut seen, &mut cursor, |s| {
+        s.contains(&said("asked"))
+    });
+    assert!(cursor.waiting);
 }
 
 #[test]
@@ -517,17 +592,19 @@ fn a_worker_reports_idle_working_waiting_interrupted_and_idle_again() {
         (State::Waiting, Some("s1".into()))
     );
 
-    // The machine goes down, or Claude Code dies: no stop was asked for.
-    workers.tmux.kill_server();
+    // Claude Code dies under the host's eyes: no stop was asked for.
+    host.kill("ana", &claude::uuid("s1"));
     assert_eq!(
         host.state("ana", cursor.waiting),
         (State::Interrupted, Some("s1".into()))
     );
-    let restarted = workers_at(&host.dir, &host.socket, "/nonexistent");
+    let restarted = host.restarted();
     assert_eq!(
-        restarted.reconcile(),
-        [("ana".to_string(), State::Interrupted)]
+        restarted.reconcile(&no_tmux()),
+        [("ana".to_string(), State::Interrupted)],
+        "a session that ended by itself is not resumed"
     );
+    assert!(restarted.live().is_empty());
 
     // Stopped, it is idle, and a start of the same session is not run again.
     workers.stop("w1").unwrap();
@@ -540,7 +617,185 @@ fn a_worker_reports_idle_working_waiting_interrupted_and_idle_again() {
 }
 
 #[test]
-fn a_session_carried_on_writes_on_in_the_same_transcript_under_its_own_id() {
+fn a_host_that_restarts_resumes_each_live_session_and_does_not_start_it_again() {
+    let host = host("again", CHAT_CLAUDE);
+    host.create("w1", "ana");
+    host.create("w2", "bo");
+    host.workers
+        .start("w1", "s1", false, Some("hello"))
+        .unwrap();
+    host.workers.start("w2", "s2", false, Some("hi")).unwrap();
+    let home = host.home("ana");
+    let mut cursor = Cursor::default();
+    lines_until(&host.workers, &home, &mut cursor, "on hello");
+    host.workers.stop("w2").unwrap();
+
+    // The host goes, and its sessions with it.
+    let claude = claude::uuid("s1");
+    host.kill("ana", &claude);
+    let restarted = host.restarted();
+    let mut states = restarted.reconcile(&no_tmux());
+    states.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        states,
+        [
+            ("ana".to_string(), State::Working),
+            ("bo".to_string(), State::Idle)
+        ]
+    );
+    assert_eq!(
+        host.begun("ana", 2),
+        [format!("new {claude}"), format!("resume {claude}")]
+    );
+    assert_eq!(
+        host.begun("bo", 1).len(),
+        1,
+        "a stopped session stays stopped"
+    );
+    let lines = lines_until(&restarted, &home, &mut cursor, &format!("on {RESUMED}"));
+    assert_eq!(
+        lines
+            .iter()
+            .map(|l| (l.seq, l.session_id.as_str(), l.text.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (2, "s1", RESUMED),
+            (3, "s1", format!("on {RESUMED}").as_str())
+        ],
+        "told it was resumed, and numbered on"
+    );
+    assert!(cursor.waiting);
+
+    restarted.start("w1", "s1", false, Some("hello")).unwrap();
+    assert_eq!(restarted.live().len(), 1);
+    let err = restarted.start("w1", "s9", true, None).unwrap_err();
+    assert!(err.contains("already has session s1 running"), "{err}");
+    assert_eq!(home.sessions().len(), 1);
+}
+
+#[test]
+fn a_session_cut_off_before_claude_code_wrote_anything_is_begun_again() {
+    let host = host("cut-off", STUCK_CLAUDE);
+    host.create("w1", "ana");
+    host.workers
+        .start("w1", "s1", false, Some("hello"))
+        .unwrap();
+    let claude = claude::uuid("s1");
+    host.kill("ana", &claude);
+    let restarted = host.restarted();
+    assert_eq!(
+        restarted.reconcile(&no_tmux()),
+        [("ana".to_string(), State::Working)]
+    );
+    assert_eq!(
+        host.begun("ana", 2),
+        [format!("new {claude}"), format!("new {claude}")]
+    );
+}
+
+/// A worker whose session an older release began in tmux, as it left it:
+/// one session, and Claude Code's own transcript of it with one turn.
+fn left_in_tmux(host: &Host) -> (Home, String, u64) {
+    host.create("w1", "ana");
+    let home = host.home("ana");
+    let claude = claude::uuid("s1");
+    fs::write(
+        home.dir.join("sessions.jsonl"),
+        format!("{{\"sessionId\":\"s1\",\"claude\":\"{claude}\",\"from\":0}}\n"),
+    )
+    .unwrap();
+    let transcript = host.fake("ana").join(format!("{claude}.jsonl"));
+    fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    let turn = concat!(
+        r#"{"type":"user","message":{"role":"user","content":"fix the build"}}"#,
+        "\n",
+        r#"{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"fixed"}],"stop_reason":"end_turn"}}"#,
+        "\n",
+    );
+    fs::write(&transcript, turn).unwrap();
+    (home, claude, turn.len() as u64)
+}
+
+/// Writes on in Claude Code's transcript, as a resumed Claude Code does,
+/// then answers each message.
+const RESUMING_CLAUDE: &str = r#"
+[ "$how" = resume ] && printf '%s\n' '{"type":"user","message":{"role":"user","content":"written on in the transcript"}}' >> "$t"
+printf '%s|%s' "$WS_URL" "$WT_TOKEN" > "$dir/$s.env"
+while next; do said "on $text"; ended; done
+"#;
+
+#[test]
+fn a_session_left_in_tmux_is_resumed_headless_and_read_on_with_no_line_twice() {
+    let host = host("tmux", RESUMING_CLAUDE);
+    let (home, claude, end) = left_in_tmux(&host);
+    let restarted = host.restarted();
+    assert_eq!(
+        restarted.reconcile(&no_tmux()),
+        [("ana".to_string(), State::Working)]
+    );
+    assert_eq!(host.begun("ana", 1), [format!("resume {claude}")]);
+    let sessions = home.sessions();
+    assert_eq!(sessions.len(), 2, "begun again, headless, under its own id");
+    assert_eq!(
+        (
+            sessions[1].session_id.as_str(),
+            sessions[1].stream,
+            sessions[1].from
+        ),
+        ("s1", true, end)
+    );
+    let mut cursor = Cursor::default();
+    let lines = lines_until(&restarted, &home, &mut cursor, &format!("on {RESUMED}"));
+    assert_eq!(
+        lines
+            .iter()
+            .map(|l| (l.seq, l.session_id.as_str(), l.text.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (0, "s1", "fix the build"),
+            (1, "s1", "fixed"),
+            (2, "s1", RESUMED),
+            (3, "s1", format!("on {RESUMED}").as_str()),
+        ],
+        "its transcript up to where it was carried on, then its events"
+    );
+    assert!(
+        fs::read_to_string(host.fake("ana").join(format!("{claude}.jsonl")))
+            .unwrap()
+            .contains("written on in the transcript"),
+        "Claude Code wrote on in its transcript, which is not read again"
+    );
+    let again = restarted.read(&home, Cursor::default(), 1 << 16).unwrap();
+    assert_eq!(again.lines.len(), 4);
+    assert_eq!(again.next, cursor);
+
+    restarted.stop("w1").unwrap();
+    assert!(home.sessions().iter().all(|s| s.stopped));
+    assert_eq!(
+        restarted.reconcile(&no_tmux()),
+        [("ana".into(), State::Idle)]
+    );
+}
+
+#[test]
+fn a_session_taken_over_from_tmux_keeps_the_variables_tmux_held_and_its_tokens() {
+    let host = host("tmux-env", RESUMING_CLAUDE);
+    let (home, claude, _) = left_in_tmux(&host);
+    let tokens = [("WT_TOKEN".to_string(), "t0ken".to_string())].into();
+    context::credentials(&home.credentials(), Some(&tokens)).unwrap();
+    let record = home.record().unwrap();
+    let carried = vec![("WS_URL".to_string(), "https://ws.example".to_string())];
+    host.workers
+        .resume(&home, &record, &home.latest().unwrap(), Some(&carried))
+        .unwrap();
+    assert_eq!(
+        host.fake_file("ana", &claude, "env"),
+        "https://ws.example|t0ken"
+    );
+}
+
+#[test]
+fn a_session_carried_on_writes_on_in_the_same_conversation_under_its_own_id() {
     let host = host("resume", CHAT_CLAUDE);
     let workers = &host.workers;
     host.create("w1", "ana");
@@ -548,7 +803,7 @@ fn a_session_carried_on_writes_on_in_the_same_transcript_under_its_own_id() {
     workers.start("w1", "s1", false, Some("one")).unwrap();
     let mut cursor = Cursor::default();
     lines_until(workers, &home, &mut cursor, "on one");
-    workers.tmux.kill_server();
+    workers.stop("w1").unwrap();
 
     workers.start("w1", "s2", true, Some("two")).unwrap();
     let lines = lines_until(workers, &home, &mut cursor, "on two");
@@ -560,13 +815,14 @@ fn a_session_carried_on_writes_on_in_the_same_transcript_under_its_own_id() {
         [(2, "s2", "two"), (3, "s2", "on two")],
         "numbered on from the last session, and its own"
     );
-    let transcripts = fs::read_dir(home.claude().join("projects/-fake"))
-        .unwrap()
-        .filter(|e| e.as_ref().unwrap().path().extension() == Some("jsonl".as_ref()))
-        .count();
-    assert_eq!(transcripts, 1, "one conversation, carried on");
+    let claude = claude::uuid("s1");
+    assert_eq!(
+        host.begun("ana", 2),
+        [format!("new {claude}"), format!("resume {claude}")],
+        "one conversation, carried on"
+    );
 
-    // A new conversation is a new transcript, numbered on all the same.
+    // A new conversation is a new Claude Code session, numbered on all the same.
     workers.stop("w1").unwrap();
     workers.start("w1", "s3", false, Some("three")).unwrap();
     let lines = lines_until(workers, &home, &mut cursor, "on three");
@@ -603,7 +859,7 @@ fn a_resume_with_nothing_said_is_told_to_carry_on() {
     let host = host("carry-on", CHAT_CLAUDE);
     host.create("w1", "ana");
     host.workers.start("w1", "s1", false, Some("one")).unwrap();
-    host.fake_file("ana", "s1", "cwd");
+    host.fake_file("ana", &claude::uuid("s1"), "cwd");
     host.workers.stop("w1").unwrap();
     host.workers.start("w1", "s2", true, None).unwrap();
     let home = host.home("ana");
@@ -624,59 +880,30 @@ fn an_interrupt_stops_the_turn_and_the_session_goes_on() {
     read_until(workers, &home, &mut seen, &mut cursor, |s| {
         s.contains(&said("working"))
     });
+    assert!(!cursor.waiting);
 
-    workers.interrupt("w1", Some("try the other way")).unwrap();
+    workers
+        .interrupt("w1", "c1", Some("try the other way"))
+        .unwrap();
     read_until(workers, &home, &mut seen, &mut cursor, |s| {
         s.contains(&said("on try the other way"))
     });
     assert_eq!(
         seen,
         [
+            told(NOTHING_YET),
             said("working"),
             told("[Request interrupted by user]"),
             told("try the other way"),
             said("on try the other way"),
         ]
     );
+    assert!(cursor.waiting);
     assert_eq!(
         workers.live().len(),
         1,
         "the session outlives the interrupt"
     );
-}
-
-#[test]
-fn a_message_clears_what_was_left_in_the_input_first() {
-    // Claude Code puts an interrupted prompt back in its input; the terminal
-    // stand-in holds typed but unsent words the same way.
-    let host = host("leftover", CHAT_CLAUDE);
-    let workers = &host.workers;
-    host.create("w1", "ana");
-    workers.start("w1", "s1", false, Some("begin")).unwrap();
-    let home = host.home("ana");
-    let (mut seen, mut cursor) = (vec![], Cursor::default());
-    read_until(workers, &home, &mut seen, &mut cursor, |s| {
-        s.contains(&said("on begin"))
-    });
-
-    let session = workers.live().remove("w1").unwrap();
-    Process::new("tmux")
-        .args([
-            "-L",
-            &host.socket,
-            "send-keys",
-            "-t",
-            &session,
-            "-l",
-            "stale words ",
-        ])
-        .status()
-        .unwrap();
-    workers.say("w1", "next").unwrap();
-    read_until(workers, &home, &mut seen, &mut cursor, |s| {
-        s.contains(&said("on next"))
-    });
-    assert!(!seen.contains(&told("stale words next")), "{seen:?}");
 }
 
 /// Settles `deliveries` until nothing is held, and says how each ended.
@@ -692,8 +919,8 @@ fn settle_all(workers: &Workers, deliveries: &mut Deliveries) -> Vec<(String, Re
 }
 
 #[test]
-fn a_message_taken_with_its_workers_start_waits_until_it_listens() {
-    let host = host("deaf", DEAF_CLAUDE);
+fn a_message_taken_with_its_workers_start_is_done_once_claude_code_takes_it() {
+    let host = host("slow", SLOW_CLAUDE);
     let workers = &host.workers;
     host.create("w1", "ana");
     let mut deliveries = Deliveries::new(PATIENCE);
@@ -705,12 +932,12 @@ fn a_message_taken_with_its_workers_start_waits_until_it_listens() {
     assert_eq!(
         commands::take(&message, workers, &mut deliveries),
         None,
-        "not reported while it cannot yet be heard"
+        "not reported until Claude Code has taken it"
     );
     assert_eq!(
         commands::take(&message, workers, &mut deliveries),
         None,
-        "sent again by the service, it is not typed twice"
+        "sent again by the service, it is not written twice"
     );
 
     assert_eq!(
@@ -726,7 +953,7 @@ fn a_message_taken_with_its_workers_start_waits_until_it_listens() {
 }
 
 #[test]
-fn a_message_is_done_only_once_it_is_in_the_transcript() {
+fn a_message_is_done_only_once_claude_code_echoes_it() {
     let host = host("delivered", FAKE_CLAUDE);
     let workers = &host.workers;
     host.create("w1", "ana");
@@ -739,36 +966,24 @@ fn a_message_is_done_only_once_it_is_in_the_transcript() {
         s.contains(&said("step one"))
     });
 
-    // Typed at once, but taken only at its next step, a second from now.
+    // Written at once, but taken only at its next step, a second from now.
     let mut deliveries = Deliveries::new(PATIENCE);
     assert_eq!(deliveries.hold(workers, "c1", "w1", "use main"), None);
     assert_eq!(deliveries.settle(workers), []);
-    let end = workers.end("w1");
-    assert!(!workers.told_since("w1", 0, "use main"), "not there yet");
+    assert!(!workers.echoed("w1", &claude::uuid("c1")), "not taken yet");
 
     assert_eq!(
         settle_all(workers, &mut deliveries),
         [("c1".to_string(), Ok(()))]
     );
-    assert!(
-        workers.told_since("w1", end, "use main"),
-        "in the transcript when it was reported"
-    );
+    read_until(workers, &home, &mut seen, &mut cursor, |s| {
+        s.contains(&told("use main"))
+    });
 }
 
 #[test]
 fn a_message_that_cannot_be_delivered_in_time_fails_with_why() {
     let patience = Duration::from_millis(300);
-
-    let stuck = host("stuck", STUCK_CLAUDE);
-    stuck.create("w1", "ana");
-    stuck.workers.start("w1", "s1", false, None).unwrap();
-    let mut deliveries = Deliveries::new(patience);
-    assert_eq!(deliveries.hold(&stuck.workers, "c1", "w1", "hello"), None);
-    let [(_, Err(why))] = &settle_all(&stuck.workers, &mut deliveries)[..] else {
-        panic!("expected one failure")
-    };
-    assert!(why.contains("never typed"), "{why}");
 
     let away = host("away", AWAY_CLAUDE);
     away.create("w1", "ana");
@@ -776,111 +991,36 @@ fn a_message_that_cannot_be_delivered_in_time_fails_with_why() {
     let home = away.home("ana");
     let (mut seen, mut cursor) = (vec![], Cursor::default());
     read_until(&away.workers, &home, &mut seen, &mut cursor, |s| {
-        !s.is_empty()
+        s.contains(&said("busy"))
     });
     let mut deliveries = Deliveries::new(patience);
     assert_eq!(deliveries.hold(&away.workers, "c1", "w1", "hello"), None);
     let [(_, Err(why))] = &settle_all(&away.workers, &mut deliveries)[..] else {
         panic!("expected one failure")
     };
-    assert!(why.contains("not in its transcript"), "{why}");
-}
+    assert!(why.contains("not taken after"), "{why}");
 
-#[test]
-fn a_message_waits_while_a_dialog_is_open_and_is_typed_once_it_closes() {
-    let host = host("dialog", DIALOG_CLAUDE);
-    let workers = &host.workers;
-    host.create("w1", "ana");
-    workers.start("w1", "s1", false, None).unwrap();
-    let home = host.home("ana");
+    let leaving = host("leaving", LEAVING_CLAUDE);
+    leaving.create("w1", "ana");
+    leaving.workers.start("w1", "s1", false, None).unwrap();
+    let home = leaving.home("ana");
     let (mut seen, mut cursor) = (vec![], Cursor::default());
-    read_until(workers, &home, &mut seen, &mut cursor, |s| {
-        s.contains(&said("plan ready"))
+    read_until(&leaving.workers, &home, &mut seen, &mut cursor, |s| {
+        s.contains(&said("bye"))
     });
-    let fake = home.claude().join("projects/-fake");
-    let session = workers.running("w1").unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !claude::dialog(&workers.tmux.screen(&session).unwrap()) {
-        assert!(Instant::now() < deadline, "the dialog never opened");
-        thread::sleep(Duration::from_millis(50));
-    }
-
     let mut deliveries = Deliveries::new(PATIENCE);
-    assert_eq!(deliveries.hold(workers, "c1", "w1", "hello"), None);
-    for _ in 0..10 {
-        assert_eq!(deliveries.settle(workers), []);
-        thread::sleep(Duration::from_millis(100));
-    }
-    let answers = fs::read_to_string(fake.join("answers")).unwrap_or_default();
-    assert_eq!(answers, "", "nothing typed into the dialog");
-
-    fs::write(fake.join("closed"), "").unwrap();
-    assert_eq!(
-        settle_all(workers, &mut deliveries),
-        [("c1".to_string(), Ok(()))]
-    );
-    read_until(workers, &home, &mut seen, &mut cursor, |s| {
-        s.contains(&said("on hello"))
-    });
-    assert_eq!(seen.iter().filter(|e| **e == told("hello")).count(), 1);
-    assert_eq!(fs::read_to_string(fake.join("answers")).unwrap(), "");
-}
-
-#[test]
-fn a_message_kept_back_by_a_dialog_that_stays_open_fails_with_why() {
-    let host = host("asking", DIALOG_CLAUDE);
-    let workers = &host.workers;
-    host.create("w1", "ana");
-    workers.start("w1", "s1", false, None).unwrap();
-    let home = host.home("ana");
-    let (mut seen, mut cursor) = (vec![], Cursor::default());
-    read_until(workers, &home, &mut seen, &mut cursor, |s| {
-        s.contains(&said("plan ready"))
-    });
-    let session = workers.running("w1").unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !claude::dialog(&workers.tmux.screen(&session).unwrap()) {
-        assert!(Instant::now() < deadline, "the dialog never opened");
-        thread::sleep(Duration::from_millis(50));
-    }
-
-    let mut deliveries = Deliveries::new(Duration::from_millis(300));
-    assert_eq!(deliveries.hold(workers, "c1", "w1", "hello"), None);
-    let [(_, Err(why))] = &settle_all(workers, &mut deliveries)[..] else {
+    assert_eq!(deliveries.hold(&leaving.workers, "c1", "w1", "hello"), None);
+    let [(_, Err(why))] = &settle_all(&leaving.workers, &mut deliveries)[..] else {
         panic!("expected one failure")
     };
-    assert!(why.contains("a dialog was open"), "{why}");
-    let answers = home.claude().join("projects/-fake/answers");
-    assert_eq!(fs::read_to_string(answers).unwrap_or_default(), "");
-}
-
-#[test]
-fn a_host_that_restarts_picks_up_live_sessions_and_does_not_start_them_again() {
-    let host = host("again", FAKE_CLAUDE);
-    host.create("w1", "ana");
-    host.workers
-        .start("w1", "s1", false, Some("fix the build"))
-        .unwrap();
-    let restarted = workers_at(
-        &host.dir,
-        &host.socket,
-        &host.dir.join("claude").to_string_lossy(),
-    );
-    assert_eq!(restarted.reconcile(), [("ana".to_string(), State::Working)]);
-    restarted
-        .start("w1", "s1", false, Some("fix the build"))
-        .unwrap();
-    assert_eq!(restarted.live().len(), 1);
-    let err = restarted.start("w1", "s2", true, None).unwrap_err();
-    assert!(err.contains("already has session s1 running"), "{err}");
-    assert_eq!(host.home("ana").sessions().len(), 1);
+    assert!(why.contains("ended before it took the message"), "{why}");
 }
 
 #[test]
 fn a_start_that_cannot_run_says_why_and_can_be_tried_again() {
     let host = host("missing", FAKE_CLAUDE);
     host.create("w1", "ana");
-    let workers = workers_at(&host.dir, &host.socket, "/nonexistent/claude");
+    let workers = workers_at(&host.dir, "/nonexistent/claude");
     let err = workers.start("w1", "s1", false, None).unwrap_err();
     assert!(
         err.contains("/nonexistent/claude is not installed"),
@@ -897,8 +1037,8 @@ fn speaking_to_a_worker_with_no_session_says_so() {
     let host = host("absent", FAKE_CLAUDE);
     host.create("w1", "ana");
     for err in [
-        host.workers.interrupt("w1", None).unwrap_err(),
-        host.workers.say("w1", "hello").unwrap_err(),
+        host.workers.interrupt("w1", "c1", None).unwrap_err(),
+        host.workers.say("w1", "hello", "u1").unwrap_err(),
     ] {
         assert!(err.contains("worker w1 has no live session"), "{err}");
     }
@@ -907,72 +1047,49 @@ fn speaking_to_a_worker_with_no_session_says_so() {
 }
 
 #[test]
-fn a_session_logs_everything_its_terminal_shows() {
+fn a_session_keeps_what_it_says_on_stdout_and_stderr() {
     let host = host("logs", CHAT_CLAUDE);
     host.create("w1", "ana");
     host.workers
         .start("w1", "s1", false, Some("hello"))
         .unwrap();
-    let log = host.home("ana").log("s1");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !fs::read_to_string(&log).is_ok_and(|t| t.contains("said: on hello")) {
-        assert!(
-            Instant::now() < deadline,
-            "nothing logged at {}",
-            log.display()
-        );
-        thread::sleep(Duration::from_millis(50));
-    }
-}
-
-#[test]
-fn a_host_that_restarts_keeps_logging_each_live_session() {
-    let host = host("relog", CHAT_CLAUDE);
-    host.create("w1", "ana");
-    host.workers
-        .start("w1", "s1", false, Some("hello"))
-        .unwrap();
-    let log = host.home("ana").log("s1");
-    let logged = |text: &str| {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !fs::read_to_string(&log).is_ok_and(|t| t.contains(text)) {
-            assert!(
-                Instant::now() < deadline,
-                "{text:?} not logged at {}",
-                log.display()
-            );
-            thread::sleep(Duration::from_millis(50));
-        }
-    };
-    logged("said: on hello");
-    let restarted = workers_at(
-        &host.dir,
-        &host.socket,
-        &host.dir.join("claude").to_string_lossy(),
+    let home = host.home("ana");
+    let (events, errors) = (home.events("s1"), home.errors("s1"));
+    wait_for("nothing on stderr kept", || {
+        fs::read_to_string(&errors).is_ok_and(|t| t.contains("said: on hello"))
+    });
+    let kept = fs::read_to_string(&events).unwrap();
+    let kept: Vec<serde_json::Value> = kept
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(kept.len(), 3, "{kept:?}");
+    assert_eq!(kept[0]["isReplay"], true);
+    assert_eq!(kept[2]["type"], "result");
+    assert!(
+        kept.iter()
+            .all(|e| e["timestamp"].as_str().is_some_and(instant)),
+        "each kept with when it came"
     );
-    restarted.reconcile();
-    let tmux = restarted.live()["w1"].clone();
-    restarted.tmux.type_in(&tmux, "after the restart").unwrap();
-    logged("after the restart");
 }
 
-/// A transcript for a session begun for worker `ana`, made if need be.
-fn transcript(host: &Host, session: &str) -> PathBuf {
+/// A headless session begun for worker `ana`, made if need be, and where
+/// its events are kept.
+fn events(host: &Host, session: &str) -> PathBuf {
     let home = host.home("ana");
     if home.record().is_none() {
         host.create("w1", "ana");
     }
-    let claude = claude::session_id(session);
     home.begin(&Session {
         session_id: session.into(),
-        claude: claude.clone(),
+        claude: claude::uuid(session),
         from: 0,
+        stream: true,
         stopped: false,
+        ended: false,
     })
     .unwrap();
-    let dir = home.claude().join("projects/-x");
-    fs::create_dir_all(&dir).unwrap();
-    dir.join(format!("{claude}.jsonl"))
+    home.events(session)
 }
 
 fn append(path: &PathBuf, bytes: &[u8]) {
@@ -987,13 +1104,52 @@ fn append(path: &PathBuf, bytes: &[u8]) {
 }
 
 #[test]
+fn a_transcript_carried_on_headless_is_read_up_to_where_it_was_then_its_events() {
+    let host = host("carried", FAKE_CLAUDE);
+    let (home, claude, end) = left_in_tmux(&host);
+    let transcript = host.fake("ana").join(format!("{claude}.jsonl"));
+    home.begin(&Session {
+        session_id: "s1".into(),
+        claude: claude.clone(),
+        from: end,
+        stream: true,
+        stopped: false,
+        ended: false,
+    })
+    .unwrap();
+    append(
+        &transcript,
+        b"{\"type\":\"user\",\"message\":{\"content\":\"twice\"}}\n",
+    );
+    append(
+        &home.events("s1"),
+        b"{\"type\":\"user\",\"message\":{\"content\":\"twice\"},\"isReplay\":true}\n",
+    );
+    let batch = host
+        .workers
+        .read(&home, Cursor::default(), 1 << 16)
+        .unwrap();
+    assert_eq!(
+        batch
+            .lines
+            .iter()
+            .map(|l| (l.seq, l.text.as_str()))
+            .collect::<Vec<_>>(),
+        [(0, "fix the build"), (1, "fixed"), (2, "twice")]
+    );
+    assert_eq!(batch.next.file, 1);
+}
+
+#[test]
 fn a_read_stops_at_its_budget_and_the_next_picks_up_there() {
     let host = host("budget", FAKE_CLAUDE);
     let line = |text: &str| {
         format!(r#"{{"type":"user","message":{{"role":"user","content":"{text}"}}}}"#) + "\n"
     };
     let body = line("one") + &line("two") + &line("three") + r#"{"type":"user","mess"#;
-    fs::write(transcript(&host, "s1"), &body).unwrap();
+    let path = events(&host, "s1");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, &body).unwrap();
     let one = Entry::Told { text: "one".into() }.line(0, sys::now(), "s1".into());
     let one = serde_json::to_string(&one).unwrap().len();
     let home = host.home("ana");
@@ -1016,15 +1172,15 @@ fn a_read_stops_at_its_budget_and_the_next_picks_up_there() {
 #[test]
 fn a_long_reply_and_the_message_it_answers_are_read_whole() {
     let host = host("whole", FAKE_CLAUDE);
-    let path = transcript(&host, "s1");
+    let path = events(&host, "s1");
     let message = "Read the whole design, then say what you make of it. ".repeat(300);
     let reply = "Here is what I make of it, point by point.\n".repeat(466);
     assert!(reply.chars().count() >= 20_000);
     let too_long = "z".repeat(claude::LONGEST_TEXT + 1);
     for line in [
-        serde_json::json!({"type":"user","message":{"role":"user","content":message}}),
-        serde_json::json!({"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":reply}],"stop_reason":"end_turn"}}),
-        serde_json::json!({"type":"assistant","message":{"id":"m2","content":[{"type":"text","text":too_long}],"stop_reason":"end_turn"}}),
+        serde_json::json!({"type":"user","message":{"role":"user","content":message},"isReplay":true}),
+        serde_json::json!({"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":reply}]}}),
+        serde_json::json!({"type":"assistant","message":{"id":"m2","content":[{"type":"text","text":too_long}]}}),
     ] {
         append(&path, format!("{line}\n").as_bytes());
     }
@@ -1045,9 +1201,9 @@ fn a_long_reply_and_the_message_it_answers_are_read_whole() {
 }
 
 #[test]
-fn one_transcript_line_of_many_long_texts_still_fits_one_report() {
+fn one_line_of_many_long_texts_still_fits_one_report() {
     let host = host("blocks", FAKE_CLAUDE);
-    let path = transcript(&host, "s1");
+    let path = events(&host, "s1");
     let block = "y".repeat(60_000);
     let line = serde_json::json!({"type":"user","message":{"role":"user","content":[
         {"type":"text","text":block},{"type":"text","text":block},{"type":"text","text":block}]}});
@@ -1070,14 +1226,14 @@ fn one_transcript_line_of_many_long_texts_still_fits_one_report() {
 }
 
 #[test]
-fn a_line_an_ended_transcript_left_torn_is_passed_over() {
+fn a_line_an_ended_session_left_torn_is_passed_over() {
     let host = host("torn", FAKE_CLAUDE);
-    let first = transcript(&host, "s1");
+    let first = events(&host, "s1");
     append(
         &first,
         b"{\"type\":\"user\",\"message\":{\"content\":\"one\"}}\n{\"type\":\"user\",\"mes",
     );
-    let second = transcript(&host, "s2");
+    let second = events(&host, "s2");
     append(
         &second,
         b"{\"type\":\"user\",\"message\":{\"content\":\"two\"}}\n",
@@ -1100,7 +1256,7 @@ fn a_line_an_ended_transcript_left_torn_is_passed_over() {
 #[test]
 fn a_worker_whose_turn_ended_waits_until_it_is_told_something() {
     let host = host("turns", FAKE_CLAUDE);
-    let path = transcript(&host, "s1");
+    let path = events(&host, "s1");
     let home = host.home("ana");
     let cursor = std::cell::Cell::new(Cursor::default());
     let read = |lines: &[&str]| {
@@ -1117,17 +1273,18 @@ fn a_worker_whose_turn_ended_waits_until_it_is_told_something() {
     };
     assert!(
         !read(&[
-            r#"{"type":"user","message":{"role":"user","content":"fix the build"}}"#,
-            r#"{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","name":"Bash","input":{}}],"stop_reason":"tool_use"}}"#,
+            r#"{"type":"system","subtype":"init","session_id":"s"}"#,
+            r#"{"type":"user","message":{"role":"user","content":"fix the build"},"isReplay":true}"#,
+            r#"{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","name":"Bash","input":{}}],"stop_reason":null}}"#,
             r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"ok"}]}}"#,
         ]),
         "mid-turn"
     );
     assert!(
         read(&[
-            r#"{"type":"assistant","message":{"id":"m2","content":[{"type":"thinking","thinking":""}],"stop_reason":null}}"#,
-            r#"{"type":"assistant","message":{"id":"m2","content":[{"type":"text","text":"Which branch?"}],"stop_reason":"end_turn"}}"#,
-            r#"{"type":"system","subtype":"turn_duration","durationMs":1}"#,
+            r#"{"type":"assistant","message":{"id":"m2","content":[{"type":"text","text":"Which branch?"}],"stop_reason":null}}"#,
+            r#"{"type":"result","subtype":"success","is_error":false}"#,
+            r#"{"type":"system","subtype":"task_updated"}"#,
         ]),
         "its turn ended and nothing has been said since"
     );
@@ -1136,26 +1293,22 @@ fn a_worker_whose_turn_ended_waits_until_it_is_told_something() {
         "nothing new: the report keeps what the cursor says"
     );
     assert!(
-        !read(&[r#"{"type":"user","message":{"role":"user","content":"main"}}"#]),
-        "told something, it is at work again"
+        !read(&[r#"{"type":"system","subtype":"init","session_id":"s"}"#]),
+        "a turn begun by itself, as a background task's end begins one, is work"
     );
 }
 
-// The shape of a real Claude Code 2.1 transcript, which opens with lines of
-// its own bookkeeping before the first turn.
 #[test]
 fn turns_written_after_lines_that_say_nothing_are_read() {
     let host = host("bookkeeping", FAKE_CLAUDE);
-    let path = transcript(&host, "s1");
+    let path = events(&host, "s1");
     let home = host.home("ana");
     let opening = concat!(
-        r#"{"type":"last-prompt","lastPrompt":"Say hello."}"#,
+        r#"{"type":"system","subtype":"commands_changed","commands":[]}"#,
         "\n",
-        r#"{"type":"mode","mode":"normal"}"#,
+        r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}"#,
         "\n",
-        r#"{"type":"permission-mode","permissionMode":"bypassPermissions"}"#,
-        "\n",
-        r#"{"type":"file-history-snapshot","snapshot":{}}"#,
+        r#"{"type":"command_lifecycle","command_uuid":"u","state":"queued"}"#,
         "\n",
     );
     append(&path, opening.as_bytes());
@@ -1176,13 +1329,13 @@ fn turns_written_after_lines_that_say_nothing_are_read() {
     cursor = nothing.next;
 
     append(&path, concat!(
-        r#"{"type":"user","timestamp":"2026-10-27T13:34:52.123Z","message":{"role":"user","content":"Say hello."}}"#, "\n",
+        r#"{"type":"user","timestamp":"2026-10-27T13:34:52.123Z","message":{"role":"user","content":"Say hello."},"isReplay":true}"#, "\n",
         r#"{"type":"a-kind-not-yet-invented","timestamp":"2026-10-27T13:34:53.000Z"}"#, "\n",
     ).as_bytes());
     append(&path, b"{\"type\":\"attachment\",\"text\":\"\xff\xfe\"}\n");
     append(&path, concat!(
-        r#"{"type":"assistant","timestamp":"2026-10-27T13:34:54.5Z","message":{"id":"m1","content":[{"type":"thinking","thinking":""}],"stop_reason":"end_turn"}}"#, "\n",
-        r#"{"type":"assistant","timestamp":"yesterday","message":{"id":"m1","content":[{"type":"text","text":"Hello."}],"stop_reason":"end_turn"}}"#, "\n",
+        r#"{"type":"assistant","timestamp":"2026-10-27T13:34:54.5Z","message":{"id":"m1","content":[{"type":"thinking","thinking":""}]}}"#, "\n",
+        r#"{"type":"assistant","timestamp":"yesterday","message":{"id":"m1","content":[{"type":"text","text":"Hello."}]}}"#, "\n",
         r#"{"type":"assistant","timestamp":"2026-10-27T13:34:55Z","message":{"id":"m2","content":[{"type":"tool_use","name":"Bash","input":{"command":"pwd"}}]}}"#, "\n",
     ).as_bytes());
 
@@ -1245,12 +1398,20 @@ fn a_create_that_cannot_be_done_says_why() {
     }
 }
 
+/// Starts a tool that runs on after it, as a background command does.
+const SPAWNING_CLAUDE: &str = r#"
+sleep 300 &
+printf '%s' "$!" > "$dir/$s.tool"
+while next; do :; done
+"#;
+
 #[test]
-fn a_stop_ends_the_session_and_leaves_its_work_where_it_is() {
-    let host = host("stop", FAKE_CLAUDE);
+fn a_stop_ends_the_session_and_what_it_started_and_leaves_its_work_where_it_is() {
+    let host = host("stop", SPAWNING_CLAUDE);
     let workers = &host.workers;
     host.create("w1", "ana");
     workers.start("w1", "s1", false, None).unwrap();
+    let tool = host.fake_file("ana", &claude::uuid("s1"), "tool");
     let work = host.home("ana").dir.join("WORK");
     fs::write(&work, "half-done\n").unwrap();
     let stop = command(r#"{"id":"c1","kind":"stop","workerId":"w1"}"#);
@@ -1259,6 +1420,10 @@ fn a_stop_ends_the_session_and_leaves_its_work_where_it_is() {
     let report = commands::take(&stop, workers, &mut deliveries).unwrap();
     assert!(report.ok, "{report:?}");
     assert!(workers.live().is_empty(), "no session is left");
+    assert!(
+        !Path::new(&format!("/proc/{tool}")).exists() || cfg!(not(target_os = "linux")),
+        "its tool runs on"
+    );
     assert_eq!(host.state("ana", false), (State::Idle, None));
     assert_eq!(fs::read_to_string(&work).unwrap(), "half-done\n");
     let again = commands::take(&stop, workers, &mut deliveries).unwrap();
@@ -1296,23 +1461,12 @@ fn a_retired_worker_is_kept_aside_and_its_name_can_be_given_again() {
 }
 
 #[test]
-fn a_brief_too_long_for_tmux_reaches_the_worker_whole() {
-    let host = host("long", FAKE_CLAUDE);
+fn a_brief_of_any_length_reaches_the_worker_whole() {
+    let host = host("long", LONG_CLAUDE);
     host.create("w1", "ana");
-    let long = "x".repeat(60 << 10) + "\nthe end";
+    let long = "x".repeat(256 << 10) + "\nthe end";
     host.workers.start("w1", "s1", false, Some(&long)).unwrap();
-    let home = host.home("ana");
-    let (mut seen, mut cursor) = (vec![], Cursor::default());
-    read_until(&host.workers, &home, &mut seen, &mut cursor, |s| {
-        !s.is_empty()
-    });
-    assert_eq!(seen[0], told("the end"));
-    host.workers.stop("w1").unwrap();
-    let err = host
-        .workers
-        .start("w1", "s2", false, Some(&"x".repeat(LONGEST_PROMPT + 1)))
-        .unwrap_err();
-    assert!(err.contains("more than"), "{err}");
+    assert_eq!(host.fake_file("ana", &claude::uuid("s1"), "end"), "the end");
 }
 
 #[test]
@@ -1322,36 +1476,66 @@ fn a_session_has_its_own_state_and_the_users_login() {
     host.workers.start("w1", "s1", false, None).unwrap();
     let state = host.home("ana").claude();
     assert_eq!(
-        host.fake_file("ana", "s1", "env"),
+        host.fake_file("ana", &claude::uuid("s1"), "env"),
         format!("{}|", state.display()),
         "its own state, the default login"
     );
 }
 
-/// A worker for a test against Claude Code itself, in a folder and on a tmux
-/// server of the test's own, with this user's own login, as every worker has.
-fn real(name: &str) -> (Workers, Home) {
+/// A worker for a test against Claude Code itself, in a folder of the test's
+/// own, with this user's own login, as every worker has.
+fn real(name: &str) -> (Workers, Home, PathBuf) {
     let dir = std::env::temp_dir().join(format!("worker-host-real-{}-{name}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
-    let workers = Workers::new(
-        Tmux::new(format!(
-            "worker-host-test-real-{}-{name}",
-            std::process::id()
-        )),
-        Claude::from_env(|k| std::env::var(k).ok()),
-        dir.clone(),
-    );
+    let workers = real_at(&dir);
     workers.create(name, name).unwrap();
-    (workers, Home::new(dir.join(name)))
+    (workers, Home::new(dir.join(name)), dir)
 }
 
-/// Claude Code itself, spoken to mid-run, then carried on in a second
-/// session that remembers the first. It costs real sessions:
-/// `cargo test -- --ignored real_claude`.
+fn real_at(dir: &Path) -> Workers {
+    Workers::new(
+        Sessions::new(Permissions::default()),
+        Claude::from_env(|k| std::env::var(k).ok()),
+        dir.to_path_buf(),
+    )
+}
+
+/// Reads on until `done`, giving up after `within`.
+fn read_real(
+    workers: &Workers,
+    home: &Home,
+    seen: &mut Seen,
+    cursor: &mut Cursor,
+    within: Duration,
+    mut each: impl FnMut(&Seen),
+    done: impl Fn(&Seen, &Cursor) -> bool,
+) {
+    let deadline = Instant::now() + within;
+    while !done(seen, cursor) {
+        assert!(Instant::now() < deadline, "gave up; read {seen:#?}");
+        each(seen);
+        if let Some(batch) = workers.read(home, *cursor, 1 << 16) {
+            take(seen, cursor, batch);
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+}
+
+/// Claude Code itself, headless: the release this host is checked against,
+/// asked permission for its tools, spoken to mid-run, carried on in a second
+/// session that remembers the first, and resumed after its host restarts.
+/// It costs real sessions: `cargo test -- --ignored real_claude`.
 #[test]
 #[ignore]
 fn real_claude() {
-    let (workers, home) = real("real");
+    let (workers, home, dir) = real("real");
+    assert_eq!(
+        Claude::from_env(|k| std::env::var(k).ok())
+            .version()
+            .as_deref(),
+        Some(claude::CHECKED),
+        "the Claude Code this host's stream-json is checked against"
+    );
     workers
         .start(
             "real",
@@ -1364,26 +1548,47 @@ fn real_claude() {
         )
         .unwrap();
     let (mut seen, mut cursor): (Seen, _) = (vec![], Cursor::default());
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let mut deliveries = Deliveries::new(PATIENCE);
     let mut said = false;
     let ran_third = |s: &Seen| {
         s.iter()
             .position(|(from, text)| *from == "tool" && text.contains("third"))
     };
-    while !ran_third(&seen).is_some_and(|i| seen[i..].iter().any(|(from, _)| *from == "agent")) {
-        assert!(Instant::now() < deadline, "gave up; read {seen:?}");
-        if !said && seen.iter().any(|(from, _)| *from == "tool") {
-            workers
-                .say("real", "Correction: echo third instead of second.")
-                .unwrap();
-            said = true;
-        }
-        if let Some(batch) = workers.read(&home, cursor, 1 << 16) {
-            take(&mut seen, &mut cursor, batch);
-        }
-        thread::sleep(Duration::from_millis(500));
-    }
+    read_real(
+        &workers,
+        &home,
+        &mut seen,
+        &mut cursor,
+        Duration::from_secs(120),
+        |seen| {
+            if !said && seen.iter().any(|(from, _)| *from == "tool") {
+                let held = deliveries.hold(
+                    &workers,
+                    "00000000-0000-4000-8000-0000000000c1",
+                    "real",
+                    "Correction: echo third instead of second.",
+                );
+                assert_eq!(held, None, "taken only at its next step");
+                said = true;
+            }
+        },
+        |s, _| ran_third(s).is_some_and(|i| s[i..].iter().any(|(from, _)| *from == "agent")),
+    );
+    assert_eq!(
+        settle_all(&workers, &mut deliveries),
+        [("00000000-0000-4000-8000-0000000000c1".to_string(), Ok(()))]
+    );
+    read_real(
+        &workers,
+        &home,
+        &mut seen,
+        &mut cursor,
+        Duration::from_secs(60),
+        |_| {},
+        |_, c| c.waiting,
+    );
     workers.stop("real").unwrap();
+
     workers
         .start(
             "real",
@@ -1392,22 +1597,60 @@ fn real_claude() {
             Some("Which word did I ask you to echo instead of second? Reply with that one word."),
         )
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(120);
     let mark = seen.len();
-    while !seen[mark..]
-        .iter()
-        .any(|(from, text)| *from == "agent" && text.to_lowercase().contains("third"))
-    {
-        assert!(
-            Instant::now() < deadline,
-            "it did not carry on; read {seen:?}"
-        );
-        if let Some(batch) = workers.read(&home, cursor, 1 << 16) {
-            take(&mut seen, &mut cursor, batch);
-        }
-        thread::sleep(Duration::from_millis(500));
-    }
-    workers.tmux.kill_server();
+    read_real(
+        &workers,
+        &home,
+        &mut seen,
+        &mut cursor,
+        Duration::from_secs(120),
+        |_| {},
+        |s, _| {
+            s[mark..]
+                .iter()
+                .any(|(from, text)| *from == "agent" && text.to_lowercase().contains("third"))
+        },
+    );
+
+    // The host goes, and comes back.
+    drop(workers);
+    let restarted = real_at(&dir);
+    assert_eq!(
+        restarted.reconcile(&no_tmux()),
+        [("real".to_string(), State::Working)]
+    );
+    let mark = seen.len();
+    read_real(
+        &restarted,
+        &home,
+        &mut seen,
+        &mut cursor,
+        Duration::from_secs(120),
+        |_| {},
+        |s, c| s[mark..].contains(&told(RESUMED)) && c.waiting,
+    );
+    restarted
+        .say(
+            "real",
+            "What word did you echo? Reply with that one word.",
+            &claude::uuid("real-c2"),
+        )
+        .unwrap();
+    let mark = seen.len();
+    read_real(
+        &restarted,
+        &home,
+        &mut seen,
+        &mut cursor,
+        Duration::from_secs(120),
+        |_| {},
+        |s, _| {
+            s[mark..]
+                .iter()
+                .any(|(from, text)| *from == "agent" && text.to_lowercase().contains("third"))
+        },
+    );
+    restarted.stop("real").unwrap();
     eprintln!("{seen:#?}");
 }
 
@@ -1416,7 +1659,7 @@ fn real_claude() {
 #[test]
 #[ignore]
 fn real_claude_interrupted() {
-    let (workers, home) = real("real-i");
+    let (workers, home, _) = real("real-i");
     workers
         .start(
             "real-i",
@@ -1432,32 +1675,36 @@ fn real_claude_interrupted() {
     let started = Instant::now();
     let mut interrupted = false;
     let after = told("Never mind. Reply with one word: stopped.");
-    let answered = |s: &Seen| {
-        s.iter()
-            .position(|e| e == &after)
-            .is_some_and(|i| s[i..].iter().any(|(from, _)| *from == "agent"))
-    };
-    while !answered(&seen) {
+    read_real(
+        &workers,
+        &home,
+        &mut seen,
+        &mut cursor,
         // Well inside the 90 seconds the command runs for, so it was cut off,
         // not waited out.
-        assert!(
-            started.elapsed() < Duration::from_secs(60),
-            "gave up; read {seen:?}"
-        );
-        if !interrupted && seen.iter().any(|(from, _)| *from == "tool") {
-            thread::sleep(Duration::from_secs(3));
-            workers
-                .interrupt("real-i", Some("Never mind. Reply with one word: stopped."))
-                .unwrap();
-            interrupted = true;
-        }
-        if let Some(batch) = workers.read(&home, cursor, 1 << 16) {
-            take(&mut seen, &mut cursor, batch);
-        }
-        thread::sleep(Duration::from_millis(500));
-    }
+        Duration::from_secs(60),
+        |seen| {
+            if !interrupted && seen.iter().any(|(from, _)| *from == "tool") {
+                thread::sleep(Duration::from_secs(3));
+                workers
+                    .interrupt(
+                        "real-i",
+                        "00000000-0000-4000-8000-0000000000c3",
+                        Some("Never mind. Reply with one word: stopped."),
+                    )
+                    .unwrap();
+                interrupted = true;
+            }
+        },
+        |s, _| {
+            s.iter()
+                .position(|e| e == &after)
+                .is_some_and(|i| s[i..].iter().any(|(from, _)| *from == "agent"))
+        },
+    );
+    assert!(started.elapsed() < Duration::from_secs(60));
     let live = workers.live().len();
-    workers.tmux.kill_server();
+    workers.stop("real-i").unwrap();
     eprintln!("{seen:#?}");
     assert_eq!(live, 1, "the session outlives the interrupt");
     assert!(

@@ -17,7 +17,7 @@ const REMEMBERED: usize = 1000;
 /// rather than done twice. Held in memory: a host that restarts takes again
 /// a command it had settled but not reported, which is why each kind is also
 /// safe to take again on its own (see `Workers`), except a message, which is
-/// typed again.
+/// written again.
 pub struct Taken {
     settled: VecDeque<CommandReport>,
 }
@@ -102,7 +102,7 @@ pub fn take(
             Some(text) => deliveries.hold(workers, &command.id, worker, text)?.err(),
             None => Some("a message needs text".into()),
         },
-        ("interrupt", Some(worker)) => workers.interrupt(worker, text).err(),
+        ("interrupt", Some(worker)) => workers.interrupt(worker, &command.id, text).err(),
         ("stop", Some(worker)) => workers.stop(worker).err(),
         ("retire", Some(worker)) => workers.retire(worker).err(),
         (kind @ ("create" | "start" | "message" | "interrupt" | "stop" | "retire"), None) => {
@@ -117,14 +117,13 @@ pub fn take(
 mod tests {
     use super::*;
     use crate::claude::Claude;
-    use crate::tmux::Tmux;
+    use crate::session::Sessions;
     use std::time::Duration;
 
-    /// No tmux server answers on this socket and no folder holds a worker,
-    /// so the host has none.
+    /// No folder holds a worker, so the host has none.
     fn no_workers() -> Workers {
         Workers::new(
-            Tmux::new(format!("worker-host-test-{}-none", std::process::id())),
+            Sessions::new(Default::default()),
             Claude::new("/nonexistent/claude", None),
             "/nonexistent/workers".into(),
         )

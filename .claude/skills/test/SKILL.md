@@ -32,7 +32,7 @@ its own; the commands below do it by hand.
 
 ## Setup
 
-`tmux` and `gh` signed in. A Rust toolchain with rustfmt and clippy, and a C
+`gh` signed in. A Rust toolchain with rustfmt and clippy, and a C
 compiler (ring, under rustls, has C). On a machine without them, `setup.sh`
 puts rustup and zig (as `cc`, `ar` and `zig`) under the folder you name (a
 worker names `tools/` in its own folder) and prints the line that puts them on
@@ -57,9 +57,21 @@ env -u DS_URL -u DS_TOKEN -u WT_URL -u WT_TOKEN -u WS_URL -u WS_TOKEN -u AS_URL 
 env -u DS_URL -u DS_TOKEN -u WT_URL -u WT_TOKEN -u WS_URL -u WS_TOKEN -u AS_URL -u AS_TOKEN cargo test --locked
 ```
 
-The tests use tmux servers of their own. Without `WORKER_SERVICE_URL`,
+The tests run stand-ins for Claude Code, and no tmux. Without `WORKER_SERVICE_URL`,
 `tests/worker_service.rs` prints `skipped:` and passes, so `cargo test` proves
 nothing about beta.
+
+Claude Code itself, headless over stream-json, costs real sessions, and is
+checked against the release in `claude::CHECKED`: run it for a change to how
+the host speaks to Claude Code, and when Claude Code on the host is not that
+release. `CLAUDE_CONFIG_DIR` is unset so the sessions use the user's own login:
+
+```sh
+env -u CLAUDE_CONFIG_DIR -u DS_URL -u DS_TOKEN -u WT_URL -u WT_TOKEN -u WS_URL -u WS_TOKEN -u AS_URL -u AS_TOKEN cargo test --locked -- --ignored real_claude
+```
+
+A pass: `2 passed`. `real_claude` fails first on a Claude Code that is not
+`CHECKED`; once it passes on another, that release is the new `CHECKED`.
 
 ## Beta: the integration test
 

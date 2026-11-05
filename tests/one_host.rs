@@ -13,11 +13,10 @@ fn a_second_host_on_the_same_workers_folder_is_refused() {
     let dir = std::env::temp_dir().join(format!("wh-t-one-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(dir.join("home")).unwrap();
-    fs::create_dir_all(dir.join("tmux")).unwrap();
     let service = common::Service::start();
     let workers = dir.join("workers");
     let config = format!(
-        "service_url = \"{}\"\ntoken = \"t\"\nhost_id = \"studio\"\ncapacity = 1\nworkers_dir = \"{}\"\ntmux_socket = \"wh-t-one\"\n",
+        "service_url = \"{}\"\ntoken = \"t\"\nhost_id = \"studio\"\ncapacity = 1\nworkers_dir = \"{}\"\n",
         service.url,
         workers.display()
     );
@@ -37,7 +36,6 @@ fn a_second_host_on_the_same_workers_folder_is_refused() {
     let second = Command::new(env!("CARGO_BIN_EXE_worker-host"))
         .env_clear()
         .env("HOME", dir.join("home"))
-        .env("TMUX_TMPDIR", dir.join("tmux"))
         .arg("--config")
         .arg(dir.join("config.toml"))
         .stderr(Stdio::piped())

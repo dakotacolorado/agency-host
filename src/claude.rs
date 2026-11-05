@@ -1,8 +1,15 @@
-//! Everything this host knows about Claude Code: how to start it, where it
-//! keeps a worker's settings and transcript, and what that transcript's lines
-//! mean. The transcript is Claude Code's own file, not a published format, and
-//! changes shape between versions; so nothing outside this module reads it,
-//! and the rest of the host sees only `Entry`.
+//! Everything this host knows about Claude Code: how to start it, what it
+//! says on its stdout and what to write to its stdin, and where it keeps a
+//! worker's settings and transcript.
+//!
+//! A session is `claude -p` over stream-json: each line on stdin is a message
+//! or an answer to Claude Code, each line on stdout an event from it. Its
+//! shapes are the Agent SDK's, checked against Claude Code `CHECKED`; nothing
+//! outside this module reads or writes them, and the rest of the host sees
+//! only `Entry`, `Read` and the lines made here. A transcript Claude Code
+//! writes for itself is read only for sessions an older, tmux-driven release
+//! of this host began (see `Source` in worker.rs); its lines and stdout's
+//! events share their shapes, so one reader serves both.
 //!
 //! Every worker has a Claude Code of its own -- settings, history, projects,
 //! transcripts and the rules it works by, all in `CLAUDE_CONFIG_DIR` under its
@@ -12,14 +19,21 @@
 //! find the user's identity there too. Claude Code keys its login store by
 //! `CLAUDE_CONFIG_DIR` unless `CLAUDE_SECURESTORAGE_CONFIG_DIR` says where the
 //! login is, so each session is given that, set to wherever the host user's
-//! own Claude Code keeps it. Checked against Claude Code 2.1.312.
+//! own Claude Code keeps it.
 
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::{env, fs, io};
 
+use crate::config::Permissions;
 use crate::worker::Entry;
+
+/// The Claude Code release the stream-json protocol here was checked
+/// against, by its own tests and `real_claude`. Another may change a shape;
+/// the host says so when it starts.
+pub const CHECKED: &str = "2.1.318";
 
 /// What a worker says or is told is carried whole up to this many bytes, as
 /// the JSON its line goes up in. A report is one socket message, which API
@@ -47,12 +61,12 @@ pub struct Claude {
     login: Option<PathBuf>,
 }
 
-/// How a session begins: a new conversation under this id, or the last one
-/// in the folder carried on.
+/// How a session begins: a new conversation under this id, or the one under
+/// this id carried on.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Begin<'a> {
     Fresh(&'a str),
-    Continue,
+    Resume(&'a str),
 }
 
 impl Claude {
@@ -72,39 +86,45 @@ impl Claude {
         )
     }
 
-    /// Interactive, never `-p`: a one-shot session cannot be spoken to once
-    /// it has started, which is the whole point of running it here. Skipping
-    /// permissions because nobody is watching for the prompt: a worker asking
-    /// one would wait for ever, holding its session.
+    /// Headless, and spoken to for as long as it runs: messages and answers
+    /// go in on stdin, and events come out on stdout, each a JSON line. Each
+    /// user message is echoed back (`--replay-user-messages`) once Claude Code
+    /// takes it, which is how a delivery is known to have landed. Permission
+    /// requests come to the host on stdout (`--permission-prompt-tool
+    /// stdio`); with `--permission-prompts host` alone, Claude Code 2.1.318
+    /// denies them itself.
     ///
-    /// The opening message is read from `prompt` as the session starts, since
-    /// tmux refuses a command longer than a few kilobytes and a message may be
-    /// far longer. It is still one argument, never shell syntax: a quoted
-    /// substitution is not read again. The session's tokens are read from
-    /// `credentials`, when there is one, so that none is on a command line.
-    pub fn argv(&self, begin: Begin, prompt: &Path, credentials: &Path) -> Vec<String> {
+    /// The session's tokens are read from `credentials`, when there is one,
+    /// so that none is on a command line.
+    pub fn argv(&self, begin: Begin, credentials: &Path) -> Vec<String> {
         let mut argv: Vec<String> = [
             "sh",
             "-c",
-            r#"p=$1 c=$2; shift 2; if [ -f "$c" ]; then set -a; . "$c"; set +a; fi; exec "$@" "$(cat -- "$p")""#,
+            r#"c=$1; shift; if [ -f "$c" ]; then set -a; . "$c"; set +a; fi; exec "$@""#,
             "sh",
-            &prompt.to_string_lossy(),
             &credentials.to_string_lossy(),
             &self.program,
-            "--dangerously-skip-permissions",
+            "-p",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--replay-user-messages",
+            "--permission-prompt-tool",
+            "stdio",
         ]
         .map(String::from)
         .to_vec();
         match begin {
             Begin::Fresh(session) => argv.extend(["--session-id".into(), session.into()]),
-            Begin::Continue => argv.push("--continue".into()),
+            Begin::Resume(session) => argv.extend(["--resume".into(), session.into()]),
         }
         argv
     }
 
-    /// tmux starts a session for a program that is not there and then quietly
-    /// ends it, so a start that cannot run is caught here, where it can still
-    /// be reported.
+    /// A start that cannot run is caught here, where it can still be
+    /// reported, rather than as a shell that exits at once.
     pub fn installed(&self) -> Result<(), String> {
         let program = Path::new(&self.program);
         let found = if self.program.contains('/') {
@@ -118,11 +138,22 @@ impl Claude {
             .ok_or_else(|| format!("{} is not installed on this host", self.program))
     }
 
-    /// The tmux server keeps the environment it started with, which may
-    /// predate this host's, so what Claude Code needs is passed on each
-    /// session: the worker's own state, and where the shared login is. An
-    /// empty `CLAUDE_SECURESTORAGE_CONFIG_DIR` is Claude Code's default store,
-    /// not the worker's.
+    /// Which Claude Code this is, as `claude --version` says it.
+    pub fn version(&self) -> Option<String> {
+        let out = Command::new(&self.program)
+            .arg("--version")
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        text.split_whitespace().next().map(String::from)
+    }
+
+    /// What Claude Code needs in each session's environment: the worker's
+    /// own state, and where the shared login is. An empty
+    /// `CLAUDE_SECURESTORAGE_CONFIG_DIR` is Claude Code's default store, not
+    /// the worker's.
     pub fn env(&self, state: &Path) -> Vec<(String, String)> {
         vec![
             ("CLAUDE_CONFIG_DIR".into(), state.to_string_lossy().into()),
@@ -136,11 +167,10 @@ impl Claude {
         ]
     }
 
-    /// Readies a worker's own Claude Code state in `state` to start in `dir`
-    /// with nobody at its terminal: each question Claude Code asks of a new
-    /// user, or of a folder it has not seen, is answered beforehand, since
-    /// the Enter that sends the first message would answer it instead, and a
-    /// question left open blocks the session. Answers already there are kept,
+    /// Readies a worker's own Claude Code state in `state` to start in `dir`.
+    /// What Claude Code asks a new user, or of a folder it has not seen, is
+    /// answered beforehand, so that a person who takes the session over with
+    /// `claude --resume` is not asked either. Answers already there are kept,
     /// so what a worker changes for itself stays changed. `rules` are the
     /// worker's standing instructions, Claude Code's user memory, which it
     /// reads at the start of every session and keeps through compaction.
@@ -172,16 +202,10 @@ impl Claude {
             project.insert("hasTrustDialogAccepted".into(), Value::Bool(true));
             Ok(())
         })?;
-        // Asked before the first session that skips permissions.
         merge(&state.join("settings.json"), |settings| {
-            settings
-                .entry("skipDangerousModePermissionPrompt")
-                .or_insert(Value::Bool(true));
-            // These tools' dialogs are seen only at the terminal, and the
-            // Enter that types a message picks their first option: answers
-            // AskUserQuestion, approves ExitPlanMode's plan. Denied, a tool is
-            // gone, even with permissions skipped, so a worker asks in words
-            // and ends its turn.
+            // These tools wait on a person's answer at a terminal, which a
+            // headless session has none of. Denied, a tool is gone, so a
+            // worker asks in words and ends its turn.
             let deny = settings
                 .entry("permissions")
                 .or_insert_with(|| Value::Object(Map::new()))
@@ -202,6 +226,76 @@ impl Claude {
         let memory = state.join("CLAUDE.md");
         fs::write(&memory, rules).map_err(|e| format!("{}: {e}", memory.display()))
     }
+}
+
+/// A user message for stdin. `uuid` comes back on its echo.
+pub fn message(text: &str, uuid: &str) -> Value {
+    json!({
+        "type": "user",
+        "uuid": uuid,
+        "session_id": "",
+        "parent_tool_use_id": null,
+        "message": {"role": "user", "content": text},
+    })
+}
+
+/// Asks Claude Code to stop the turn it is in, as Escape does at a terminal.
+pub fn interrupt(request: &str) -> Value {
+    json!({
+        "type": "control_request",
+        "request_id": request,
+        "request": {"subtype": "interrupt"},
+    })
+}
+
+/// The uuid of the message `event` echoes back, if it is an echo.
+pub fn echoed(event: &Value) -> Option<&str> {
+    (event["type"] == "user" && event["isReplay"] == true)
+        .then(|| event["uuid"].as_str())
+        .flatten()
+}
+
+/// The answer to `event` when it is a request of the host's: a permission
+/// asked for is given or refused by `permissions`, and any other request is
+/// refused by name, so that Claude Code does not wait on it.
+pub fn answer(event: &Value, permissions: &Permissions) -> Option<Value> {
+    if event["type"] != "control_request" {
+        return None;
+    }
+    let request_id = event["request_id"].as_str()?;
+    let request = &event["request"];
+    let response = match request["subtype"].as_str() {
+        Some("can_use_tool") => {
+            let tool = request["tool_name"].as_str().unwrap_or_default();
+            let decision = if permissions.allows(tool) {
+                json!({"behavior": "allow", "updatedInput": request["input"]})
+            } else {
+                json!({
+                    "behavior": "deny",
+                    "message": format!("{tool} is not allowed on this host (worker-host's \
+                                        permissions)"),
+                })
+            };
+            json!({"subtype": "success", "request_id": request_id, "response": decision})
+        }
+        other => json!({
+            "subtype": "error",
+            "request_id": request_id,
+            "error": format!("worker-host does not answer {:?} requests", other.unwrap_or("")),
+        }),
+    };
+    Some(json!({"type": "control_response", "response": response}))
+}
+
+/// `event` as the host keeps it: with the instant it came, when Claude Code
+/// did not say, so that a line read again after a restart reads the same.
+pub fn stamped(mut event: Value, now: impl FnOnce() -> String) -> Value {
+    if let Some(object) = event.as_object_mut() {
+        if !object.get("timestamp").is_some_and(Value::is_string) {
+            object.insert("timestamp".into(), Value::String(now()));
+        }
+    }
+    event
 }
 
 /// Changes the JSON object in `path`, or a new one, and writes it back aside
@@ -233,40 +327,6 @@ fn merge(
     write().map_err(|e| at(&e))
 }
 
-/// Whether `screen`, what a session's terminal shows, has a dialog open: a
-/// question that the Enter which sends a message would answer. Read from
-/// Claude Code's screen, which it redraws as it likes, so this is a guard
-/// behind `DENIED`, not a promise. Below its input box -- a rule, then a line
-/// at its `❯` -- Claude Code shows only its status; a dialog takes the
-/// box's place, and is told by its numbered options, the chosen one at `❯`,
-/// or by the footer its lists share. With no box on screen, all of it is
-/// looked at, so a message typed earlier that reads like a list keeps the
-/// next one back only until a box is drawn again.
-pub fn dialog(screen: &str) -> bool {
-    let rule = |line: &str| line.trim().starts_with("───");
-    let lines: Vec<&str> = screen.lines().collect();
-    let below = lines
-        .windows(2)
-        .rposition(|w| rule(w[0]) && w[1].trim_start().starts_with('❯') && !option(w[1]))
-        .map_or(0, |at| at + 2);
-    lines[below..].iter().any(|line| {
-        option(line)
-            || ["Enter to select", "Esc to cancel"]
-                .iter()
-                .any(|f| line.contains(f))
-    })
-}
-
-/// Whether `line` is a dialog's chosen option: `❯ 1. Yes`.
-fn option(line: &str) -> bool {
-    let Some(rest) = line.trim_start().strip_prefix('❯') else {
-        return false;
-    };
-    let rest = rest.trim_start();
-    let digits = rest.chars().take_while(char::is_ascii_digit).count();
-    digits > 0 && rest[digits..].starts_with(". ")
-}
-
 /// Where a session's transcript is in a worker's state, once Claude Code has
 /// started writing it. Looked for by its name rather than built from the
 /// folder, since how Claude Code turns a folder into a directory name is its
@@ -280,11 +340,11 @@ pub fn transcript(state: &Path, session: &str) -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
-/// Claude Code wants a uuid for a session. The service's session id is used
-/// as it stands when it is one, so the two can be matched by eye; otherwise
-/// one is derived from it, the same every time, so a host that restarts finds
-/// the transcript again with nothing remembered.
-pub fn session_id(id: &str) -> String {
+/// Claude Code wants a uuid for a session, and for a message. A service id
+/// is used as it stands when it is one, so the two can be matched by eye;
+/// otherwise one is derived from it, the same every time, so a host that
+/// restarts finds the session again with nothing remembered.
+pub fn uuid(id: &str) -> String {
     let is_uuid = id.len() == 36
         && id.char_indices().all(|(i, c)| match i {
             8 | 13 | 18 | 23 => c == '-',
@@ -312,14 +372,16 @@ pub fn session_id(id: &str) -> String {
     )
 }
 
-/// What one transcript line says, and when Claude Code wrote it.
+/// What one line says -- an event on a session's stdout, or a line of a
+/// transcript Claude Code wrote -- and when.
 #[derive(Debug, Default, PartialEq)]
 pub struct Read {
     pub at: Option<String>,
     pub entries: Vec<Entry>,
     /// Whether the worker is waiting after this line: true when it ends its
-    /// turn (`stop_reason` `end_turn`), false when it shows it at work or
-    /// being told something, None when it says neither.
+    /// turn (a `result`, or in a transcript `stop_reason` `end_turn`), false
+    /// when it shows it at work or being told something, None when it says
+    /// neither.
     pub waiting: Option<bool>,
 }
 
@@ -330,8 +392,9 @@ pub fn read(line: &str) -> Read {
         return Read::default();
     };
     let at = v["timestamp"].as_str().map(String::from);
-    // A subagent's own conversation, and lines Claude Code adds for itself.
-    if v["isSidechain"] == true || v["isMeta"] == true {
+    // A subagent's own conversation (on stdout, the lines under a tool use),
+    // and lines Claude Code adds for itself.
+    if v["isSidechain"] == true || v["isMeta"] == true || v["parent_tool_use_id"].is_string() {
         return Read {
             at,
             ..Read::default()
@@ -342,6 +405,11 @@ pub fn read(line: &str) -> Read {
         // A tool's result, too, is the worker at work.
         Some("user") => Some(false),
         Some("attachment") if v["attachment"]["type"] == "queued_command" => Some(false),
+        // A turn begun, on stdout, which may be with nothing said: a
+        // background task's end starts one.
+        Some("system") if v["subtype"] == "init" => Some(false),
+        // A turn ended, on stdout, however it ended: done, failed, interrupted.
+        Some("result") => Some(true),
         // One message is a line per block, and only its last says how it
         // stopped; a line that does not say leaves it as it was.
         Some("assistant") => message["stop_reason"]
@@ -406,12 +474,6 @@ pub fn read(line: &str) -> Read {
         entries,
         waiting,
     }
-}
-
-/// What was said or told, as it is carried up: whole, unless it is longer
-/// than `LONGEST_TEXT` as JSON.
-pub fn carried(text: &str) -> String {
-    cut(text, LONGEST_TEXT, json_len)
 }
 
 /// `text` as it is when its `size` is at most `longest`; otherwise as much
@@ -647,67 +709,116 @@ mod tests {
     #[test]
     fn a_claude_session_is_the_services_id_or_derived_from_it() {
         assert_eq!(
-            session_id("8550F3B6-D6FC-4F1E-A46C-3E385A545A32"),
+            uuid("8550F3B6-D6FC-4F1E-A46C-3E385A545A32"),
             "8550f3b6-d6fc-4f1e-a46c-3e385a545a32"
         );
-        let derived = session_id("worker-7");
-        assert_eq!(derived, session_id("worker-7"));
-        assert_ne!(derived, session_id("worker-8"));
-        assert_eq!(session_id(&derived), derived, "{derived} is not a uuid");
+        let derived = uuid("worker-7");
+        assert_eq!(derived, uuid("worker-7"));
+        assert_ne!(derived, uuid("worker-8"));
+        assert_eq!(uuid(&derived), derived, "{derived} is not a uuid");
         assert_eq!(&derived[14..15], "4");
     }
 
-    /// Screens as Claude Code 2.1.312 drew them, cut to their ends.
-    const IDLE: &str = "\
-❯ 1. Create hello.txt
-  2. Tell me when done
-● Done.
-✻ Churned for 4s · done 3:46 PM
-
-────────────────────────────────────────
-❯ 
-────────────────────────────────────────
-  ⏸ plan mode on (shift+tab to cycle)
-";
-    const PLAN: &str = "\
-● Updated plan
-  ⎿  /plan to preview
-
-────────────────────────────────────────
- Claude has written up a plan and is ready to execute. Would you like to proceed?
-
- ❯ 1. Yes, and switch to BYPASS PERMISSIONS (no further prompts) for this session
-   2. Yes, manually approve edits
-   3. Tell Claude what to change
-      shift+tab to approve with this feedback
-
- ctrl+g to edit in Vim ·
-";
-    const QUESTION: &str = "\
-❯ Use the AskUserQuestion tool to ask me red or blue. Nothing else.
-────────────────────────────────────────
- ☐ Color
-Red or blue?
-❯ 1. Red
-     Choose red
-  2. Blue
-     Choose blue
-  3. Type something.
-────────────────────────────────────────
-  4. Chat about this
-Enter to select · ↑/↓ to navigate · Esc to cancel
-";
+    // The events below are cut down from Claude Code 2.1.318's stdout.
 
     #[test]
-    fn a_dialog_is_told_from_the_input_box_whatever_was_said_above_it() {
-        assert!(!dialog(IDLE), "a list typed earlier is not a dialog");
-        assert!(dialog(PLAN), "plan approval");
-        assert!(dialog(QUESTION), "a question");
-        assert!(dialog(
-            "Pick a model\n  Default\nEnter to confirm · Esc to cancel\n"
-        ));
-        assert!(!dialog(""), "nothing drawn yet");
-        assert!(!dialog("❯ 1 thing\n❯ 1.5 things\n"));
+    fn a_sessions_stdout_reads_as_its_transcript_did() {
+        let entries = read_all(&[
+            json!({"type":"system","subtype":"init","cwd":"/w","session_id":"s","tools":["Bash"]}),
+            json!({"type":"user","message":{"role":"user","content":"Run the tests."},"session_id":"s","parent_tool_use_id":null,"uuid":"u1","timestamp":"2026-11-05T07:03:23.101Z","isReplay":true}),
+            json!({"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"cargo test"}}],"stop_reason":null},"parent_tool_use_id":null}),
+            json!({"type":"control_request","request_id":"r1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"cargo test"}}}),
+            json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"ok","tool_use_id":"t1"}]},"parent_tool_use_id":null}),
+            json!({"type":"assistant","message":{"id":"m2","content":[{"type":"text","text":"a subagent's step"}]},"parent_tool_use_id":"t9"}),
+            json!({"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}),
+            json!({"type":"assistant","message":{"id":"m3","content":[{"type":"text","text":"Done."}],"stop_reason":null},"parent_tool_use_id":null}),
+            json!({"type":"result","subtype":"success","is_error":false,"result":"Done."}),
+        ]);
+        assert_eq!(
+            entries,
+            [
+                told("Run the tests."),
+                Entry::Ran {
+                    tool: "Bash".into(),
+                    input: r#"{"command":"cargo test"}"#.into()
+                },
+                said("Done."),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_result_ends_the_turn_and_a_turn_begun_by_itself_is_work() {
+        let waiting = |line: Value| read(&line.to_string()).waiting;
+        for ended in [
+            json!({"type":"result","subtype":"success","is_error":false}),
+            json!({"type":"result","subtype":"error_during_execution","is_error":true,"terminal_reason":"aborted_tools"}),
+        ] {
+            assert_eq!(waiting(ended.clone()), Some(true), "{ended}");
+        }
+        assert_eq!(
+            waiting(json!({"type":"system","subtype":"init","session_id":"s"})),
+            Some(false)
+        );
+        for neither in [
+            json!({"type":"assistant","message":{"id":"m","content":[{"type":"text","text":"Done."}],"stop_reason":null}}),
+            json!({"type":"system","subtype":"task_notification"}),
+            json!({"type":"control_request","request_id":"r","request":{"subtype":"can_use_tool"}}),
+        ] {
+            assert_eq!(waiting(neither.clone()), None, "{neither}");
+        }
+    }
+
+    #[test]
+    fn a_message_goes_in_with_its_uuid_and_its_echo_names_it() {
+        let sent = message("Say hi.", "aaaaaaaa-0000-4000-8000-000000000001");
+        assert_eq!(sent["type"], "user");
+        assert_eq!(sent["message"], json!({"role":"user","content":"Say hi."}));
+        let echo =
+            json!({"type":"user","message":sent["message"],"uuid":sent["uuid"],"isReplay":true});
+        assert_eq!(echoed(&echo), Some("aaaaaaaa-0000-4000-8000-000000000001"));
+        assert_eq!(
+            echoed(&json!({"type":"user","uuid":"x","message":{}})),
+            None
+        );
+        assert_eq!(interrupt("i1")["request"]["subtype"], "interrupt");
+    }
+
+    #[test]
+    fn a_permission_is_answered_by_the_hosts_rule_and_any_other_request_refused() {
+        let ask = |tool: &str| json!({"type":"control_request","request_id":"r1","request":{"subtype":"can_use_tool","tool_name":tool,"input":{"command":"ls"}}});
+        let permissions = Permissions {
+            allow: vec!["*".into()],
+            deny: vec!["WebFetch".into()],
+        };
+        let allowed = answer(&ask("Bash"), &permissions).unwrap();
+        assert_eq!(
+            allowed,
+            json!({"type":"control_response","response":{"subtype":"success","request_id":"r1",
+                "response":{"behavior":"allow","updatedInput":{"command":"ls"}}}})
+        );
+        let denied = answer(&ask("WebFetch"), &permissions).unwrap();
+        assert_eq!(denied["response"]["response"]["behavior"], "deny");
+        assert!(denied["response"]["response"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("WebFetch is not allowed"));
+        let other = json!({"type":"control_request","request_id":"r2","request":{"subtype":"hook_callback"}});
+        let refused = answer(&other, &permissions).unwrap();
+        assert_eq!(refused["response"]["subtype"], "error");
+        assert_eq!(refused["response"]["request_id"], "r2");
+        assert_eq!(answer(&json!({"type":"result"}), &permissions), None);
+    }
+
+    #[test]
+    fn an_event_is_kept_with_when_it_came_unless_it_says() {
+        let now = || "2026-11-05T00:00:00.000Z".to_string();
+        assert_eq!(
+            stamped(json!({"type":"result"}), now)["timestamp"],
+            "2026-11-05T00:00:00.000Z"
+        );
+        let said = json!({"type":"user","timestamp":"2026-11-04T01:02:03.004Z"});
+        assert_eq!(stamped(said.clone(), now), said);
     }
 
     fn scratch(name: &str) -> PathBuf {
@@ -738,11 +849,11 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
         let settings: Value =
             serde_json::from_str(&fs::read_to_string(state.join("settings.json")).unwrap())
                 .unwrap();
-        assert_eq!(settings["skipDangerousModePermissionPrompt"], true);
+        assert_eq!(settings.get("skipDangerousModePermissionPrompt"), None);
         assert_eq!(
             settings["permissions"]["deny"],
             json!(["AskUserQuestion", "EnterPlanMode", "ExitPlanMode"]),
-            "a dialog is one nobody away from the terminal sees"
+            "a question nobody is at a terminal to answer"
         );
         assert_eq!(
             fs::read_to_string(state.join("CLAUDE.md")).unwrap(),
@@ -784,7 +895,6 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
             serde_json::from_str(&fs::read_to_string(state.join("settings.json")).unwrap())
                 .unwrap();
         assert_eq!(settings["theme"], "dark");
-        assert_eq!(settings["skipDangerousModePermissionPrompt"], true);
         assert_eq!(
             settings["permissions"]["deny"],
             json!([
@@ -822,29 +932,29 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
     }
 
     #[test]
-    fn a_session_begins_new_or_carries_on() {
+    fn a_session_is_headless_over_stream_json_and_begins_new_or_carries_on() {
         let claude = Claude::new("claude", None);
-        let fresh = claude.argv(Begin::Fresh("s1"), Path::new("/p"), Path::new("/c"));
+        let fresh = claude.argv(Begin::Fresh("s1"), Path::new("/c"));
+        assert_eq!(fresh[4..6], ["/c", "claude"]);
         assert_eq!(
             fresh[6..],
             [
-                "claude",
-                "--dangerously-skip-permissions",
+                "-p",
+                "--input-format",
+                "stream-json",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--replay-user-messages",
+                "--permission-prompt-tool",
+                "stdio",
                 "--session-id",
                 "s1"
             ]
         );
-        let resumed = claude.argv(Begin::Continue, Path::new("/p"), Path::new("/c"));
-        assert_eq!(
-            resumed[4..],
-            [
-                "/p",
-                "/c",
-                "claude",
-                "--dangerously-skip-permissions",
-                "--continue"
-            ]
-        );
+        assert!(!fresh.iter().any(|a| a.contains("dangerously")));
+        let resumed = claude.argv(Begin::Resume("s1"), Path::new("/c"));
+        assert_eq!(resumed[resumed.len() - 2..], ["--resume", "s1"]);
     }
 
     #[test]

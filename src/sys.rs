@@ -1,16 +1,46 @@
-//! What std does not offer: two calls declared directly rather than pulling
-//! in libc for them (both values are the same on Linux and macOS), and the
+//! What std does not offer: a few calls declared directly rather than pulling
+//! in libc for them (every value here is the same on Linux and macOS), and the
 //! time as the service reads it.
 
 use std::ffi::{c_char, c_int, CStr};
 use std::time::SystemTime;
 
 const SIGHUP: c_int = 1;
+pub const SIGKILL: c_int = 9;
+pub const SIGTERM: c_int = 15;
 const SIG_IGN: usize = 1;
 
 extern "C" {
     fn signal(signum: c_int, handler: usize) -> usize;
     fn gethostname(name: *mut c_char, len: usize) -> c_int;
+    fn kill(pid: c_int, sig: c_int) -> c_int;
+    #[cfg(target_os = "linux")]
+    fn prctl(option: c_int, ...) -> c_int;
+}
+
+/// Sends `sig` to every process in the group `group` leads. A group already
+/// gone is nothing to signal.
+pub fn signal_group(group: u32, sig: c_int) {
+    if let Ok(group) = c_int::try_from(group) {
+        unsafe {
+            kill(-group, sig);
+        }
+    }
+}
+
+/// For a child, between fork and exec: told to stop when the host ends, so a
+/// session never runs on unheard and then meets the one the next host resumes.
+/// macOS has no such call, and there a session ends when it next writes to
+/// the host that is gone.
+pub fn die_with_parent() -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        const PR_SET_PDEATHSIG: c_int = 1;
+        if unsafe { prctl(PR_SET_PDEATHSIG, SIGTERM as std::ffi::c_ulong) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
 }
 
 /// A host started from a terminal must outlive it. Closing the terminal sends
