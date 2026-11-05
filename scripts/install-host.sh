@@ -46,5 +46,45 @@ if [ -d "$skills/.git" ]; then
   fi
 fi
 "$HOME/.local/bin/worker-host" --version
+# On a mac, launchd runs the host: from login, again whenever it exits, and
+# never with a worker's environment, so it always finds the user's own Claude
+# login. launchd gives a job a bare PATH, so the agent is given one that has
+# claude and gh.
+if [ "$(uname -s)" = Darwin ]; then
+  label=com.github.dakotacolorado.worker-host
+  agent=$HOME/Library/LaunchAgents/$label.plist
+  domain=gui/$(id -u)
+  mkdir -p "$(dirname "$agent")"
+  cat > "$agent" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$label</string>
+  <key>ProgramArguments</key><array><string>$HOME/.local/bin/worker-host</string></array>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/dev/null</string>
+  <key>StandardErrorPath</key><string>$HOME/worker-host.log</string>
+</dict>
+</plist>
+EOF
+  if launchctl print "$domain/$label" >/dev/null 2>&1; then
+    # launchd stops and starts it, so this finishes even when run from a
+    # session of the host it restarts.
+    launchctl kickstart -k "$domain/$label"
+    echo "restarted $label on this release: each live session is resumed"
+  else
+    # A host started by hand gives way to the agent. Detached, since this may
+    # run in a session of that host, which ends with it.
+    nohup sh -c 'pkill -x worker-host; while pgrep -x worker-host >/dev/null; do sleep 1; done; launchctl bootstrap "$1" "$2"' \
+      sh "$domain" "$agent" >/dev/null 2>&1 </dev/null &
+    echo "started $label from $agent, in place of any host started by hand: each live session is resumed"
+  fi
+  exit 0
+fi
 echo "start it:   ~/.local/bin/worker-host 2>> ~/worker-host.log &"
 echo "restart it to run this release: each live session is resumed, losing only the turn in flight"

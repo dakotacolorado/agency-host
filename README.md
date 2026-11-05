@@ -14,7 +14,7 @@ it starts if it finds another):
 
 ```sh
 scripts/install-host.sh https://… <token>
-~/.local/bin/worker-host 2>> ~/worker-host.log &
+~/.local/bin/worker-host 2>> ~/worker-host.log &   # on linux; a mac's starts itself
 ```
 
 The script puts the latest release in `~/.local/bin` and, if there is none,
@@ -23,6 +23,18 @@ session's start (see Workers), so nothing else is installed; a run also takes
 away the worker-skills clone at `<workers_dir>/.claude` and its cron sync that
 earlier versions installed. Run it again for a newer release, then restart the
 host: each session that was live is resumed (see Restarts).
+
+On a mac the script also makes launchd run the host, as the LaunchAgent
+`com.github.dakotacolorado.worker-host` in `~/Library/LaunchAgents`: it starts
+at login and again whenever it exits, logs to `~/worker-host.log`, and is
+restarted onto the new release by each run of the script. A host started by
+hand gives way to it. To stop, start or restart it yourself:
+
+```sh
+launchctl bootout gui/$(id -u)/com.github.dakotacolorado.worker-host
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.github.dakotacolorado.worker-host.plist
+launchctl kickstart -k gui/$(id -u)/com.github.dakotacolorado.worker-host
+```
 
 ## Configure
 
