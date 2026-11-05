@@ -1495,7 +1495,7 @@ fn real(name: &str) -> (Workers, Home, PathBuf) {
 fn real_at(dir: &Path) -> Workers {
     Workers::new(
         Sessions::new(Permissions::default()),
-        Claude::from_env(|k| std::env::var(k).ok()),
+        Claude::from_env(|k| std::env::var(k).ok(), dir),
         dir.to_path_buf(),
     )
 }
@@ -1530,7 +1530,7 @@ fn read_real(
 fn real_claude() {
     let (workers, home, dir) = real("real");
     assert_eq!(
-        Claude::from_env(|k| std::env::var(k).ok())
+        Claude::from_env(|k| std::env::var(k).ok(), Path::new("/nonexistent"))
             .version()
             .as_deref(),
         Some(claude::CHECKED),

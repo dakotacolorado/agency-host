@@ -77,13 +77,28 @@ impl Claude {
         }
     }
 
-    pub fn from_env(var: impl Fn(&str) -> Option<String>) -> Self {
-        Claude::new(
-            "claude",
-            var("CLAUDE_CONFIG_DIR")
-                .filter(|v| !v.is_empty())
-                .map(PathBuf::from),
-        )
+    /// The host user's Claude Code, as the host's environment names it. A
+    /// `CLAUDE_CONFIG_DIR` inside `workers_dir` is a worker's own state, not
+    /// the user's -- the host was started from inside a worker's session --
+    /// and a session given it as its login store is not logged in, so it is
+    /// passed over for Claude Code's default.
+    pub fn from_env(var: impl Fn(&str) -> Option<String>, workers_dir: &Path) -> Self {
+        let resolved = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+        let login = var("CLAUDE_CONFIG_DIR")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .filter(|dir| {
+                let workers = resolved(dir).starts_with(resolved(workers_dir));
+                if workers {
+                    crate::log!(
+                        "CLAUDE_CONFIG_DIR {} is a worker's own, not this user's: sessions use \
+                         Claude Code's default login",
+                        dir.display()
+                    );
+                }
+                !workers
+            });
+        Claude::new("claude", login)
     }
 
     /// Headless, and spoken to for as long as it runs: messages and answers
@@ -929,6 +944,29 @@ mod tests {
         );
         let env = Claude::new("claude", Some("/u/claude".into())).env(state);
         assert_eq!(env[1].1, "/u/claude", "the user's own CLAUDE_CONFIG_DIR");
+    }
+
+    #[test]
+    fn the_users_login_is_where_their_claude_config_dir_says_unless_it_is_a_workers() {
+        let workers = scratch("login");
+        let login = |dir: &str| {
+            let dir = dir.to_string();
+            Claude::from_env(
+                |k| (k == "CLAUDE_CONFIG_DIR").then(|| dir.clone()),
+                &workers,
+            )
+            .env(Path::new("/w/ana/home/.claude"))[1]
+                .1
+                .clone()
+        };
+        assert_eq!(login("/u/claude"), "/u/claude", "the user's own");
+        let ana = workers.join("ana/home/.claude");
+        assert_eq!(
+            login(&ana.to_string_lossy()),
+            "",
+            "a host started from a worker's session: the default, not the worker's"
+        );
+        assert_eq!(login(""), "");
     }
 
     #[test]
