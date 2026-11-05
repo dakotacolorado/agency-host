@@ -110,7 +110,7 @@ fn main() -> ExitCode {
         None => log!("no capacity set: the service will put no worker here until one is"),
     }
     log!("workers are in {}", config.workers_dir.display());
-    let claude = claude::Claude::from_env(|k| env::var(k).ok());
+    let claude = claude::Claude::from_env(|k| env::var(k).ok(), &config.workers_dir);
     match claude.version() {
         Some(v) if v == claude::CHECKED => log!("Claude Code {v}"),
         Some(v) => log!(

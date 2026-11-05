@@ -130,6 +130,11 @@ flight: whatever Claude Code was in the middle of -- a reply, a tool -- is cut
 off, and the worker is told to check it. A session that was stopped, or that
 ended by itself while the host ran, is left as it was.
 
+Start or restart the host from your own login, not from inside a worker's
+session: the host takes its own `CLAUDE_CONFIG_DIR` to be where your Claude
+login is. One inside `workers_dir` can only be a worker's, so the host ignores
+it, says so in its log, and gives sessions Claude Code's default login.
+
 A host upgraded from a release that ran sessions in tmux takes them over the
 same way: it reads each one's variables back from the tmux server named by
 `tmux_socket`, ends that server, and resumes each session headless, reading
