@@ -46,5 +46,39 @@ if [ -d "$skills/.git" ]; then
   fi
 fi
 "$HOME/.local/bin/worker-host" --version
+# On a mac, launchd runs the host: from login, again whenever it exits, and
+# never with a worker's environment, so it always finds the user's own Claude
+# login. launchd gives a job a bare PATH, so the host is started through the
+# user's shell, interactive and login, to have what a terminal has: where
+# claude, gh and the toolchains sessions use are found.
+if [ "$(uname -s)" = Darwin ]; then
+  label=com.github.dakotacolorado.worker-host
+  agent=$HOME/Library/LaunchAgents/$label.plist
+  domain=gui/$(id -u)
+  mkdir -p "$(dirname "$agent")"
+  cat > "$agent" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$label</string>
+  <key>ProgramArguments</key><array>
+    <string>${SHELL:-/bin/zsh}</string><string>-ilc</string><string>exec '$HOME/.local/bin/worker-host'</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/dev/null</string>
+  <key>StandardErrorPath</key><string>$HOME/worker-host.log</string>
+</dict>
+</plist>
+EOF
+  # Unloaded and loaded again, not kickstarted, so launchd reads the plist
+  # just written; a host started by hand gives way too. Detached, since this
+  # may run in a session of the host it stops, which ends with it.
+  nohup sh -c 'launchctl bootout "$1/$3" 2>/dev/null; pkill -x worker-host; while pgrep -x worker-host >/dev/null; do sleep 1; done; launchctl bootstrap "$1" "$2"' \
+    sh "$domain" "$agent" "$label" >/dev/null 2>&1 </dev/null &
+  echo "(re)starting $label from $agent on this release, in place of any host started by hand: each live session is resumed"
+  exit 0
+fi
 echo "start it:   ~/.local/bin/worker-host 2>> ~/worker-host.log &"
 echo "restart it to run this release: each live session is resumed, losing only the turn in flight"

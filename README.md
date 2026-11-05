@@ -14,15 +14,34 @@ it starts if it finds another):
 
 ```sh
 scripts/install-host.sh https://… <token>
-~/.local/bin/worker-host 2>> ~/worker-host.log &
+~/.local/bin/worker-host 2>> ~/worker-host.log &   # on linux; a mac's starts itself
 ```
 
 The script puts the latest release in `~/.local/bin` and, if there is none,
 writes the config file below. Workers' shared context comes with each
 session's start (see Workers), so nothing else is installed; a run also takes
 away the worker-skills clone at `<workers_dir>/.claude` and its cron sync that
-earlier versions installed. Run it again for a newer release, then restart the
-host: each session that was live is resumed (see Restarts).
+earlier versions installed. Run it again for a newer release, then, on linux,
+restart the host: each session that was live is resumed (see Restarts).
+
+On a mac the script also makes launchd run the host, as the LaunchAgent
+`com.github.dakotacolorado.worker-host`, whose plist in `~/Library/LaunchAgents`
+each run writes afresh. launchd starts the host at login and again whenever it
+exits, so `kill` restarts it rather than stopping it; it logs to
+`~/worker-host.log`. It is started through your shell, interactive and login
+(`zsh -ilc`), so it and its sessions have the PATH and variables a terminal
+has: change those in your shell's startup files, then restart it. Each run of
+the script restarts it onto the new release. The first run stops any host
+started by hand and loads the agent in its place; after that, do not start one
+by hand, which would run beside it as a second host. To restart it, stop it until the next login, or start it again:
+
+```sh
+launchctl kickstart -k gui/$(id -u)/com.github.dakotacolorado.worker-host
+launchctl bootout gui/$(id -u)/com.github.dakotacolorado.worker-host
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.github.dakotacolorado.worker-host.plist
+```
+
+To stop it for good, `bootout` it and remove the plist.
 
 ## Configure
 
@@ -133,6 +152,8 @@ Start or restart the host from your own login, not from inside a worker's
 session: the host takes its own `CLAUDE_CONFIG_DIR` to be where your Claude
 login is. One inside `workers_dir` can only be a worker's, so the host ignores
 it, says so in its log, and gives sessions Claude Code's default login.
+On a mac, `launchctl` may be run from anywhere, since launchd starts the host
+with the agent's environment, not the caller's.
 
 A session an older release began is resumed the same way, and what it said
 before is read from Claude Code's own transcript, so its lines are numbered on.
