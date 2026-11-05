@@ -119,14 +119,20 @@ session shares the host user's Claude login: HOME stays the user's, and
 `EnterPlanMode` and `ExitPlanMode` tools, which wait on a person at a
 terminal: a worker asks in words and ends its turn instead.
 
-States: `working`, `waiting` (its last turn ended, nothing said since),
-`idle` (no session), `interrupted` (its session ended by itself; can be
-resumed). A `message` is written to the session's stdin at once and reported
-done once Claude Code echoes it back, as it does when it takes it at its next
-step; `interrupt` asks Claude Code to stop the turn, as Escape does; `stop`
-ends the session and whatever it started; `retire` stops it and moves the
-folder to `<workers_dir>/.retired/<name>-<id>/`. Every command is idempotent:
-one sent again is answered, not redone.
+States: `working`, `waiting` (its last turn ended, nothing said since), `idle`
+(no session), `interrupted` (its session ended by itself; can be resumed).
+With each state go `tasks`, the background tasks and subagents its live
+session has open (from Claude Code's latest `background_tasks_changed`), and
+`told`, whether its turn or its last was begun by a message the host delivered
+rather than by itself, as one a background task's end begins is. The host
+writes a `process_started` line in `logs/<id>.jsonl` before each Claude Code
+it runs, so a session resumed there starts with no tasks. A `message` is
+written to the session's stdin at once and reported done once Claude Code
+echoes it back, as it does when it takes it at its next step; `interrupt` asks
+Claude Code to stop the turn, as Escape does; `stop` ends the session and
+whatever it started; `retire` stops it and moves the folder to
+`<workers_dir>/.retired/<name>-<id>/`. Every command is idempotent: one sent
+again is answered, not redone.
 
 To take a session over by hand, stop the worker (so the host does not write
 to it too), then in its folder run its Claude Code with its own state:

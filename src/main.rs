@@ -345,9 +345,7 @@ fn report(
         all.iter()
             .zip(read)
             .map(|((home, record), (_, _, next, _))| {
-                let (state, session_id) =
-                    workers.state(home, live.contains_key(&record.id), next.waiting);
-                WorkerReport::new(record.id.clone(), state, session_id)
+                workers.report(home, &record.id, live.contains_key(&record.id), next)
             })
             .collect()
     });

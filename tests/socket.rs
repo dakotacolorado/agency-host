@@ -58,7 +58,8 @@ fn a_command_pushed_on_the_socket_is_taken_and_reported_at_once() {
     assert_eq!(result(&created, "c1").unwrap()["ok"], true, "{created}");
     assert_eq!(
         created["workers"],
-        json!([{"id":"w1","state":"idle","sessionId":null}])
+        json!([{"id":"w1","state":"idle","sessionId":null,"tasks":0}]),
+        "no turn yet, so nothing said of one"
     );
 
     let start = json!({"id":"c2","kind":"start","workerId":"w1","sessionId":"5a1e2b3c-4d5e-4f60-8a7b-8c9d0e1f2a3b","resume":false,"text":"hello"});
@@ -71,7 +72,15 @@ fn a_command_pushed_on_the_socket_is_taken_and_reported_at_once() {
         assert!(Instant::now() < deadline, "{ok:?} {waiting} {lines:?}");
         let report = report_until(&mut socket, quick, |_| true);
         ok = ok.or(result(&report, "c2").map(|r| r["ok"].clone()));
-        waiting |= report["workers"][0]["state"] == "waiting";
+        let worker = &report["workers"][0];
+        if worker["state"] == "waiting" {
+            assert_eq!(
+                (&worker["tasks"], &worker["told"]),
+                (&json!(0), &json!(true)),
+                "its turn was begun by the message: {report}"
+            );
+            waiting = true;
+        }
         lines.extend(report["lines"].as_array().cloned().unwrap_or_default());
     }
     assert_eq!(ok, Some(json!(true)));
@@ -91,7 +100,7 @@ fn a_command_pushed_on_the_socket_is_taken_and_reported_at_once() {
     assert_eq!(result(&stopped, "c3").unwrap()["ok"], true, "{stopped}");
     assert_eq!(
         stopped["workers"],
-        json!([{"id":"w1","state":"idle","sessionId":null}])
+        json!([{"id":"w1","state":"idle","sessionId":null,"tasks":0,"told":true}])
     );
 
     // Dropped without a close, as a network that goes away does. Nothing has
@@ -101,7 +110,7 @@ fn a_command_pushed_on_the_socket_is_taken_and_reported_at_once() {
     let reopened = report_until(&mut socket, quick, |_| true);
     assert_eq!(
         reopened["workers"],
-        json!([{"id":"w1","state":"idle","sessionId":null}])
+        json!([{"id":"w1","state":"idle","sessionId":null,"tasks":0,"told":true}])
     );
     assert_eq!(
         reopened["lines"],

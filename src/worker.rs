@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use crate::claude::{self, Begin, Claude};
 use crate::context::{self, Context};
 use crate::home::{self, Home, Record, Session};
-use crate::protocol::{Line, State};
+use crate::protocol::{Line, State, WorkerReport};
 use crate::session::{Sessions, Spawn};
 use crate::sys;
 
@@ -40,6 +40,9 @@ const RAW_LIMIT: u64 = 8 << 20;
 
 /// The most lines the service takes for one worker in one report.
 const MOST_LINES: usize = 1000;
+
+/// The most tasks the service takes for one worker; more refuses the report.
+const MOST_TASKS: u32 = 1000;
 
 /// One step of a worker's conversation, as its transcript says it.
 #[derive(Debug, Clone, PartialEq)]
@@ -76,14 +79,28 @@ impl Entry {
 
 /// How far into a worker's transcripts has been accounted for: which of them
 /// (see `transcripts`), the byte after the last whole line read in it, the
-/// `seq` of the line that comes next, and whether, as of that line, the
-/// worker's last turn has ended with nothing said to it since.
+/// `seq` of the line that comes next, and as of that line: whether the
+/// worker's last turn has ended with nothing said to it since, how many
+/// background tasks its session has open, and whether its last turn was begun
+/// by a message (None before any turn of the session).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Cursor {
     pub file: usize,
     pub offset: u64,
     pub seq: u64,
     pub waiting: bool,
+    pub tasks: u32,
+    pub told: Option<bool>,
+}
+
+impl Cursor {
+    /// On to the start of the next source, a session of its own.
+    fn next_source(&mut self) {
+        self.file += 1;
+        self.offset = 0;
+        self.tasks = 0;
+        self.told = None;
+    }
 }
 
 /// The lines read from a worker's transcripts, and where the read after this
@@ -419,6 +436,19 @@ impl Workers {
         }
     }
 
+    /// What is reported of the worker, as of `at` in its transcripts.
+    pub fn report(&self, home: &Home, id: &str, live: bool, at: &Cursor) -> WorkerReport {
+        let (state, session_id) = self.state(home, live, at.waiting);
+        WorkerReport {
+            id: id.into(),
+            state,
+            session_id,
+            // A session not running has no tasks, whatever it last said.
+            tasks: if live { at.tasks.min(MOST_TASKS) } else { 0 },
+            told: at.told,
+        }
+    }
+
     /// Writes `text` to the worker's session now, whether it is working or
     /// waiting. Working, it takes the text at its next step rather than when
     /// it has finished; waiting on a question, the text is the answer and the
@@ -493,8 +523,7 @@ impl Workers {
                 if last {
                     break;
                 }
-                next.file += 1;
-                next.offset = 0;
+                next.next_source();
                 continue;
             };
             if file.seek(SeekFrom::Start(next.offset)).is_err() {
@@ -530,8 +559,7 @@ impl Workers {
                     if last || (taken >= RAW_LIMIT && !bounded) {
                         break 'files;
                     }
-                    next.file += 1;
-                    next.offset = 0;
+                    next.next_source();
                     continue 'files;
                 }
                 let session = ranges
@@ -546,6 +574,8 @@ impl Workers {
                     at,
                     entries,
                     waiting,
+                    tasks,
+                    told,
                 } = claude::read(&String::from_utf8_lossy(&line));
                 let at = at.filter(|at| instant(at)).unwrap_or_else(sys::now);
                 let read: Vec<Line> = entries
@@ -568,6 +598,8 @@ impl Workers {
                 next.offset += line.len() as u64;
                 next.seq += read.len() as u64;
                 next.waiting = waiting.unwrap_or(next.waiting);
+                next.tasks = tasks.unwrap_or(next.tasks);
+                next.told = told.or(next.told);
                 lines.extend(read);
             }
         }

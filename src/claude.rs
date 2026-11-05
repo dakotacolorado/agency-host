@@ -270,6 +270,14 @@ pub fn echoed(event: &Value) -> Option<&str> {
         .flatten()
 }
 
+/// The line the host writes in a session's events before each Claude Code it
+/// runs for it. A session resumed after a restart writes on in the same
+/// events, and nothing Claude Code says tells its new process from the old
+/// one, whose background tasks died with it.
+pub fn started(at: String) -> Value {
+    json!({"type": "worker_host", "subtype": "process_started", "timestamp": at})
+}
+
 /// The answer to `event` when it is a request of the host's: a permission
 /// asked for is given or refused by `permissions`, and any other request is
 /// refused by name, so that Claude Code does not wait on it.
@@ -398,6 +406,13 @@ pub struct Read {
     /// when it shows it at work or being told something, None when it says
     /// neither.
     pub waiting: Option<bool>,
+    /// How many background tasks and subagents the session has open after
+    /// this line, when it says: Claude Code lists them all each time one
+    /// starts or ends, and a new process has none.
+    pub tasks: Option<u32>,
+    /// Whether the turn under way was begun by a message the host delivered:
+    /// false at a turn's start, true once a message the host wrote comes back.
+    pub told: Option<bool>,
 }
 
 /// A line of a kind not read here says nothing, and the lines after it are
@@ -416,6 +431,22 @@ pub fn read(line: &str) -> Read {
         };
     }
     let message = &v["message"];
+    let tasks = match (v["type"].as_str(), v["subtype"].as_str()) {
+        (Some("system"), Some("background_tasks_changed")) => v["tasks"]
+            .as_array()
+            .map(|t| u32::try_from(t.len()).unwrap_or(u32::MAX)),
+        (Some("worker_host"), Some("process_started")) => Some(0),
+        _ => None,
+    };
+    // Claude Code replays its own task notifications too, marked with where
+    // they came from; what the host writes carries no `origin`.
+    let told = if v["type"] == "system" && v["subtype"] == "init" {
+        Some(false)
+    } else if echoed(&v).is_some() && v.get("origin").is_none() {
+        Some(true)
+    } else {
+        None
+    };
     let waiting = match v["type"].as_str() {
         // A tool's result, too, is the worker at work.
         Some("user") => Some(false),
@@ -488,6 +519,8 @@ pub fn read(line: &str) -> Read {
         at,
         entries,
         waiting,
+        tasks,
+        told,
     }
 }
 
@@ -781,6 +814,68 @@ mod tests {
             json!({"type":"control_request","request_id":"r","request":{"subtype":"can_use_tool"}}),
         ] {
             assert_eq!(waiting(neither.clone()), None, "{neither}");
+        }
+    }
+
+    #[test]
+    fn background_tasks_are_counted_from_the_list_claude_code_gives_and_none_in_a_new_process() {
+        let tasks = |line: Value| read(&line.to_string()).tasks;
+        assert_eq!(
+            tasks(
+                json!({"type":"system","subtype":"background_tasks_changed","tasks":[{"description":"Sleep 60 seconds then print finish time","run_id":"0mw3v5wh5-b560cdda","task_id":"bhzuwzdd1","task_type":"local_bash"}],"session_id":"s","timestamp":"2026-11-05T18:13:06.858Z","uuid":"u"})
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            tasks(
+                json!({"type":"system","subtype":"background_tasks_changed","tasks":[
+                    {"description":"Install Rust toolchain and zig under tools","run_id":"r1","task_id":"brn7g6zok","task_type":"local_bash"},
+                    {"description":"base-python and template repos","run_id":"r2","subagent_type":"general-purpose","task_id":"a0bfc7e8e2fca49db","task_type":"local_agent"}
+                ],"session_id":"s"})
+            ),
+            Some(2)
+        );
+        assert_eq!(
+            tasks(
+                json!({"type":"system","subtype":"background_tasks_changed","tasks":[],"session_id":"s"})
+            ),
+            Some(0)
+        );
+        assert_eq!(tasks(started("2026-11-05T18:13:01.000Z".into())), Some(0));
+        for neither in [
+            // A foreground Bash starts and ends a task too.
+            json!({"type":"system","subtype":"task_started","task_id":"btn9l66xr","task_type":"local_bash","is_backgrounded":false,"session_id":"s"}),
+            json!({"type":"system","subtype":"task_started","task_id":"bhzuwzdd1","task_type":"local_bash","is_backgrounded":true,"session_id":"s"}),
+            json!({"type":"system","subtype":"task_updated","task_id":"bhzuwzdd1","patch":{"status":"completed","end_time":1_793_902_446_874_u64}}),
+            json!({"type":"system","subtype":"task_notification","task_id":"bhzuwzdd1","status":"completed","summary":"Background command \"Sleep\" completed (exit code 0)"}),
+            json!({"type":"system","subtype":"init","session_id":"s"}),
+            json!({"type":"result","subtype":"success","is_error":false}),
+        ] {
+            assert_eq!(tasks(neither.clone()), None, "{neither}");
+        }
+    }
+
+    #[test]
+    fn a_turn_is_told_by_the_echo_of_a_message_not_by_a_task_notification() {
+        let told = |line: Value| read(&line.to_string()).told;
+        assert_eq!(
+            told(json!({"type":"system","subtype":"init","session_id":"s"})),
+            Some(false)
+        );
+        assert_eq!(
+            told(
+                json!({"isReplay":true,"message":{"content":"I agree with your recomendation here.","role":"user"},"parent_tool_use_id":null,"session_id":"s","timestamp":"2026-11-05T18:35:13.186Z","type":"user","uuid":"u1"})
+            ),
+            Some(true)
+        );
+        for neither in [
+            // Claude Code replays its own notice of a background task's end.
+            json!({"isReplay":true,"message":{"content":"<task-notification>\n<task-id>bgbp3zo73</task-id>\n<status>completed</status>\n</task-notification>","role":"user"},"origin":{"kind":"task-notification","producer":"session-task","runId":"0mw3vyy18-5c7b9c18"},"parent_tool_use_id":null,"session_id":"s","type":"user","uuid":"u2"}),
+            json!({"type":"system","subtype":"task_notification","task_id":"bhzuwzdd1","status":"completed"}),
+            json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"ok","tool_use_id":"t1"}]},"parent_tool_use_id":null}),
+            json!({"type":"result","subtype":"success","is_error":false}),
+        ] {
+            assert_eq!(told(neither.clone()), None, "{neither}");
         }
     }
 
