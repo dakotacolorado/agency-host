@@ -26,6 +26,12 @@ pub struct Service {
 impl Service {
     /// Answers every heartbeat with the socket's url and nothing else.
     pub fn start() -> Service {
+        Service::serving(None)
+    }
+
+    /// As `start`, and answers every GET with `context`, as a start's
+    /// `contextUrl` is answered, or 404 without one.
+    pub fn serving(context: Option<Value>) -> Service {
         let sockets = TcpListener::bind("127.0.0.1:0").unwrap();
         let socket_url = format!("ws://{}/beta", sockets.local_addr().unwrap());
         let http = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -34,9 +40,11 @@ impl Service {
             for stream in http.incoming() {
                 let mut reader = BufReader::new(stream.unwrap());
                 let mut length = 0;
+                let mut get = false;
                 loop {
                     let mut line = String::new();
                     reader.read_line(&mut line).unwrap();
+                    get |= line.starts_with("GET ");
                     if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
                         length = v.trim().parse().unwrap();
                     }
@@ -46,10 +54,18 @@ impl Service {
                 }
                 let mut body = vec![0; length];
                 reader.read_exact(&mut body).unwrap();
-                let reply = json!({"heartbeatInterval":30,"socketUrl":socket_url}).to_string();
+                let (status, reply) = match (get, &context) {
+                    (false, _) => (
+                        "200 OK",
+                        json!({"heartbeatInterval":30,"socketUrl":socket_url}),
+                    ),
+                    (true, Some(context)) => ("200 OK", context.clone()),
+                    (true, None) => ("404 Not Found", json!({"error":"no such session"})),
+                };
+                let reply = reply.to_string();
                 let _ = write!(
                     reader.get_mut(),
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
                     reply.len()
                 );
             }

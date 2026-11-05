@@ -9,7 +9,7 @@ use crate::context::Context;
 /// A command for one worker. Every kind names it; the rest is each kind's
 /// own. Unknown fields are ignored, so the service can add one before the
 /// host reads it.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Command {
     pub id: String,
@@ -27,10 +27,33 @@ pub struct Command {
     /// and variables to set in its session.
     pub context: Option<Context>,
     pub documents: Option<Vec<Context>>,
+    /// `start`: where on the service to read the whole context when the
+    /// start was too large to carry it; `context` and `documents` then hold
+    /// only what fitted.
+    pub context_url: Option<String>,
     pub env: Option<BTreeMap<String, String>>,
     /// `start`: tokens for its session, which go only into a file only the
     /// host's user can read, never onto a command line.
     pub secrets: Option<BTreeMap<String, String>>,
+}
+
+/// A start's whole context, as the service answers at its `contextUrl`.
+#[derive(Debug, Deserialize)]
+pub struct Whole {
+    pub context: Option<Context>,
+    pub documents: Vec<Context>,
+}
+
+impl Command {
+    /// This start with `whole` in place of the context it carried.
+    pub fn with(&self, whole: Whole) -> Command {
+        Command {
+            context: whole.context,
+            documents: Some(whole.documents),
+            context_url: None,
+            ..self.clone()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
