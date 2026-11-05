@@ -6,8 +6,9 @@
 //! with `WORKER_SERVICE_URL` and `WORKER_SERVICE_TOKEN` (beta's `ApiUrl` and
 //! token), and otherwise says so and passes.
 
+mod common;
+
 use serde_json::{json, Value};
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -15,22 +16,6 @@ use std::{env, fs, thread};
 
 /// A heartbeat is 30 s apart, so anything heard sooner came by the socket.
 const PUSHED: Duration = Duration::from_secs(10);
-
-const TMUX: &str = "wh-test-svc";
-
-/// Answers its opening message and each line typed, and ends each turn.
-const CLAUDE: &str = r#"#!/bin/sh
-dir="$CLAUDE_CONFIG_DIR/projects/-fake"; mkdir -p "$dir"
-case "$2" in --session-id) s=$3; shift 3 ;; *) s=$(cat "$dir/latest"); shift 2 ;; esac
-printf '%s' "$s" > "$dir/latest"; t="$dir/$s.jsonl"
-w() { printf '%s\n' "$1" >> "$t"; }
-w "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"$1\"}}"
-w '{"type":"assistant","message":{"id":"m0","content":[{"type":"text","text":"ready"}],"stop_reason":"end_turn"}}'
-while IFS= read -r line; do
-  w "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"$line\"}}"
-  w '{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"heard"}],"stop_reason":"end_turn"}}'
-done
-"#;
 
 struct Service {
     url: String,
@@ -89,8 +74,7 @@ impl Service {
     }
 }
 
-/// The host, its tmux server, and the worker made on it, ended however the
-/// test does.
+/// The host and the worker made on it, ended however the test does.
 struct Host<'a> {
     service: &'a Service,
     id: String,
@@ -111,11 +95,6 @@ impl Drop for Host<'_> {
         let _ = ureq::delete(&format!("{}/fleet/hosts/{}", self.service.url, self.id))
             .set("Authorization", &self.service.authorization)
             .call();
-        let _ = Command::new("tmux")
-            .env_remove("TMUX")
-            .env("TMUX_TMPDIR", self.dir.join("tmux"))
-            .args(["-L", TMUX, "kill-server"])
-            .output();
         let _ = fs::remove_dir_all(&self.dir);
     }
 }
@@ -140,14 +119,10 @@ fn a_worker_is_created_spoken_to_stopped_and_retired_over_the_socket() {
         authorization: format!("Bearer {token}"),
     };
     let id = format!("test-{}", std::process::id());
-    // Short, since a unix socket's path is limited to about a hundred bytes.
     let dir = env::temp_dir().join(format!("wh-{}-svc", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
-    for sub in ["tmux", "bin", "home"] {
-        fs::create_dir_all(dir.join(sub)).unwrap();
-    }
-    fs::write(dir.join("bin/claude"), CLAUDE).unwrap();
-    fs::set_permissions(dir.join("bin/claude"), fs::Permissions::from_mode(0o755)).unwrap();
+    fs::create_dir_all(dir.join("home")).unwrap();
+    common::install_claude(&dir);
     let path = format!(
         "{}:{}",
         dir.join("bin").display(),
@@ -158,7 +133,7 @@ fn a_worker_is_created_spoken_to_stopped_and_retired_over_the_socket() {
     // one while it had room, and the test's own create then found it full.
     // A worker named for this host is made and started here all the same.
     let config = format!(
-        "service_url = {:?}\ntoken = {token:?}\nhost_id = {id:?}\ntmux_socket = {TMUX:?}\n",
+        "service_url = {:?}\ntoken = {token:?}\nhost_id = {id:?}\n",
         service.url
     );
     fs::write(dir.join("config.toml"), config).unwrap();
@@ -166,7 +141,6 @@ fn a_worker_is_created_spoken_to_stopped_and_retired_over_the_socket() {
         .env_clear()
         .env("PATH", path)
         .env("HOME", dir.join("home"))
-        .env("TMUX_TMPDIR", dir.join("tmux"))
         .arg("--config")
         .arg(dir.join("config.toml"))
         .stderr(Stdio::inherit())

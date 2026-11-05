@@ -9,20 +9,9 @@ mod common;
 use common::{push, report_until, result, Service};
 use serde_json::json;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
-use std::process::{Child, Command};
+use std::process::Child;
 use std::time::{Duration, Instant};
-
-/// Answers its opening message, and ends its turn.
-const CLAUDE: &str = r#"#!/bin/sh
-dir="$CLAUDE_CONFIG_DIR/projects/-fake"; mkdir -p "$dir"; t="$dir/$3.jsonl"
-printf '%s\n' "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"$4\"}}" >> "$t"
-printf '%s\n' '{"type":"assistant","message":{"id":"m0","content":[{"type":"text","text":"ready"}],"stop_reason":"end_turn"}}' >> "$t"
-sleep 60
-"#;
-
-const TMUX: &str = "wh-test-sock";
 
 struct Machine {
     dir: PathBuf,
@@ -33,31 +22,22 @@ impl Drop for Machine {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        let _ = Command::new("tmux")
-            .env_remove("TMUX")
-            .env("TMUX_TMPDIR", self.dir.join("tmux"))
-            .args(["-L", TMUX, "kill-server"])
-            .output();
         let _ = fs::remove_dir_all(&self.dir);
     }
 }
 
 #[test]
 fn a_command_pushed_on_the_socket_is_taken_and_reported_at_once() {
-    // Short, since a unix socket's path is limited to about a hundred bytes.
     let dir = std::env::temp_dir().join(format!("wh-{}-sock", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
-    for sub in ["tmux", "bin", "home"] {
-        fs::create_dir_all(dir.join(sub)).unwrap();
-    }
-    fs::write(dir.join("bin/claude"), CLAUDE).unwrap();
-    fs::set_permissions(dir.join("bin/claude"), fs::Permissions::from_mode(0o755)).unwrap();
+    fs::create_dir_all(dir.join("home")).unwrap();
+    common::install_claude(&dir);
 
     let service = Service::start();
     let child = common::host(
         &dir,
         &format!(
-            "service_url = \"{}\"\ntoken = \"the-hosts-own\"\nhost_id = \"studio\"\ntmux_socket = \"{TMUX}\"\n",
+            "service_url = \"{}\"\ntoken = \"the-hosts-own\"\nhost_id = \"studio\"\n",
             service.url
         ),
     );

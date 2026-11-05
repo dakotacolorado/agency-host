@@ -25,5 +25,4 @@ CC
   ln -sf "$zig" "$tools/bin/zig"
   chmod +x "$tools/bin/cc" "$tools/bin/ar"
 fi
-command -v tmux >/dev/null || echo "setup.sh: tmux is missing; the tests need it (apt-get install tmux / brew install tmux)" >&2
 echo "export RUSTUP_HOME=$RUSTUP_HOME CARGO_HOME=$CARGO_HOME PATH=$tools/bin:$CARGO_HOME/bin:\$PATH"

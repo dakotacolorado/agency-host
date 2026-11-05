@@ -1,31 +1,25 @@
 //! The workers on this host. Each has a folder of its own (home.rs), and
-//! while it has a session, a Claude Code running in tmux, which takes input
-//! while it works and writes its transcript as it goes. The host remembers
-//! nothing about them that their folders and tmux do not hold.
+//! while it has a session, a headless Claude Code (session.rs), which takes
+//! messages while it works and says what it does as it goes. The host
+//! remembers nothing about them that their folders do not hold.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::PathBuf;
-use std::thread;
 use std::time::{Duration, Instant};
-
-use std::collections::BTreeMap;
 
 use crate::claude::{self, Begin, Claude};
 use crate::context::{self, Context};
 use crate::home::{self, Home, Record, Session};
+use crate::legacy;
 use crate::protocol::{Line, State};
+use crate::session::{Sessions, Spawn};
 use crate::sys;
-use crate::tmux::Tmux;
-
-/// The opening message is one argument to Claude Code, and linux takes no
-/// single argument longer than this.
-const LONGEST_PROMPT: usize = 128 << 10;
 
 /// What a new session is told when it was started with nothing to say. Claude
-/// Code writes nothing until it is told something, and a message is typed only
-/// once it has answered, so a session always opens with words.
+/// Code does nothing until it is told something, so a session always opens
+/// with words.
 const NOTHING_YET: &str = "Nothing has been asked of you yet. Wait to be told what the work is.";
 
 /// What a session that carries on the last conversation is told when it was
@@ -34,17 +28,19 @@ const CARRY_ON: &str = "Your last session ended and this one carries on from it.
                         waiting to be told something, keep waiting; otherwise carry on where you \
                         left off.";
 
+/// What a session is told when the host has restarted and resumed it.
+const RESUMED: &str = "The host your session runs on restarted, and this session carries on \
+                       the conversation from before it. Whatever was under way as it went -- a \
+                       reply, a tool -- was cut off and may not have finished. If you were waiting \
+                       to be told something, keep waiting; otherwise check what was cut off, then \
+                       carry on where you left off.";
+
 /// However much has piled up, a read stops after this many bytes of the raw
-/// transcript, most of which is Claude Code's own bookkeeping.
+/// events, most of which is Claude Code's own bookkeeping.
 const RAW_LIMIT: u64 = 8 << 20;
 
 /// The most lines the service takes for one worker in one report.
 const MOST_LINES: usize = 1000;
-
-/// Between the key that stops a turn and the text that follows it: sent
-/// together, the terminal reads the two as one escape sequence, and the text
-/// lands while the turn is still stopping.
-const SETTLE: Duration = Duration::from_millis(500);
 
 /// One step of a worker's conversation, as its transcript says it.
 #[derive(Debug, Clone, PartialEq)]
@@ -100,28 +96,57 @@ pub struct Batch {
     pub next: Cursor,
 }
 
-/// The Claude Code transcripts a worker's sessions wrote to, in the order
-/// they were begun, each once: a session that carries on the last
-/// conversation writes on in the transcript before it.
-fn transcripts(sessions: &[Session]) -> Vec<&str> {
-    let mut files: Vec<&str> = Vec::new();
+/// Where a worker's lines are read from, in the order they were written.
+#[derive(Debug, PartialEq)]
+enum Source<'a> {
+    /// Claude Code's own transcript of a session an older release began in
+    /// tmux, up to where a headless session carried the conversation on, if
+    /// one has: what comes after is in that one's events too.
+    Transcript { claude: &'a str, until: Option<u64> },
+    /// What a headless session said on its stdout.
+    Events { session_id: &'a str },
+}
+
+/// A worker's sources, each once: a tmux session that carried on the last
+/// conversation wrote on in the transcript before it, and a session resumed
+/// after a restart writes on in its own events.
+fn sources(sessions: &[Session]) -> Vec<Source<'_>> {
+    let mut found = Vec::new();
     for s in sessions {
-        if !files.contains(&s.claude.as_str()) {
-            files.push(&s.claude);
+        let source = if s.stream {
+            Source::Events {
+                session_id: &s.session_id,
+            }
+        } else {
+            Source::Transcript {
+                claude: &s.claude,
+                until: sessions
+                    .iter()
+                    .filter(|o| o.stream && o.claude == s.claude)
+                    .map(|o| o.from)
+                    .min(),
+            }
+        };
+        if !found.contains(&source) {
+            found.push(source);
         }
     }
-    files
+    found
 }
 
 pub struct Workers {
-    tmux: Tmux,
+    sessions: Sessions,
     claude: Claude,
     dir: PathBuf,
 }
 
 impl Workers {
-    pub fn new(tmux: Tmux, claude: Claude, dir: PathBuf) -> Self {
-        Workers { tmux, claude, dir }
+    pub fn new(sessions: Sessions, claude: Claude, dir: PathBuf) -> Self {
+        Workers {
+            sessions,
+            claude,
+            dir,
+        }
     }
 
     /// Every worker here that is not retired.
@@ -173,9 +198,9 @@ impl Workers {
         self.claude.prepare(&home.claude(), &home.dir, &rules)
     }
 
-    /// Runs a session for the worker, in tmux, in its folder: a new
-    /// conversation, or with `resume` the worker's last one carried on.
-    /// `text` is what it is told first.
+    /// Runs a session for the worker in its folder: a new conversation, or
+    /// with `resume` the worker's last one carried on. `text` is what it is
+    /// told first.
     ///
     /// A start is sent again until it is reported, so one the host has done
     /// already -- before a restart that lost the report -- is done, not
@@ -204,17 +229,14 @@ impl Workers {
     ) -> Result<(), String> {
         let (home, record) = self.find(id)?;
         let sessions = home.sessions();
-        if self.session(id).is_some() {
-            return match sessions.last() {
-                Some(s) if s.session_id == session_id => Ok(()),
-                Some(s) => Err(format!(
-                    "{} already has session {} running: stop it first",
-                    record.name, s.session_id
-                )),
-                None => Err(format!(
-                    "{} already has a session running that this host did not start",
+        if let Some(running) = self.live().remove(id) {
+            return if running == session_id {
+                Ok(())
+            } else {
+                Err(format!(
+                    "{} already has session {running} running: stop it first",
                     record.name
-                )),
+                ))
             };
         }
         if sessions.iter().any(|s| s.session_id == session_id) {
@@ -222,37 +244,22 @@ impl Workers {
         }
         self.claude.installed()?;
         let previous = sessions.last().filter(|_| resume);
-        let session = match previous {
-            Some(p) => Session {
-                session_id: session_id.into(),
-                claude: p.claude.clone(),
-                from: claude::transcript(&home.claude(), &p.claude)
-                    .and_then(|path| fs::metadata(path).ok())
-                    .map_or(0, |m| m.len()),
-                stopped: false,
-            },
-            None => Session {
-                session_id: session_id.into(),
-                claude: claude::session_id(session_id),
-                from: 0,
-                stopped: false,
-            },
+        let session = Session {
+            session_id: session_id.into(),
+            claude: previous.map_or_else(|| claude::uuid(session_id), |p| p.claude.clone()),
+            from: previous.map_or(0, |p| transcript_len(&home, &p.claude)),
+            stream: true,
+            stopped: false,
+            ended: false,
         };
         let begin = match previous {
-            Some(_) => Begin::Continue,
+            Some(_) => Begin::Resume(&session.claude),
             None => Begin::Fresh(&session.claude),
         };
         let text = text.unwrap_or(match begin {
-            Begin::Continue => CARRY_ON,
+            Begin::Resume(_) => CARRY_ON,
             Begin::Fresh(_) => NOTHING_YET,
         });
-        if text.len() > LONGEST_PROMPT {
-            return Err(format!(
-                "the opening message is {} bytes, more than the {LONGEST_PROMPT} one argument can \
-                 carry",
-                text.len()
-            ));
-        }
         let prompt = home.prompt();
         fs::write(&prompt, text).map_err(|e| format!("{}: {e}", prompt.display()))?;
         // A start without a context keeps the last one the worker was given.
@@ -268,101 +275,193 @@ impl Workers {
         // ones of the host it runs on, then the context's.
         let rules = context::rules(&rules(&home, &record), written.as_ref());
         self.claude.prepare(&home.claude(), &home.dir, &rules)?;
-        context::credentials(&home.credentials(), given.secrets)?;
-        let argv = self.claude.argv(begin, &prompt, &home.credentials());
-        let mut env = self.claude.env(&home.claude());
-        env.extend(context::env(given.env));
-        // Written before tmux is asked, so a machine that dies between the two
-        // leaves a session it knows of, which then reads as interrupted.
+        // Its variables go with its tokens, so a session resumed after the
+        // host restarts is given them again.
+        let mut variables: BTreeMap<String, String> = context::env(given.env).into_iter().collect();
+        variables.extend(context::env(given.secrets));
+        context::credentials(&home.credentials(), Some(&variables))?;
+        // Written before it runs, so a machine that dies between the two
+        // leaves a session it knows of, which is then resumed.
         home.begin(&session)?;
-        if let Err(e) = self.tmux.start(
-            id,
-            &format!("worker-{}", record.name),
-            &home.dir,
-            &argv,
-            &env,
-            Some(&home.log(session_id)),
-        ) {
+        if let Err(e) = self.run(&home, id, &session, begin, text) {
             let _ = home.withdraw(session_id);
             return Err(e);
         }
         Ok(())
     }
 
-    /// Every live session, by the id of the worker it is for, mapped to
-    /// tmux's id for it.
+    /// Runs Claude Code for `session` and tells it `text`.
+    fn run(
+        &self,
+        home: &Home,
+        id: &str,
+        session: &Session,
+        begin: Begin,
+        text: &str,
+    ) -> Result<(), String> {
+        let argv = self.claude.argv(begin, &home.credentials());
+        let env = self.claude.env(&home.claude());
+        self.sessions.start(
+            id,
+            &session.session_id,
+            Spawn {
+                argv: &argv,
+                dir: &home.dir,
+                env: &env,
+                events: &home.events(&session.session_id),
+                errors: &home.errors(&session.session_id),
+            },
+        )?;
+        let opening = claude::uuid(&format!("{}/{}", session.session_id, sys::now()));
+        if let Err(e) = self.say(id, text, &opening) {
+            let _ = self.sessions.stop(id);
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Every live session, by the id of the worker it is for, mapped to its
+    /// session id. A session found to have ended by itself is noted as ended,
+    /// so the worker reads as interrupted and a host that restarts leaves it.
     pub fn live(&self) -> HashMap<String, String> {
-        self.tmux.sessions().into_iter().collect()
+        for (worker, session_id, status) in self.sessions.reap() {
+            crate::log!("worker {worker}: session {session_id} ended by itself ({status})");
+            if let Ok((home, _)) = self.find(&worker) {
+                if home
+                    .latest()
+                    .is_some_and(|s| s.session_id == session_id && !s.stopped)
+                {
+                    let _ = home.ended(&session_id);
+                }
+            }
+        }
+        self.sessions.live()
     }
 
-    fn session(&self, id: &str) -> Option<String> {
-        self.live().remove(id)
-    }
-
-    fn running(&self, id: &str) -> Result<String, String> {
-        self.session(id)
+    fn running(&self, id: &str) -> Result<(), String> {
+        self.live()
+            .contains_key(id)
+            .then_some(())
             .ok_or_else(|| format!("worker {id} has no live session on this host"))
     }
 
-    /// Takes up every live session again, as a host does once it has
-    /// restarted: each one's terminal goes on being logged. What is not live
-    /// needs nothing: a session that ended without a stop already reads as
-    /// interrupted.
-    pub fn reconcile(&self) -> Vec<(String, State)> {
+    /// Takes up every session that was live when the host last went, as a
+    /// host does once it has started: each is resumed headless and told the
+    /// host restarted, losing the turn that was in flight. One a release that
+    /// ran sessions in tmux left is ended there first (see legacy.rs). A
+    /// session that was stopped, or ended by itself, is left: the latter reads
+    /// as interrupted.
+    pub fn reconcile(&self, tmux_socket: &str) -> Vec<(String, State)> {
+        let all = self.all();
+        let left = |s: &Session| !s.stopped && !s.ended;
+        let carried = if all
+            .iter()
+            .any(|(home, _)| home.latest().is_some_and(|s| left(&s) && !s.stream))
+        {
+            legacy::take_over(tmux_socket)
+        } else {
+            HashMap::new()
+        };
+        for (home, record) in &all {
+            let Some(latest) = home.latest().filter(left) else {
+                continue;
+            };
+            if let Err(e) = self.resume(home, record, &latest, carried.get(&record.id)) {
+                crate::log!(
+                    "worker {}: session {} could not be resumed: {e}",
+                    record.name,
+                    latest.session_id
+                );
+                let _ = home.ended(&latest.session_id);
+            }
+        }
         let live = self.live();
-        self.all()
-            .into_iter()
+        all.into_iter()
             .map(|(home, record)| {
-                let tmux = live.get(&record.id);
-                if let (Some(tmux), Some(latest)) = (tmux, home.latest()) {
-                    let _ = self.tmux.log_to(tmux, &home.log(&latest.session_id));
-                }
-                let (state, _) = self.state(&home, tmux.map(String::as_str), false);
+                let (state, _) = self.state(&home, live.contains_key(&record.id), false);
                 (record.name, state)
             })
             .collect()
     }
 
-    /// What the worker is doing. `live` is its tmux session, if it has one,
-    /// and `waiting` what its transcript says of its last turn.
-    pub fn state(&self, home: &Home, live: Option<&str>, waiting: bool) -> (State, Option<String>) {
-        let latest = home.latest();
-        match live {
-            Some(_) => {
-                let state = if waiting {
-                    State::Waiting
-                } else {
-                    State::Working
-                };
-                (state, latest.map(|s| s.session_id))
+    /// Resumes `latest`, the session the worker had when the host went.
+    fn resume(
+        &self,
+        home: &Home,
+        record: &Record,
+        latest: &Session,
+        carried: Option<&Vec<(String, String)>>,
+    ) -> Result<(), String> {
+        self.claude.installed()?;
+        let session = if latest.stream {
+            latest.clone()
+        } else {
+            if let Some(carried) = carried {
+                let mut variables: BTreeMap<String, String> = carried.iter().cloned().collect();
+                variables.extend(context::written_credentials(&home.credentials()));
+                context::credentials(&home.credentials(), Some(&variables))?;
             }
-            None => match latest {
-                Some(s) if !s.stopped => (State::Interrupted, Some(s.session_id)),
-                _ => (State::Idle, None),
-            },
+            let session = Session {
+                from: transcript_len(home, &latest.claude),
+                stream: true,
+                ..latest.clone()
+            };
+            home.begin(&session)?;
+            session
+        };
+        // A session cut off before Claude Code wrote anything has nothing to
+        // resume, and is begun again as it was first.
+        let (begin, text) = match claude::transcript(&home.claude(), &session.claude) {
+            Some(_) => (Begin::Resume(&session.claude), RESUMED.to_string()),
+            None => (
+                Begin::Fresh(&session.claude),
+                fs::read_to_string(home.prompt()).unwrap_or_else(|_| NOTHING_YET.into()),
+            ),
+        };
+        self.run(home, &record.id, &session, begin, &text)
+    }
+
+    /// What the worker is doing. `live` is whether it has a session running,
+    /// and `waiting` what its session said of its last turn.
+    pub fn state(&self, home: &Home, live: bool, waiting: bool) -> (State, Option<String>) {
+        let latest = home.latest();
+        if live {
+            let state = if waiting {
+                State::Waiting
+            } else {
+                State::Working
+            };
+            return (state, latest.map(|s| s.session_id));
+        }
+        match latest {
+            Some(s) if !s.stopped => (State::Interrupted, Some(s.session_id)),
+            _ => (State::Idle, None),
         }
     }
 
-    /// Types `text` into the worker's session now, whether it is working or
+    /// Writes `text` to the worker's session now, whether it is working or
     /// waiting. Working, it takes the text at its next step rather than when
     /// it has finished; waiting on a question, the text is the answer and the
-    /// same session goes on. A message carried for the service goes through
-    /// `Deliveries`, which waits until the session is listening.
-    pub fn say(&self, id: &str, text: &str) -> Result<(), String> {
-        self.tmux.type_in(&self.running(id)?, text)
+    /// same session goes on. Claude Code echoes it with `uuid` once it has
+    /// taken it.
+    pub fn say(&self, id: &str, text: &str, uuid: &str) -> Result<(), String> {
+        self.sessions.send(id, &claude::message(text, uuid))
+    }
+
+    fn echoed(&self, id: &str, uuid: &str) -> bool {
+        self.sessions.echoed(id, uuid)
     }
 
     /// Stops the turn the worker is in, as Escape does for a person at its
     /// terminal: the session and its conversation go on, waiting, and `text`
-    /// is what it is told next.
-    pub fn interrupt(&self, id: &str, text: Option<&str>) -> Result<(), String> {
-        let session = self.running(id)?;
-        self.tmux.press(&session, "Escape")?;
-        if let Some(text) = text {
-            thread::sleep(SETTLE);
-            self.tmux.type_in(&session, text)?;
+    /// is what it is told next. `command` names the interrupt.
+    pub fn interrupt(&self, id: &str, command: &str, text: Option<&str>) -> Result<(), String> {
+        self.running(id)?;
+        self.sessions.send(id, &claude::interrupt(command))?;
+        match text {
+            Some(text) => self.say(id, text, &claude::uuid(command)),
+            None => Ok(()),
         }
-        Ok(())
     }
 
     /// Ends the worker's session, and Claude Code with it; the worker is idle.
@@ -373,9 +472,7 @@ impl Workers {
         let Ok((home, _)) = self.find(id) else {
             return Ok(());
         };
-        if let Some(session) = self.session(id) {
-            self.tmux.kill_session(&session)?;
-        }
+        self.sessions.stop(id)?;
         match home.latest() {
             Some(latest) if !latest.stopped => home.stopped(&latest.session_id),
             _ => Ok(()),
@@ -392,106 +489,26 @@ impl Workers {
         home.retire(&record)
     }
 
-    /// Whether Claude Code has answered anything in the worker's latest
-    /// session. Until it has, it may still be starting, and what is typed into
-    /// its terminal then is lost without a trace.
-    fn listening(&self, id: &str) -> bool {
-        let Ok((home, _)) = self.find(id) else {
-            return false;
-        };
-        let Some(latest) = home.latest() else {
-            return false;
-        };
-        self.scan(&home, &latest, latest.from, |entries| {
-            entries
-                .iter()
-                .any(|e| matches!(e, Entry::Said { .. } | Entry::Ran { .. }))
-        })
-    }
-
-    /// Whether a dialog is open in the worker's terminal, which a message
-    /// typed now would answer. A screen that cannot be read counts as one.
-    fn asking(&self, id: &str) -> bool {
-        self.running(id)
-            .and_then(|session| self.tmux.screen(&session))
-            .map_or(true, |screen| claude::dialog(&screen))
-    }
-
-    /// Where the latest session's transcript ends now, so what is written
-    /// after can be told apart.
-    fn end(&self, id: &str) -> u64 {
-        self.find(id)
-            .ok()
-            .and_then(|(home, _)| {
-                let latest = home.latest()?;
-                claude::transcript(&home.claude(), &latest.claude)
-            })
-            .and_then(|path| fs::metadata(path).ok())
-            .map_or(0, |m| m.len())
-    }
-
-    /// Whether the worker has been told `text` since `offset` in its latest
-    /// session's transcript, as typed or as Claude Code trimmed it.
-    fn told_since(&self, id: &str, offset: u64, text: &str) -> bool {
-        let Ok((home, _)) = self.find(id) else {
-            return false;
-        };
-        let Some(latest) = home.latest() else {
-            return false;
-        };
-        let typed = [claude::carried(text), claude::carried(text.trim())];
-        self.scan(&home, &latest, offset, |entries| {
-            entries
-                .iter()
-                .any(|e| matches!(e, Entry::Told { text } if typed.contains(text)))
-        })
-    }
-
-    /// Whether `found` holds of any whole line of the session's transcript
-    /// after `offset`. A line cut through by `offset` reads as nothing.
-    fn scan(
-        &self,
-        home: &Home,
-        session: &Session,
-        offset: u64,
-        found: impl Fn(&[Entry]) -> bool,
-    ) -> bool {
-        let Some(mut file) = claude::transcript(&home.claude(), &session.claude)
-            .and_then(|path| File::open(path).ok())
-        else {
-            return false;
-        };
-        if file.seek(SeekFrom::Start(offset)).is_err() {
-            return false;
-        }
-        let mut raw = BufReader::new(file).take(RAW_LIMIT);
-        let mut line = Vec::new();
-        loop {
-            line.clear();
-            match raw.read_until(b'\n', &mut line) {
-                Ok(n) if n > 0 && line.ends_with(b"\n") => {}
-                _ => return false,
-            }
-            if found(&claude::read(&String::from_utf8_lossy(&line)).entries) {
-                return true;
-            }
-        }
-    }
-
     /// What the worker has done since `from`, in all its sessions, as much
     /// as fits in `budget` bytes of lines; the rest waits for the next read.
     /// None when nothing new has been written. Only whole lines are read from
-    /// the transcript still being written, so a line Claude Code is in the
-    /// middle of is left for next time; one an ended session left torn is
+    /// the source still being written, so a line in the middle of being
+    /// written is left for next time; one an ended session left torn is
     /// passed over.
     pub fn read(&self, home: &Home, from: Cursor, budget: usize) -> Option<Batch> {
         let sessions = home.sessions();
-        let files = transcripts(&sessions);
+        let sources = sources(&sessions);
         let (mut next, mut lines, mut size) = (from, Vec::new(), 0);
-        'files: while next.file < files.len() {
-            let claude = files[next.file];
-            let last = next.file + 1 == files.len();
-            let file = claude::transcript(&home.claude(), claude).and_then(|p| File::open(p).ok());
+        'files: while next.file < sources.len() {
+            let source = &sources[next.file];
+            let last = next.file + 1 == sources.len();
+            let (path, until) = match source {
+                Source::Transcript { claude, until } => {
+                    (claude::transcript(&home.claude(), claude), *until)
+                }
+                Source::Events { session_id } => (Some(home.events(session_id)), None),
+            };
+            let file = path.and_then(|p| File::open(p).ok());
             let Some(mut file) = file else {
                 if last {
                     break;
@@ -503,8 +520,22 @@ impl Workers {
             if file.seek(SeekFrom::Start(next.offset)).is_err() {
                 break;
             }
-            let ranges: Vec<&Session> = sessions.iter().filter(|s| s.claude == claude).collect();
-            let mut raw = BufReader::new(file).take(RAW_LIMIT);
+            let ranges: Vec<&Session> = match source {
+                Source::Transcript { claude, .. } => sessions
+                    .iter()
+                    .filter(|s| !s.stream && s.claude == *claude)
+                    .collect(),
+                Source::Events { session_id } => sessions
+                    .iter()
+                    .filter(|s| s.stream && s.session_id == *session_id)
+                    .take(1)
+                    .collect(),
+            };
+            // A transcript a headless session carried on is read only up to
+            // where it did: the rest is in that session's events.
+            let left = until.map_or(RAW_LIMIT, |u| u.saturating_sub(next.offset));
+            let bounded = left <= RAW_LIMIT && until.is_some();
+            let mut raw = BufReader::new(file).take(left.min(RAW_LIMIT));
             let mut taken = 0;
             let mut line = Vec::new();
             loop {
@@ -516,7 +547,7 @@ impl Workers {
                 taken += n as u64;
                 if n == 0 || (!line.ends_with(b"\n") && last) {
                     // The end of what there is, or of what one read takes.
-                    if last || taken >= RAW_LIMIT {
+                    if last || (taken >= RAW_LIMIT && !bounded) {
                         break 'files;
                     }
                     next.file += 1;
@@ -526,7 +557,7 @@ impl Workers {
                 let session = ranges
                     .iter()
                     .rev()
-                    .find(|s| s.from <= next.offset)
+                    .find(|s| s.stream || s.from <= next.offset)
                     .or(ranges.first())
                     .map_or("", |s| s.session_id.as_str());
                 // Lossy, so a line that is not UTF-8 is passed over rather
@@ -590,11 +621,10 @@ fn rules(home: &Home, record: &Record) -> String {
 /// worth asking about, so the failure is still heard.
 pub const PATIENCE: Duration = Duration::from_secs(120);
 
-/// Messages carried to workers and not yet settled. Each is typed once its
-/// session is listening, and is done only once the transcript shows the
-/// worker was told it: a message typed into a terminal nobody is reading yet
-/// is accepted by tmux and then lost. Held in memory, so a host that restarts
-/// mid-delivery types a message the service sends again a second time.
+/// Messages carried to workers and not yet settled. Each is written to its
+/// session's stdin at once, and is done only once Claude Code echoes it back:
+/// until then it is only in a pipe. Held in memory, so a host that restarts
+/// mid-delivery writes a message the service sends again a second time.
 pub struct Deliveries {
     held: Vec<Delivery>,
     patience: Duration,
@@ -603,13 +633,8 @@ pub struct Deliveries {
 struct Delivery {
     command: String,
     worker: String,
-    text: String,
+    uuid: String,
     since: Instant,
-    /// Where the transcript ended when it was typed, once it has been.
-    typed: Option<u64>,
-    /// Whether a dialog was open in the worker's terminal when it was last
-    /// to be typed, and so kept it back.
-    asked: bool,
 }
 
 impl Deliveries {
@@ -626,14 +651,14 @@ impl Deliveries {
     }
 
     /// Whether `command` is already being delivered. The service sends a
-    /// command again until it is reported, and a message typed twice is said
-    /// twice.
+    /// command again until it is reported, and a message written twice is
+    /// said twice.
     pub fn holds(&self, command: &str) -> bool {
         self.held.iter().any(|d| d.command == command)
     }
 
-    /// Takes a message to deliver, typing it at once if the worker is
-    /// listening. What happened to it, if that is already known.
+    /// Takes a message to deliver, writing it to its worker's session. What
+    /// happened to it, if that is already known.
     pub fn hold(
         &mut self,
         workers: &Workers,
@@ -644,13 +669,15 @@ impl Deliveries {
         if let Err(e) = workers.running(worker) {
             return Some(Err(e));
         }
-        let mut delivery = Delivery {
+        let uuid = claude::uuid(command);
+        if let Err(e) = workers.say(worker, text, &uuid) {
+            return Some(Err(e));
+        }
+        let delivery = Delivery {
             command: command.into(),
             worker: worker.into(),
-            text: text.into(),
+            uuid,
             since: Instant::now(),
-            typed: None,
-            asked: false,
         };
         let done = delivery.step(workers, self.patience);
         if done.is_none() {
@@ -659,12 +686,12 @@ impl Deliveries {
         done
     }
 
-    /// Moves every held message on, and hands back, by command, those that
-    /// have reached their worker or never will.
+    /// Hands back, by command, the messages that have reached their worker
+    /// or never will.
     pub fn settle(&mut self, workers: &Workers) -> Vec<(String, Result<(), String>)> {
         let patience = self.patience;
         let mut settled = Vec::new();
-        self.held.retain_mut(|d| match d.step(workers, patience) {
+        self.held.retain(|d| match d.step(workers, patience) {
             Some(result) => {
                 settled.push((d.command.clone(), result));
                 false
@@ -676,47 +703,33 @@ impl Deliveries {
 }
 
 impl Delivery {
-    fn step(&mut self, workers: &Workers, patience: Duration) -> Option<Result<(), String>> {
-        if let Some(offset) = self.typed {
-            if workers.told_since(&self.worker, offset, &self.text) {
-                return Some(Ok(()));
-            }
+    fn step(&self, workers: &Workers, patience: Duration) -> Option<Result<(), String>> {
+        if workers.echoed(&self.worker, &self.uuid) {
+            return Some(Ok(()));
         }
-        if let Err(e) = workers.running(&self.worker) {
-            return Some(Err(e));
-        }
-        if self.typed.is_none() && workers.listening(&self.worker) {
-            self.asked = workers.asking(&self.worker);
-            if !self.asked {
-                let offset = workers.end(&self.worker);
-                if let Err(e) = workers.say(&self.worker, &self.text) {
-                    return Some(Err(e));
-                }
-                self.typed = Some(offset);
-            }
+        if workers.running(&self.worker).is_err() {
+            return Some(Err(format!(
+                "worker {}'s session ended before it took the message",
+                self.worker
+            )));
         }
         if self.since.elapsed() < patience {
             return None;
         }
-        let waited = patience.as_secs();
-        Some(Err(match self.typed {
-            None if self.asked => format!(
-                "a dialog was open in worker {}'s terminal for {waited}s, so the message was \
-                 never typed: Enter would have answered it",
-                self.worker
-            ),
-            None => format!(
-                "worker {} was not yet reading input after {waited}s, so the message was never \
-                 typed",
-                self.worker
-            ),
-            Some(_) => format!(
-                "typed to worker {}, but not in its transcript after {waited}s: it may still take \
-                 it at its next step",
-                self.worker
-            ),
-        }))
+        Some(Err(format!(
+            "written to worker {}'s session, but not taken after {}s: it may still take it at its \
+             next step",
+            self.worker,
+            patience.as_secs()
+        )))
     }
+}
+
+/// How long Claude Code's own transcript of `claude` is now.
+fn transcript_len(home: &Home, claude: &str) -> u64 {
+    claude::transcript(&home.claude(), claude)
+        .and_then(|path| fs::metadata(path).ok())
+        .map_or(0, |m| m.len())
 }
 
 /// Whether `at` is an instant the service takes: UTC, as Claude Code writes it.

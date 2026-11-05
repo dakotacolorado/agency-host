@@ -21,9 +21,10 @@ if [ ! -f "$config" ]; then
     "$1" "$2" "$(hostname -s)" "$(uname -s | tr 'A-Z' 'a-z' | sed s/darwin/macos/)" "$HOME/workers" > "$config")
   echo "wrote $config: edit capacity and labels to suit this machine"
 fi
-# Under systemd, stopping the unit kills its whole cgroup, and the tmux server
-# holding every worker's session is in it: stop only the host, which picks the
-# live sessions up again when it starts.
+# Under systemd, stopping the unit kills its whole cgroup. Sessions end with
+# the host all the same, each told to as it goes, but a release from before
+# ran them in tmux, which must outlive this restart for the new host to take
+# them over: so stopping the unit stops only the host.
 if command -v systemctl >/dev/null && systemctl --user cat worker-host.service >/dev/null 2>&1; then
   units=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
   mkdir -p "$units/worker-host.service.d"
@@ -47,4 +48,4 @@ if [ -d "$skills/.git" ]; then
 fi
 "$HOME/.local/bin/worker-host" --version
 echo "start it:   ~/.local/bin/worker-host 2>> ~/worker-host.log &"
-echo "attach:     tmux -L worker-host attach -t worker-<name>"
+echo "restart it to run this release: each live session is resumed, losing only the turn in flight"

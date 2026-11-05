@@ -191,6 +191,8 @@ pub fn rules(host: &str, written: Option<&Written>) -> String {
 
 /// Writes `secrets` to `file` as shell assignments the session reads as it
 /// starts, readable by the host's user alone; with none, removes the last.
+/// Each time a session starts it reads them again, so a session resumed
+/// after the host restarts has what its start gave it.
 pub fn credentials(file: &Path, secrets: Option<&BTreeMap<String, String>>) -> Result<(), String> {
     let at = |e: std::io::Error| format!("{}: {e}", file.display());
     let secrets: Vec<_> = env(secrets);
@@ -208,6 +210,18 @@ pub fn credentials(file: &Path, secrets: Option<&BTreeMap<String, String>>) -> R
         .map(|(k, v)| format!("{k}='{}'\n", v.replace('\'', r"'\''")))
         .collect();
     private(file, text.as_bytes()).map_err(at)
+}
+
+/// What `credentials` wrote to `file`, read back.
+pub fn written_credentials(file: &Path) -> BTreeMap<String, String> {
+    let text = fs::read_to_string(file).unwrap_or_default();
+    text.lines()
+        .filter_map(|line| {
+            let (k, v) = line.split_once('=')?;
+            let v = v.strip_prefix('\'')?.strip_suffix('\'')?;
+            Some((k.to_string(), v.replace(r"'\''", "'")))
+        })
+        .collect()
 }
 
 fn variable(name: &str) -> bool {
@@ -441,6 +455,11 @@ mod tests {
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .into();
         credentials(&file, Some(&given)).unwrap();
+        assert_eq!(
+            written_credentials(&file),
+            [("WT_TOKEN".to_string(), "it's $x `y`".to_string())].into(),
+            "read back as given, but for the host's own"
+        );
         assert_eq!(
             fs::read_to_string(&file).unwrap(),
             "WT_TOKEN='it'\\''s $x `y`'\n"

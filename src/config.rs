@@ -13,14 +13,57 @@ pub struct Config {
     /// What work this host can be matched to, as its owner names it. Checked
     /// by the service, whose refusal names the pattern a label must match.
     pub labels: Option<Vec<String>>,
-    /// The tmux server workers' sessions run on, by its `-L` name.
+    /// The tmux server an older release of this host ran sessions on, by its
+    /// `-L` name, so that a host upgraded from one can end them before it
+    /// resumes them headless. Nothing runs in tmux now.
     pub tmux_socket: String,
+    /// Which tools a session may use when Claude Code asks.
+    pub permissions: Permissions,
     /// Where each worker has its folder. Two hosts on one machine need two of
     /// these as well as two sockets, or each reports the other's workers.
     pub workers_dir: PathBuf,
 }
 
 pub const DEFAULT_TMUX_SOCKET: &str = "worker-host";
+
+/// The rule a permission request is answered by: a tool named in `deny` is
+/// refused, then one named in `allow` is given, and any other refused. A name
+/// ending in `*` is every tool it begins, so `*` is every tool and
+/// `mcp__github__*` every tool of that server. Unset, every tool is allowed,
+/// as when sessions ran with permissions skipped.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Permissions {
+    #[serde(default = "every_tool")]
+    pub allow: Vec<String>,
+    #[serde(default)]
+    pub deny: Vec<String>,
+}
+
+fn every_tool() -> Vec<String> {
+    vec!["*".into()]
+}
+
+impl Default for Permissions {
+    fn default() -> Self {
+        Permissions {
+            allow: every_tool(),
+            deny: vec![],
+        }
+    }
+}
+
+impl Permissions {
+    pub fn allows(&self, tool: &str) -> bool {
+        let names = |patterns: &[String]| {
+            patterns.iter().any(|p| match p.strip_suffix('*') {
+                Some(prefix) => tool.starts_with(prefix),
+                None => p == tool,
+            })
+        };
+        !names(&self.deny) && names(&self.allow)
+    }
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -32,6 +75,7 @@ struct File {
     labels: Option<Vec<String>>,
     tmux_socket: Option<String>,
     workers_dir: Option<PathBuf>,
+    permissions: Option<Permissions>,
 }
 
 pub fn default_path() -> Option<PathBuf> {
@@ -86,6 +130,7 @@ fn from_file(file: File, home: Option<PathBuf>) -> Result<Config, String> {
         labels: file.labels,
         tmux_socket,
         workers_dir,
+        permissions: file.permissions.unwrap_or_default(),
     })
 }
 
@@ -116,6 +161,7 @@ mod tests {
                 labels: Some(vec!["macos".into(), "linux".into()]),
                 tmux_socket: "worker-host".into(),
                 workers_dir: "/home/me/workers".into(),
+                permissions: Permissions::default(),
             }
         );
     }
@@ -127,6 +173,25 @@ mod tests {
         }
         let config = read(&format!("{BASE}tmux_socket = \"beta\"")).unwrap();
         assert_eq!(config.tmux_socket, "beta");
+    }
+
+    #[test]
+    fn every_tool_is_allowed_unless_the_file_denies_it_or_allows_only_some() {
+        let all = read(BASE).unwrap().permissions;
+        assert!(all.allows("Bash") && all.allows("mcp__github__create_pr"));
+        let some = read(&format!(
+            "{BASE}[permissions]\nallow = [\"Read\", \"mcp__github__*\"]\ndeny = [\"mcp__github__merge*\"]"
+        ))
+        .unwrap()
+        .permissions;
+        assert!(some.allows("Read") && some.allows("mcp__github__create_pr"));
+        assert!(!some.allows("Bash"), "not allowed");
+        assert!(!some.allows("mcp__github__merge_pr"), "denied wins");
+        assert!(!some.allows("Rea"), "a name is whole");
+        let denied = read(&format!("{BASE}[permissions]\ndeny = [\"WebFetch\"]"))
+            .unwrap()
+            .permissions;
+        assert!(denied.allows("Bash") && !denied.allows("WebFetch"));
     }
 
     #[test]

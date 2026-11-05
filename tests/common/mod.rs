@@ -73,8 +73,34 @@ impl Service {
     }
 }
 
+/// A stand-in for Claude Code, headless over stream-json as the host runs it:
+/// it echoes each message back as taken, answers the first `ready` and every
+/// one after `heard`, and ends each turn.
+pub const CLAUDE: &str = r#"#!/bin/sh
+[ "$1" = -p ] || exit 64
+reply=ready
+while IFS= read -r line; do
+  case "$line" in '{"message":{"content":'*) ;; *) continue ;; esac
+  printf '%s
+' "$line" | sed 's/^{/{"isReplay":true,/'
+  printf '%s
+' "{\"type\":\"assistant\",\"message\":{\"id\":\"m\",\"content\":[{\"type\":\"text\",\"text\":\"$reply\"}]},\"parent_tool_use_id\":null}"
+  printf '%s
+' '{"type":"result","subtype":"success","is_error":false}'
+  reply=heard
+done
+"#;
+
+/// Puts `CLAUDE` in `dir/bin`, where `host` finds it.
+pub fn install_claude(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::create_dir_all(dir.join("bin")).unwrap();
+    fs::write(dir.join("bin/claude"), CLAUDE).unwrap();
+    fs::set_permissions(dir.join("bin/claude"), fs::Permissions::from_mode(0o755)).unwrap();
+}
+
 /// Starts the built binary with `config` as its only settings, under `dir`'s
-/// own HOME and tmux, with `dir/bin` first on its PATH.
+/// own HOME, with `dir/bin` first on its PATH.
 pub fn host(dir: &Path, config: &str) -> Child {
     fs::write(dir.join("config.toml"), config).unwrap();
     let path = format!(
@@ -86,7 +112,6 @@ pub fn host(dir: &Path, config: &str) -> Child {
         .env_clear()
         .env("PATH", path)
         .env("HOME", dir.join("home"))
-        .env("TMUX_TMPDIR", dir.join("tmux"))
         .arg("--config")
         .arg(dir.join("config.toml"))
         .stderr(Stdio::null())

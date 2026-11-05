@@ -4,10 +4,11 @@ mod config;
 mod context;
 mod heartbeat;
 mod home;
+mod legacy;
 mod protocol;
+mod session;
 mod socket;
 mod sys;
-mod tmux;
 mod worker;
 
 use commands::Taken;
@@ -48,7 +49,9 @@ const USAGE: &str = "usage: worker-host [--config PATH]
                   or ~/.config/worker-host/config.toml); WORKER_HOST_CONFIG also names it
 
 Every setting is in the file: service_url, token, host_id (default the hostname),
-capacity, labels, workers_dir (default ~/workers), tmux_socket (default worker-host).";
+capacity, labels, workers_dir (default ~/workers), [permissions] allow and deny
+(default every tool allowed), and tmux_socket (default worker-host), where an
+older release ran sessions, which this one takes over.";
 
 fn parse(mut args: impl Iterator<Item = String>) -> Result<Option<PathBuf>, String> {
     let mut config = env::var_os("WORKER_HOST_CONFIG").map(PathBuf::from);
@@ -106,17 +109,25 @@ fn main() -> ExitCode {
         ),
         None => log!("no capacity set: the service will put no worker here until one is"),
     }
-    log!(
-        "workers are in {0}, their sessions on tmux socket {1}: tmux -L {1} ls",
-        config.workers_dir.display(),
-        config.tmux_socket
-    );
+    log!("workers are in {}", config.workers_dir.display());
+    let claude = claude::Claude::from_env(|k| env::var(k).ok());
+    match claude.version() {
+        Some(v) if v == claude::CHECKED => log!("Claude Code {v}"),
+        Some(v) => log!(
+            "Claude Code {v}: its stream-json is checked against {}, and may have changed",
+            claude::CHECKED
+        ),
+        None => match claude.installed() {
+            Ok(()) => log!("Claude Code did not say which release it is"),
+            Err(e) => log!("{e}: no session can start"),
+        },
+    }
     let workers = Workers::new(
-        tmux::Tmux::new(&config.tmux_socket),
-        claude::Claude::from_env(|k| env::var(k).ok()),
+        session::Sessions::new(config.permissions.clone()),
+        claude,
         config.workers_dir.clone(),
     );
-    for (name, state) in workers.reconcile() {
+    for (name, state) in workers.reconcile(&config.tmux_socket) {
         let state = serde_json::to_value(state).unwrap_or_default();
         log!("worker {name}: {}", state.as_str().unwrap_or_default());
     }
@@ -178,7 +189,7 @@ fn take(
 }
 
 /// Assumes nothing survives between iterations but what is in memory, the
-/// workers' folders and tmux: the machine may sleep for weeks between two,
+/// workers' folders and their sessions: the machine may sleep for weeks between two,
 /// and the next heartbeat is simply late. Commands come only on the socket,
 /// and reports go only on it: what has not been written on one -- command
 /// results, and transcript past each worker's cursor -- is kept until it is,
@@ -310,7 +321,7 @@ fn report(
             .zip(read)
             .map(|((home, record), (_, _, next, _))| {
                 let (state, session_id) =
-                    workers.state(home, live.get(&record.id).map(String::as_str), next.waiting);
+                    workers.state(home, live.contains_key(&record.id), next.waiting);
                 WorkerReport::new(record.id.clone(), state, session_id)
             })
             .collect()

@@ -127,6 +127,7 @@ mod tests {
             labels: None,
             tmux_socket: "worker-host-test".into(),
             workers_dir: "/nonexistent".into(),
+            permissions: Default::default(),
         })
     }
 
