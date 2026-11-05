@@ -12,7 +12,6 @@ use std::time::{Duration, Instant};
 use crate::claude::{self, Begin, Claude};
 use crate::context::{self, Context};
 use crate::home::{self, Home, Record, Session};
-use crate::legacy;
 use crate::protocol::{Line, State};
 use crate::session::{Sessions, Spawn};
 use crate::sys;
@@ -99,16 +98,16 @@ pub struct Batch {
 /// Where a worker's lines are read from, in the order they were written.
 #[derive(Debug, PartialEq)]
 enum Source<'a> {
-    /// Claude Code's own transcript of a session an older release began in
-    /// tmux, up to where a headless session carried the conversation on, if
+    /// Claude Code's own transcript of a session an older release began, up
+    /// to where a headless session carried the conversation on, if
     /// one has: what comes after is in that one's events too.
     Transcript { claude: &'a str, until: Option<u64> },
     /// What a headless session said on its stdout.
     Events { session_id: &'a str },
 }
 
-/// A worker's sources, each once: a tmux session that carried on the last
-/// conversation wrote on in the transcript before it, and a session resumed
+/// A worker's sources, each once: an older release's session that carried on
+/// the last conversation wrote on in the transcript before it, and a session resumed
 /// after a restart writes on in its own events.
 fn sources(sessions: &[Session]) -> Vec<Source<'_>> {
     let mut found = Vec::new();
@@ -347,26 +346,17 @@ impl Workers {
 
     /// Takes up every session that was live when the host last went, as a
     /// host does once it has started: each is resumed headless and told the
-    /// host restarted, losing the turn that was in flight. One a release that
-    /// ran sessions in tmux left is ended there first (see legacy.rs). A
-    /// session that was stopped, or ended by itself, is left: the latter reads
-    /// as interrupted.
-    pub fn reconcile(&self, tmux_socket: &str) -> Vec<(String, State)> {
+    /// host restarted, losing the turn that was in flight. A session that
+    /// was stopped, or ended by itself, is left: the latter reads as
+    /// interrupted.
+    pub fn reconcile(&self) -> Vec<(String, State)> {
         let all = self.all();
         let left = |s: &Session| !s.stopped && !s.ended;
-        let carried = if all
-            .iter()
-            .any(|(home, _)| home.latest().is_some_and(|s| left(&s) && !s.stream))
-        {
-            legacy::take_over(tmux_socket)
-        } else {
-            HashMap::new()
-        };
         for (home, record) in &all {
             let Some(latest) = home.latest().filter(left) else {
                 continue;
             };
-            if let Err(e) = self.resume(home, record, &latest, carried.get(&record.id)) {
+            if let Err(e) = self.resume(home, record, &latest) {
                 crate::log!(
                     "worker {}: session {} could not be resumed: {e}",
                     record.name,
@@ -384,23 +374,13 @@ impl Workers {
             .collect()
     }
 
-    /// Resumes `latest`, the session the worker had when the host went.
-    fn resume(
-        &self,
-        home: &Home,
-        record: &Record,
-        latest: &Session,
-        carried: Option<&Vec<(String, String)>>,
-    ) -> Result<(), String> {
+    /// Resumes `latest`, the session the worker had when the host went. One
+    /// an older release began is begun again under its own id, headless.
+    fn resume(&self, home: &Home, record: &Record, latest: &Session) -> Result<(), String> {
         self.claude.installed()?;
         let session = if latest.stream {
             latest.clone()
         } else {
-            if let Some(carried) = carried {
-                let mut variables: BTreeMap<String, String> = carried.iter().cloned().collect();
-                variables.extend(context::written_credentials(&home.credentials()));
-                context::credentials(&home.credentials(), Some(&variables))?;
-            }
             let session = Session {
                 from: transcript_len(home, &latest.claude),
                 stream: true,

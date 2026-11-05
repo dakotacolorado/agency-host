@@ -4,7 +4,6 @@ mod config;
 mod context;
 mod heartbeat;
 mod home;
-mod legacy;
 mod protocol;
 mod session;
 mod socket;
@@ -50,8 +49,7 @@ const USAGE: &str = "usage: worker-host [--config PATH]
 
 Every setting is in the file: service_url, token, host_id (default the hostname),
 capacity, labels, workers_dir (default ~/workers), [permissions] allow and deny
-(default every tool allowed), and tmux_socket (default worker-host), where an
-older release ran sessions, which this one takes over.";
+(default every tool allowed).";
 
 fn parse(mut args: impl Iterator<Item = String>) -> Result<Option<PathBuf>, String> {
     let mut config = env::var_os("WORKER_HOST_CONFIG").map(PathBuf::from);
@@ -127,7 +125,7 @@ fn main() -> ExitCode {
         claude,
         config.workers_dir.clone(),
     );
-    for (name, state) in workers.reconcile(&config.tmux_socket) {
+    for (name, state) in workers.reconcile() {
         let state = serde_json::to_value(state).unwrap_or_default();
         log!("worker {name}: {}", state.as_str().unwrap_or_default());
     }

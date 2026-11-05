@@ -21,15 +21,14 @@ if [ ! -f "$config" ]; then
     "$1" "$2" "$(hostname -s)" "$(uname -s | tr 'A-Z' 'a-z' | sed s/darwin/macos/)" "$HOME/workers" > "$config")
   echo "wrote $config: edit capacity and labels to suit this machine"
 fi
-# Under systemd, stopping the unit kills its whole cgroup. Sessions end with
-# the host all the same, each told to as it goes, but a release from before
-# ran them in tmux, which must outlive this restart for the new host to take
-# them over: so stopping the unit stops only the host.
-if command -v systemctl >/dev/null && systemctl --user cat worker-host.service >/dev/null 2>&1; then
-  units=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
-  mkdir -p "$units/worker-host.service.d"
-  printf '[Service]\nKillMode=process\n' > "$units/worker-host.service.d/keep-sessions.conf"
-  systemctl --user daemon-reload
+# Sessions end with the host, so stopping the unit may end its whole cgroup,
+# and what each session's tools started with it. An earlier release had the
+# unit stop only the host, with this drop-in, which is taken away.
+units=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
+if [ -f "$units/worker-host.service.d/keep-sessions.conf" ]; then
+  rm "$units/worker-host.service.d/keep-sessions.conf"
+  rmdir "$units/worker-host.service.d" 2>/dev/null || true
+  command -v systemctl >/dev/null && systemctl --user daemon-reload
 fi
 # Workers' context now comes with each session's start, so the skills clone
 # and its sync, from before, are taken away: the marked cron entry, and a
