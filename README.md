@@ -36,7 +36,6 @@ host_id = "studio"                 # default: the hostname
 capacity = 2                       # unset, nothing is placed here
 labels = ["macos"]
 workers_dir = "/Users/me/workers"  # default: ~/workers
-tmux_socket = "worker-host"        # see Restarts; this is the default
 
 [permissions]                      # what a session may run when it asks
 allow = ["*"]                      # the default: every tool
@@ -135,11 +134,9 @@ session: the host takes its own `CLAUDE_CONFIG_DIR` to be where your Claude
 login is. One inside `workers_dir` can only be a worker's, so the host ignores
 it, says so in its log, and gives sessions Claude Code's default login.
 
-A host upgraded from a release that ran sessions in tmux takes them over the
-same way: it reads each one's variables back from the tmux server named by
-`tmux_socket`, ends that server, and resumes each session headless, reading
-what it said before from Claude Code's own transcript. tmux is run only for
-this, and is not needed otherwise.
+A session an older release began is resumed the same way, and what it said
+before is read from Claude Code's own transcript, so its lines are numbered on.
+A setting only an older release read is accepted and does nothing.
 
 ## Develop
 

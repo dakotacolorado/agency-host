@@ -159,11 +159,6 @@ fn workers_at(dir: &Path, program: &str) -> Workers {
     )
 }
 
-/// No tmux server answers on this socket.
-fn no_tmux() -> String {
-    format!("worker-host-test-{}-none", std::process::id())
-}
-
 fn wait_for(what: &str, done: impl Fn() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while !done() {
@@ -600,7 +595,7 @@ fn a_worker_reports_idle_working_waiting_interrupted_and_idle_again() {
     );
     let restarted = host.restarted();
     assert_eq!(
-        restarted.reconcile(&no_tmux()),
+        restarted.reconcile(),
         [("ana".to_string(), State::Interrupted)],
         "a session that ended by itself is not resumed"
     );
@@ -634,7 +629,7 @@ fn a_host_that_restarts_resumes_each_live_session_and_does_not_start_it_again() 
     let claude = claude::uuid("s1");
     host.kill("ana", &claude);
     let restarted = host.restarted();
-    let mut states = restarted.reconcile(&no_tmux());
+    let mut states = restarted.reconcile();
     states.sort_by(|a, b| a.0.cmp(&b.0));
     assert_eq!(
         states,
@@ -683,19 +678,16 @@ fn a_session_cut_off_before_claude_code_wrote_anything_is_begun_again() {
     let claude = claude::uuid("s1");
     host.kill("ana", &claude);
     let restarted = host.restarted();
-    assert_eq!(
-        restarted.reconcile(&no_tmux()),
-        [("ana".to_string(), State::Working)]
-    );
+    assert_eq!(restarted.reconcile(), [("ana".to_string(), State::Working)]);
     assert_eq!(
         host.begun("ana", 2),
         [format!("new {claude}"), format!("new {claude}")]
     );
 }
 
-/// A worker whose session an older release began in tmux, as it left it:
+/// A worker whose session an older release began, as it left it:
 /// one session, and Claude Code's own transcript of it with one turn.
-fn left_in_tmux(host: &Host) -> (Home, String, u64) {
+fn left_by_an_older_release(host: &Host) -> (Home, String, u64) {
     host.create("w1", "ana");
     let home = host.home("ana");
     let claude = claude::uuid("s1");
@@ -720,19 +712,15 @@ fn left_in_tmux(host: &Host) -> (Home, String, u64) {
 /// then answers each message.
 const RESUMING_CLAUDE: &str = r#"
 [ "$how" = resume ] && printf '%s\n' '{"type":"user","message":{"role":"user","content":"written on in the transcript"}}' >> "$t"
-printf '%s|%s' "$WS_URL" "$WT_TOKEN" > "$dir/$s.env"
 while next; do said "on $text"; ended; done
 "#;
 
 #[test]
-fn a_session_left_in_tmux_is_resumed_headless_and_read_on_with_no_line_twice() {
-    let host = host("tmux", RESUMING_CLAUDE);
-    let (home, claude, end) = left_in_tmux(&host);
+fn a_session_an_older_release_left_is_resumed_headless_and_read_on_with_no_line_twice() {
+    let host = host("older", RESUMING_CLAUDE);
+    let (home, claude, end) = left_by_an_older_release(&host);
     let restarted = host.restarted();
-    assert_eq!(
-        restarted.reconcile(&no_tmux()),
-        [("ana".to_string(), State::Working)]
-    );
+    assert_eq!(restarted.reconcile(), [("ana".to_string(), State::Working)]);
     assert_eq!(host.begun("ana", 1), [format!("resume {claude}")]);
     let sessions = home.sessions();
     assert_eq!(sessions.len(), 2, "begun again, headless, under its own id");
@@ -771,27 +759,7 @@ fn a_session_left_in_tmux_is_resumed_headless_and_read_on_with_no_line_twice() {
 
     restarted.stop("w1").unwrap();
     assert!(home.sessions().iter().all(|s| s.stopped));
-    assert_eq!(
-        restarted.reconcile(&no_tmux()),
-        [("ana".into(), State::Idle)]
-    );
-}
-
-#[test]
-fn a_session_taken_over_from_tmux_keeps_the_variables_tmux_held_and_its_tokens() {
-    let host = host("tmux-env", RESUMING_CLAUDE);
-    let (home, claude, _) = left_in_tmux(&host);
-    let tokens = [("WT_TOKEN".to_string(), "t0ken".to_string())].into();
-    context::credentials(&home.credentials(), Some(&tokens)).unwrap();
-    let record = home.record().unwrap();
-    let carried = vec![("WS_URL".to_string(), "https://ws.example".to_string())];
-    host.workers
-        .resume(&home, &record, &home.latest().unwrap(), Some(&carried))
-        .unwrap();
-    assert_eq!(
-        host.fake_file("ana", &claude, "env"),
-        "https://ws.example|t0ken"
-    );
+    assert_eq!(restarted.reconcile(), [("ana".into(), State::Idle)]);
 }
 
 #[test]
@@ -1106,7 +1074,7 @@ fn append(path: &PathBuf, bytes: &[u8]) {
 #[test]
 fn a_transcript_carried_on_headless_is_read_up_to_where_it_was_then_its_events() {
     let host = host("carried", FAKE_CLAUDE);
-    let (home, claude, end) = left_in_tmux(&host);
+    let (home, claude, end) = left_by_an_older_release(&host);
     let transcript = host.fake("ana").join(format!("{claude}.jsonl"));
     home.begin(&Session {
         session_id: "s1".into(),
@@ -1616,7 +1584,7 @@ fn real_claude() {
     drop(workers);
     let restarted = real_at(&dir);
     assert_eq!(
-        restarted.reconcile(&no_tmux()),
+        restarted.reconcile(),
         [("real".to_string(), State::Working)]
     );
     let mark = seen.len();

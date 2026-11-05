@@ -7,8 +7,8 @@
 //! shapes are the Agent SDK's, checked against Claude Code `CHECKED`; nothing
 //! outside this module reads or writes them, and the rest of the host sees
 //! only `Entry`, `Read` and the lines made here. A transcript Claude Code
-//! writes for itself is read only for sessions an older, tmux-driven release
-//! of this host began (see `Source` in worker.rs); its lines and stdout's
+//! writes for itself is read only for sessions an older release of this host
+//! began (see `Source` in worker.rs); its lines and stdout's
 //! events share their shapes, so one reader serves both.
 //!
 //! Every worker has a Claude Code of its own -- settings, history, projects,

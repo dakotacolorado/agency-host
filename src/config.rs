@@ -13,18 +13,12 @@ pub struct Config {
     /// What work this host can be matched to, as its owner names it. Checked
     /// by the service, whose refusal names the pattern a label must match.
     pub labels: Option<Vec<String>>,
-    /// The tmux server an older release of this host ran sessions on, by its
-    /// `-L` name, so that a host upgraded from one can end them before it
-    /// resumes them headless. Nothing runs in tmux now.
-    pub tmux_socket: String,
     /// Which tools a session may use when Claude Code asks.
     pub permissions: Permissions,
     /// Where each worker has its folder. Two hosts on one machine need two of
     /// these as well as two sockets, or each reports the other's workers.
     pub workers_dir: PathBuf,
 }
-
-pub const DEFAULT_TMUX_SOCKET: &str = "worker-host";
 
 /// The rule a permission request is answered by: a tool named in `deny` is
 /// refused, then one named in `allow` is given, and any other refused. A name
@@ -73,7 +67,10 @@ struct File {
     host_id: Option<String>,
     capacity: Option<u32>,
     labels: Option<Vec<String>>,
-    tmux_socket: Option<String>,
+    /// Read by an older release, and accepted so a config that still names
+    /// it is not refused.
+    #[serde(rename = "tmux_socket")]
+    _older: Option<toml::Value>,
     workers_dir: Option<PathBuf>,
     permissions: Option<Permissions>,
 }
@@ -103,10 +100,6 @@ fn from_file(file: File, home: Option<PathBuf>) -> Result<Config, String> {
         .host_id
         .or_else(crate::sys::hostname)
         .ok_or("no host_id, and no hostname to use instead")?;
-    let tmux_socket = file
-        .tmux_socket
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| DEFAULT_TMUX_SOCKET.to_string());
     // In plain sight in the person's home rather than under a data directory:
     // a worker's folder is where a person goes to see its work.
     let workers_dir = match file.workers_dir {
@@ -128,7 +121,6 @@ fn from_file(file: File, home: Option<PathBuf>) -> Result<Config, String> {
         host_id,
         capacity: file.capacity,
         labels: file.labels,
-        tmux_socket,
         workers_dir,
         permissions: file.permissions.unwrap_or_default(),
     })
@@ -159,7 +151,6 @@ mod tests {
                 host_id: "studio".into(),
                 capacity: Some(2),
                 labels: Some(vec!["macos".into(), "linux".into()]),
-                tmux_socket: "worker-host".into(),
                 workers_dir: "/home/me/workers".into(),
                 permissions: Permissions::default(),
             }
@@ -167,12 +158,9 @@ mod tests {
     }
 
     #[test]
-    fn an_unset_or_empty_tmux_socket_is_worker_hosts_own() {
-        for text in [BASE.to_string(), format!("{BASE}tmux_socket = \"\"")] {
-            assert_eq!(read(&text).unwrap().tmux_socket, "worker-host");
-        }
+    fn a_setting_an_older_release_read_is_accepted_and_changes_nothing() {
         let config = read(&format!("{BASE}tmux_socket = \"beta\"")).unwrap();
-        assert_eq!(config.tmux_socket, "beta");
+        assert_eq!(config, read(BASE).unwrap());
     }
 
     #[test]

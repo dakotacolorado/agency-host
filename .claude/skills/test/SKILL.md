@@ -57,7 +57,7 @@ env -u DS_URL -u DS_TOKEN -u WT_URL -u WT_TOKEN -u WS_URL -u WS_TOKEN -u AS_URL 
 env -u DS_URL -u DS_TOKEN -u WT_URL -u WT_TOKEN -u WS_URL -u WS_TOKEN -u AS_URL -u AS_TOKEN cargo test --locked
 ```
 
-The tests run stand-ins for Claude Code, and no tmux. Without `WORKER_SERVICE_URL`,
+The tests run stand-ins for Claude Code. Without `WORKER_SERVICE_URL`,
 `tests/worker_service.rs` prints `skipped:` and passes, so `cargo test` proves
 nothing about beta.
 

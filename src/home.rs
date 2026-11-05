@@ -39,9 +39,9 @@ pub struct Session {
     pub session_id: String,
     pub claude: String,
     pub from: u64,
-    /// Whether it runs headless, its events kept in `Home::events`. A session
-    /// an older release began ran in tmux, and what it said is in Claude
-    /// Code's transcript up to where a headless one carried it on.
+    /// Whether it runs headless, its events kept in `Home::events`. What a
+    /// session an older release began said is in Claude Code's transcript,
+    /// up to where a headless one carried it on.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub stream: bool,
     /// Whether it was ended by a `stop`, rather than by whatever else can end
@@ -56,7 +56,7 @@ pub struct Session {
 
 /// A line of `sessions.jsonl`: a session begun, one stopped, one that ended
 /// by itself, or one that never began after all, since it would not run. A
-/// session carried from tmux to headless is begun again under its own id.
+/// session an older release began is begun again, headless, under its own id.
 #[derive(Serialize, Deserialize)]
 #[serde(untagged)]
 enum Event {
@@ -397,7 +397,7 @@ mod tests {
     }
 
     #[test]
-    fn a_session_carried_from_tmux_is_begun_again_and_ends_or_stops_as_one() {
+    fn a_session_an_older_release_began_is_begun_again_and_ends_or_stops_as_one() {
         let dir = scratch("carried");
         let home = Home::new(dir.join("ana"));
         home.make(&ana()).unwrap();
@@ -407,7 +407,7 @@ mod tests {
             "{\"sessionId\":\"s1\",\"claude\":\"c1\",\"from\":0}\n",
         )
         .unwrap();
-        let tmux = Session {
+        let older = Session {
             session_id: "s1".into(),
             claude: "c1".into(),
             from: 0,
@@ -415,11 +415,11 @@ mod tests {
             stopped: false,
             ended: false,
         };
-        assert_eq!(home.sessions(), std::slice::from_ref(&tmux));
+        assert_eq!(home.sessions(), std::slice::from_ref(&older));
         let headless = Session {
             from: 300,
             stream: true,
-            ..tmux.clone()
+            ..older.clone()
         };
         home.begin(&headless).unwrap();
         home.ended("s1").unwrap();

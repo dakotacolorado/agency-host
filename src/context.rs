@@ -213,6 +213,7 @@ pub fn credentials(file: &Path, secrets: Option<&BTreeMap<String, String>>) -> R
 }
 
 /// What `credentials` wrote to `file`, read back.
+#[cfg(test)]
 pub fn written_credentials(file: &Path) -> BTreeMap<String, String> {
     let text = fs::read_to_string(file).unwrap_or_default();
     text.lines()
