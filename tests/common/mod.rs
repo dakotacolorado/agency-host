@@ -90,13 +90,15 @@ impl Service {
 }
 
 /// A stand-in for Claude Code, headless over stream-json as the host runs it:
-/// it echoes each message back as taken, answers the first `ready` and every
-/// one after `heard`, and ends each turn.
+/// it begins a turn for each message and echoes it back as taken, answers the
+/// first `ready` and every one after `heard`, and ends each turn.
 pub const CLAUDE: &str = r#"#!/bin/sh
 [ "$1" = -p ] || exit 64
 reply=ready
 while IFS= read -r line; do
   case "$line" in '{"message":{"content":'*) ;; *) continue ;; esac
+  printf '%s
+' '{"type":"system","subtype":"init","session_id":"s"}'
   printf '%s
 ' "$line" | sed 's/^{/{"isReplay":true,/'
   printf '%s

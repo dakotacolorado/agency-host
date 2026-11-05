@@ -11,7 +11,7 @@
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
@@ -79,8 +79,18 @@ impl Sessions {
                 .open(path)
                 .map_err(|e| format!("{}: {e}", path.display()))
         };
-        let events = append(spawn.events)?;
+        let mut events = append(spawn.events)?;
         let errors = append(spawn.errors)?;
+        // On a line of its own, even after one a machine that died left torn.
+        let torn = last_byte(spawn.events).is_some_and(|b| b != b'\n');
+        let started = format!(
+            "{}{}\n",
+            if torn { "\n" } else { "" },
+            claude::started(sys::now())
+        );
+        events
+            .write_all(started.as_bytes())
+            .map_err(|e| format!("{}: {e}", spawn.events.display()))?;
         let (program, args) = spawn.argv.split_first().ok_or("nothing to run")?;
         let mut command = Command::new(program);
         command
@@ -194,6 +204,14 @@ impl Drop for Sessions {
             let _ = self.stop(&worker);
         }
     }
+}
+
+fn last_byte(path: &Path) -> Option<u8> {
+    let mut file = File::open(path).ok()?;
+    file.seek(SeekFrom::End(-1)).ok()?;
+    let mut byte = [0];
+    file.read_exact(&mut byte).ok()?;
+    Some(byte[0])
 }
 
 fn write(stdin: &Mutex<Option<ChildStdin>>, line: &Value) -> Result<(), String> {

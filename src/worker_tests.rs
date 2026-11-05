@@ -1031,9 +1031,13 @@ fn a_session_keeps_what_it_says_on_stdout_and_stderr() {
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
-    assert_eq!(kept.len(), 3, "{kept:?}");
-    assert_eq!(kept[0]["isReplay"], true);
-    assert_eq!(kept[2]["type"], "result");
+    assert_eq!(kept.len(), 4, "{kept:?}");
+    assert_eq!(
+        kept[0],
+        claude::started(kept[0]["timestamp"].as_str().unwrap().into())
+    );
+    assert_eq!(kept[1]["isReplay"], true);
+    assert_eq!(kept[3]["type"], "result");
     assert!(
         kept.iter()
             .all(|e| e["timestamp"].as_str().is_some_and(instant)),
@@ -1266,6 +1270,168 @@ fn a_worker_whose_turn_ended_waits_until_it_is_told_something() {
     );
 }
 
+// The events below are cut down from Claude Code 2.1.318's stdout, on this
+// host on 2026-11-05: a background Bash a message asked for, the turn its end
+// began by itself, and a background subagent.
+
+#[test]
+fn a_worker_reports_its_background_tasks_and_whether_a_message_began_its_turn() {
+    let host = host("tasks", FAKE_CLAUDE);
+    let path = events(&host, "s1");
+    let home = host.home("ana");
+    let cursor = std::cell::Cell::new(Cursor::default());
+    let read = |lines: &[&str]| {
+        for line in lines {
+            append(&path, format!("{line}\n").as_bytes());
+        }
+        let next = host
+            .workers
+            .read(&home, cursor.get(), 1 << 16)
+            .unwrap()
+            .next;
+        cursor.set(next);
+        (next.waiting, next.tasks, next.told)
+    };
+    let report = |live| host.workers.report(&home, "w1", live, &cursor.get());
+
+    assert_eq!(
+        read(&[&claude::started("2026-11-05T18:13:01.000Z".into()).to_string()]),
+        (false, 0, None),
+        "no turn yet"
+    );
+    assert_eq!(report(true).told, None);
+    assert_eq!(
+        read(&[
+            r#"{"type":"system","subtype":"init","session_id":"s","claude_code_version":"2.1.318"}"#,
+            r#"{"isReplay":true,"message":{"content":"Run the shell command 'sleep 60' in the background (run_in_background), and once it finishes, tell me what it printed.","role":"user"},"parent_tool_use_id":null,"session_id":"s","timestamp":"2026-11-05T18:13:03.576Z","type":"user","uuid":"6ca57950-c56f-4d90-9d8b-76b18d3abf6b"}"#,
+            r#"{"message":{"content":[{"id":"toolu_01XLs3yGmBEDD4v3Yt9oMjT5","input":{"command":"sleep 60","run_in_background":true},"name":"Bash","type":"tool_use"}],"id":"msg_1","role":"assistant","stop_reason":null,"type":"message"},"parent_tool_use_id":null,"session_id":"s","type":"assistant"}"#,
+            r#"{"session_id":"s","subtype":"background_tasks_changed","tasks":[{"description":"Sleep 60 seconds then print finish time","run_id":"0mw3v5wh5-b560cdda","task_id":"bhzuwzdd1","task_type":"local_bash"}],"timestamp":"2026-11-05T18:13:06.858Z","type":"system"}"#,
+            r#"{"description":"Sleep 60 seconds then print finish time","is_backgrounded":true,"run_id":"0mw3v5wh5-b560cdda","session_id":"s","subtype":"task_started","task_id":"bhzuwzdd1","task_type":"local_bash","tool_use_id":"toolu_01XLs3yGmBEDD4v3Yt9oMjT5","type":"system"}"#,
+        ]),
+        (false, 1, Some(true)),
+        "at work on what it was told, with a command running in the background"
+    );
+    assert_eq!(
+        read(&[
+            r#"{"message":{"content":[{"text":"The command is running in the background.","type":"text"}],"id":"msg_2","role":"assistant","stop_reason":null,"type":"message"},"parent_tool_use_id":null,"type":"assistant"}"#,
+            r#"{"is_error":false,"subtype":"success","terminal_reason":"completed","type":"result"}"#,
+        ]),
+        (true, 1, Some(true)),
+        "its turn ends; the command runs on"
+    );
+    let between = report(true);
+    assert_eq!(
+        (between.state, between.tasks, between.told),
+        (State::Waiting, 1, Some(true))
+    );
+
+    assert_eq!(
+        read(&[
+            r#"{"patch":{"end_time":1793902446874,"status":"completed"},"run_id":"0mw3v5wh5-b560cdda","session_id":"s","subtype":"task_updated","task_id":"bhzuwzdd1","type":"system"}"#,
+            r#"{"output_file":"/tmp/tasks/bhzuwzdd1.output","run_id":"0mw3v5wh5-b560cdda","session_id":"s","status":"completed","subtype":"task_notification","summary":"Background command \"Sleep 60 seconds then print finish time\" completed (exit code 0)","task_id":"bhzuwzdd1","type":"system"}"#,
+            r#"{"session_id":"s","subtype":"background_tasks_changed","tasks":[],"timestamp":"2026-11-05T18:14:06.876Z","type":"system"}"#,
+        ]),
+        (true, 0, Some(true)),
+        "the command ended between turns"
+    );
+    let ended = report(true);
+    assert_eq!(ended.state, State::Waiting);
+    assert_ne!(
+        ended, between,
+        "a change in tasks alone is a change to report"
+    );
+
+    assert_eq!(
+        read(&[
+            r#"{"type":"system","subtype":"init","session_id":"s","claude_code_version":"2.1.318"}"#,
+            r#"{"message":{"content":[{"id":"toolu_01MT6tqrpjZ8NidMMWHYrazc","input":{"file_path":"/tmp/tasks/bhzuwzdd1.output"},"name":"Read","type":"tool_use"}],"id":"msg_3","role":"assistant","stop_reason":null,"type":"message"},"parent_tool_use_id":null,"type":"assistant"}"#,
+        ]),
+        (false, 0, Some(false)),
+        "a turn its end began by itself, with nothing said to it"
+    );
+    assert_eq!(
+        read(&[
+            r#"{"description":"base-python and template repos","is_backgrounded":true,"session_id":"s","subtype":"task_started","task_id":"a0bfc7e8e2fca49db","task_type":"local_agent","type":"system"}"#,
+            r#"{"session_id":"s","subtype":"background_tasks_changed","tasks":[{"description":"base-python and template repos","run_id":"0mw3w0a1b-1c2d3e4f","subagent_type":"general-purpose","task_id":"a0bfc7e8e2fca49db","task_type":"local_agent"}],"type":"system"}"#,
+            r#"{"message":{"content":[{"text":"A subagent's own step.","type":"text"}],"id":"msg_4","role":"assistant","stop_reason":null,"type":"message"},"parent_tool_use_id":"toolu_011w6xoYWPeLRinXqRF2jYnm","type":"assistant"}"#,
+            r#"{"description":"Read store patterns","is_backgrounded":false,"session_id":"s","subtype":"task_started","task_id":"beous1ami","task_type":"local_bash","type":"system"}"#,
+            r#"{"session_id":"s","status":"completed","subtype":"task_notification","task_id":"beous1ami","type":"system"}"#,
+        ]),
+        (false, 1, Some(false)),
+        "a subagent in the background; a foreground Bash is not counted"
+    );
+    assert_eq!(
+        read(&[
+            r#"{"session_id":"s","status":"completed","subtype":"task_notification","summary":"Agent \"base-python and template repos\" finished","task_id":"a0bfc7e8e2fca49db","type":"system"}"#,
+            r#"{"session_id":"s","subtype":"background_tasks_changed","tasks":[],"type":"system"}"#,
+            r#"{"isReplay":true,"message":{"content":"<task-notification>\n<task-id>a0bfc7e8e2fca49db</task-id>\n<status>completed</status>\n</task-notification>","role":"user"},"origin":{"kind":"task-notification","producer":"session-task","runId":"0mw3w0a1b-1c2d3e4f"},"parent_tool_use_id":null,"session_id":"s","type":"user","uuid":"be02f7a2-ee4f-4047-bb46-83e075322311"}"#,
+        ]),
+        (false, 0, Some(false)),
+        "the subagent's notice, replayed mid-turn, is not a message delivered"
+    );
+    assert_eq!(
+        read(&[
+            r#"{"isReplay":true,"message":{"content":"okay I think its working","role":"user"},"parent_tool_use_id":null,"session_id":"s","type":"user","uuid":"9ed71137-6f45-49bb-8efe-7b3063f6f51a"}"#,
+        ]),
+        (false, 0, Some(true)),
+        "a message taken mid-turn"
+    );
+
+    // The machine goes down with a command running; the host resumes the
+    // session, which writes on in the same events.
+    read(&[
+        r#"{"session_id":"s","subtype":"background_tasks_changed","tasks":[{"description":"cargo build","run_id":"r","task_id":"b1","task_type":"local_bash"}],"type":"system"}"#,
+    ]);
+    assert_eq!(cursor.get().tasks, 1);
+    assert_eq!(report(false).tasks, 0, "a session not running has no tasks");
+    assert_eq!(
+        read(&[&claude::started("2026-11-05T19:00:00.000Z".into()).to_string()]).1,
+        0,
+        "the old process's tasks died with it"
+    );
+}
+
+#[test]
+fn a_new_session_starts_with_no_tasks_and_no_turn() {
+    let host = host("tasks-next", FAKE_CLAUDE);
+    let first = events(&host, "s1");
+    append(&first, concat!(
+        r#"{"type":"system","subtype":"init","session_id":"s"}"#, "\n",
+        r#"{"type":"user","message":{"role":"user","content":"go"},"isReplay":true,"uuid":"u1"}"#, "\n",
+        r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b1","task_type":"local_bash"}]}"#, "\n",
+    ).as_bytes());
+    let home = host.home("ana");
+    let at = host
+        .workers
+        .read(&home, Cursor::default(), 1 << 16)
+        .unwrap()
+        .next;
+    assert_eq!((at.file, at.tasks, at.told), (0, 1, Some(true)));
+    let second = events(&host, "s2");
+    append(&second, b"{\"type\":\"rate_limit_event\"}\n");
+    let at = host.workers.read(&home, at, 1 << 16).unwrap().next;
+    assert_eq!((at.file, at.tasks, at.told), (1, 0, None));
+}
+
+#[test]
+fn a_session_resumed_after_a_line_left_torn_marks_its_start_on_a_line_of_its_own() {
+    let host = host("torn", CHAT_CLAUDE);
+    host.create("w1", "ana");
+    let home = host.home("ana");
+    let events = home.events("s1");
+    fs::create_dir_all(events.parent().unwrap()).unwrap();
+    fs::write(&events, r#"{"type":"assistant","message":{"#).unwrap();
+    host.workers
+        .start("w1", "s1", false, Some("hello"))
+        .unwrap();
+    wait_for("never answered", || {
+        fs::read_to_string(&events).is_ok_and(|t| t.contains("on hello"))
+    });
+    let kept = fs::read_to_string(&events).unwrap();
+    let second: serde_json::Value = serde_json::from_str(kept.lines().nth(1).unwrap()).unwrap();
+    assert_eq!(second["subtype"], "process_started", "{kept}");
+}
+
 #[test]
 fn turns_written_after_lines_that_say_nothing_are_read() {
     let host = host("bookkeeping", FAKE_CLAUDE);
@@ -1290,7 +1456,9 @@ fn turns_written_after_lines_that_say_nothing_are_read() {
             file: 0,
             offset: opening.len() as u64,
             seq: 0,
-            waiting: false
+            waiting: false,
+            tasks: 0,
+            told: None
         },
         "read to the end of the last whole line, and found nothing to say"
     );

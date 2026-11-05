@@ -80,14 +80,24 @@ pub struct WorkerReport {
     pub state: State,
     /// The live session, or for `interrupted` the session that ended.
     pub session_id: Option<String>,
+    /// The background tasks and subagents its live session has open, whether
+    /// or not it is in a turn.
+    pub tasks: u32,
+    /// Whether its turn, or its last, was begun by a message the host
+    /// delivered rather than by itself. Not said before its session's first.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub told: Option<bool>,
 }
 
 impl WorkerReport {
+    #[cfg(test)]
     pub fn new(id: String, state: State, session_id: Option<String>) -> Self {
         WorkerReport {
             id,
             state,
             session_id,
+            tasks: 0,
+            told: None,
         }
     }
 }
@@ -227,9 +237,16 @@ mod tests {
     #[test]
     fn a_report_is_workers_lines_and_results_under_its_type() {
         let workers = [
-            WorkerReport::new("w1".into(), State::Working, Some("s1".into())),
+            WorkerReport {
+                tasks: 2,
+                told: Some(false),
+                ..WorkerReport::new("w1".into(), State::Working, Some("s1".into()))
+            },
             WorkerReport::new("w2".into(), State::Idle, None),
-            WorkerReport::new("w3".into(), State::Waiting, Some("s3".into())),
+            WorkerReport {
+                told: Some(true),
+                ..WorkerReport::new("w3".into(), State::Waiting, Some("s3".into()))
+            },
         ];
         let lines = [(
             "w1".to_string(),
@@ -252,9 +269,9 @@ mod tests {
             json!({
                 "type":"report",
                 "workers":[
-                    {"id":"w1","state":"working","sessionId":"s1"},
-                    {"id":"w2","state":"idle","sessionId":null},
-                    {"id":"w3","state":"waiting","sessionId":"s3"}
+                    {"id":"w1","state":"working","sessionId":"s1","tasks":2,"told":false},
+                    {"id":"w2","state":"idle","sessionId":null,"tasks":0},
+                    {"id":"w3","state":"waiting","sessionId":"s3","tasks":0,"told":true}
                 ],
                 "lines":[{"workerId":"w1","seq":4,"at":"2026-10-28T00:00:00.000Z","sessionId":"s1","from":"agent","text":"hi"}],
                 "commandResults":[{"commandId":"c1","ok":false,"error":"no"}]
