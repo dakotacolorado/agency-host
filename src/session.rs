@@ -37,8 +37,19 @@ struct Live {
     session_id: String,
     /// Shared with the thread that answers its requests. None once closed.
     stdin: Arc<Mutex<Option<ChildStdin>>>,
-    /// The uuids of the messages Claude Code has echoed back.
-    echoed: Arc<Mutex<HashSet<String>>>,
+    echoed: Echoes,
+}
+
+/// The uuids of the messages one session's Claude Code has echoed back, kept
+/// for as long as anyone holds them: an echo read just before the session
+/// ended still counts.
+#[derive(Clone, Default)]
+pub struct Echoes(Arc<Mutex<HashSet<String>>>);
+
+impl Echoes {
+    pub fn contains(&self, uuid: &str) -> bool {
+        lock(&self.0).contains(uuid)
+    }
 }
 
 /// How to run one session.
@@ -110,7 +121,7 @@ impl Sessions {
         }
         let mut child = command.spawn().map_err(|e| format!("{program}: {e}"))?;
         let stdin = Arc::new(Mutex::new(child.stdin.take()));
-        let echoed = Arc::new(Mutex::new(HashSet::new()));
+        let echoed = Echoes::default();
         let stdout = child.stdout.take().ok_or("no stdout")?;
         {
             let (stdin, echoed, permissions) =
@@ -138,11 +149,11 @@ impl Sessions {
         write(&session.stdin, line)
     }
 
-    /// Whether Claude Code has taken the message sent with `uuid`.
-    pub fn echoed(&self, worker: &str, uuid: &str) -> bool {
+    /// The worker's live session, and the echoes of what it takes.
+    pub fn echoes(&self, worker: &str) -> Option<(String, Echoes)> {
         lock(&self.live)
             .get(worker)
-            .is_some_and(|s| lock(&s.echoed).contains(uuid))
+            .map(|s| (s.session_id.clone(), s.echoed.clone()))
     }
 
     /// Every worker with a session running, mapped to its session id.
@@ -231,7 +242,7 @@ fn keep(
     stdout: ChildStdout,
     mut events: File,
     stdin: &Mutex<Option<ChildStdin>>,
-    echoed: &Mutex<HashSet<String>>,
+    echoed: &Echoes,
     permissions: &Permissions,
 ) {
     let mut stdout = BufReader::new(stdout);
@@ -245,7 +256,7 @@ fn keep(
         let mut kept = match serde_json::from_slice::<Value>(&line) {
             Ok(event) => {
                 if let Some(uuid) = claude::echoed(&event) {
-                    lock(echoed).insert(uuid.to_string());
+                    lock(&echoed.0).insert(uuid.to_string());
                 }
                 if let Some(answer) = claude::answer(&event, permissions) {
                     if let Err(e) = write(stdin, &answer) {

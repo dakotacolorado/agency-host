@@ -501,6 +501,7 @@ mod tests {
                 session_id: "s1".into(),
                 from: "agent",
                 text: text.clone(),
+                command_id: None,
             }],
         )];
         assert!(socket.send(&Up::Report {

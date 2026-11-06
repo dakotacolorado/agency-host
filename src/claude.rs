@@ -364,9 +364,10 @@ pub fn transcript(state: &Path, session: &str) -> Option<PathBuf> {
 }
 
 /// Claude Code wants a uuid for a session, and for a message. A service id
-/// is used as it stands when it is one, so the two can be matched by eye;
-/// otherwise one is derived from it, the same every time, so a host that
-/// restarts finds the session again with nothing remembered.
+/// is used as it stands when it is one, so the two can be matched by eye --
+/// and a message's echo names the command it carried; otherwise one is
+/// derived from it, the same every time, so a host that restarts finds the
+/// session again with nothing remembered.
 pub fn uuid(id: &str) -> String {
     let is_uuid = id.len() == 36
         && id.char_indices().all(|(i, c)| match i {
@@ -376,14 +377,29 @@ pub fn uuid(id: &str) -> String {
     if is_uuid {
         return id.to_ascii_lowercase();
     }
+    derived(id, 4)
+}
+
+/// The uuid of a message the host makes up itself, which carries no command:
+/// derived from `id` as `uuid` does, but marked version 8 (RFC 9562's for
+/// uuids of one's own making), so its echo is told from a command's, whose
+/// ids the service makes as version 4.
+pub fn host_uuid(id: &str) -> String {
+    derived(id, 8)
+}
+
+fn host_made(uuid: &str) -> bool {
+    uuid.as_bytes().get(14) == Some(&b'8')
+}
+
+fn derived(id: &str, version: u64) -> String {
     let fnv = |basis: u64| {
         id.bytes().fold(basis, |h, b| {
             (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
         })
     };
     let (hi, lo) = (fnv(0xcbf2_9ce4_8422_2325), fnv(0x8422_2325_cbf2_9ce4));
-    // Shaped as a version 4 uuid, which is what a validator will expect.
-    let hi = (hi & !0xf000) | 0x4000;
+    let hi = (hi & !0xf000) | (version << 12);
     let lo = (lo & !(0b11 << 62)) | (0b10 << 62);
     format!(
         "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
@@ -440,9 +456,11 @@ pub fn read(line: &str) -> Read {
     };
     // Claude Code replays its own task notifications too, marked with where
     // they came from; what the host writes carries no `origin`.
+    let written = echoed(&v).filter(|_| v.get("origin").is_none());
+    let command = written.filter(|u| !host_made(u)).map(String::from);
     let told = if v["type"] == "system" && v["subtype"] == "init" {
         Some(false)
-    } else if echoed(&v).is_some() && v.get("origin").is_none() {
+    } else if written.is_some() {
         Some(true)
     } else {
         None
@@ -475,6 +493,7 @@ pub fn read(line: &str) -> Read {
         Some("user") => match &message["content"] {
             Value::String(text) => vec![Entry::Told {
                 text: carried(text),
+                command,
             }],
             // Tool results come back as the user's turn; they are the
             // worker's own work, not something said to it.
@@ -484,6 +503,7 @@ pub fn read(line: &str) -> Read {
                 .filter_map(|b| b["text"].as_str())
                 .map(|text| Entry::Told {
                     text: carried(text),
+                    command: None,
                 })
                 .collect(),
             _ => vec![],
@@ -494,6 +514,7 @@ pub fn read(line: &str) -> Read {
             .as_str()
             .map(|text| Entry::Told {
                 text: carried(text),
+                command: None,
             })
             .into_iter()
             .collect(),
@@ -568,7 +589,10 @@ mod tests {
     }
 
     fn told(text: &str) -> Entry {
-        Entry::Told { text: text.into() }
+        Entry::Told {
+            text: text.into(),
+            command: None,
+        }
     }
 
     fn said(text: &str) -> Entry {
@@ -722,7 +746,7 @@ mod tests {
         let texts: Vec<&str> = entries
             .iter()
             .map(|e| match e {
-                Entry::Told { text } => text.as_str(),
+                Entry::Told { text, .. } => text.as_str(),
                 e => panic!("{e:?}"),
             })
             .collect();
@@ -765,6 +789,42 @@ mod tests {
         assert_ne!(derived, uuid("worker-8"));
         assert_eq!(uuid(&derived), derived, "{derived} is not a uuid");
         assert_eq!(&derived[14..15], "4");
+        let made = host_uuid("s1/2026-11-06T00:00:00Z");
+        assert_eq!(uuid(&made), made, "{made} is not a uuid");
+        assert!(host_made(&made) && !host_made(&uuid("worker-7")));
+    }
+
+    #[test]
+    fn the_echo_of_a_message_the_host_wrote_names_its_command_and_nothing_else_does() {
+        let command = |line: Value| -> Vec<Option<String>> {
+            read(&line.to_string())
+                .entries
+                .into_iter()
+                .map(|e| match e {
+                    Entry::Told { command, .. } => command,
+                    _ => panic!("{e:?}"),
+                })
+                .collect()
+        };
+        let id = "00000000-0000-4000-8000-0000000000a2";
+        // As Claude Code 2.1.318 echoed a message written mid-turn, once the
+        // tool it was in had finished.
+        assert_eq!(
+            command(
+                json!({"type":"user","message":{"role":"user","content":"Correction: echo third instead of second."},"session_id":"s","parent_tool_use_id":null,"uuid":id,"timestamp":"2026-11-06T05:13:50.205Z","isReplay":true})
+            ),
+            [Some(id.to_string())]
+        );
+        let made = host_uuid("s1/now");
+        for none in [
+            json!({"type":"user","message":{"role":"user","content":"Your last session ended."},"uuid":made,"isReplay":true}),
+            json!({"isReplay":true,"message":{"content":"<task-notification>\n</task-notification>","role":"user"},"origin":{"kind":"task-notification"},"parent_tool_use_id":null,"type":"user","uuid":id}),
+            json!({"type":"user","message":{"role":"user","content":"In a transcript."},"uuid":id}),
+            json!({"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]},"parent_tool_use_id":null}),
+            json!({"type":"attachment","attachment":{"type":"queued_command","prompt":"Typed.","source_uuid":id}}),
+        ] {
+            assert_eq!(command(none.clone()), [None], "{none}");
+        }
     }
 
     // The events below are cut down from Claude Code 2.1.318's stdout.
@@ -785,7 +845,10 @@ mod tests {
         assert_eq!(
             entries,
             [
-                told("Run the tests."),
+                Entry::Told {
+                    text: "Run the tests.".into(),
+                    command: Some("u1".into())
+                },
                 Entry::Ran {
                     tool: "Bash".into(),
                     input: r#"{"command":"cargo test"}"#.into()

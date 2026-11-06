@@ -44,6 +44,12 @@ pub struct Session {
     /// up to where a headless one carried it on.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub stream: bool,
+    /// The start that began it, when the start carried its first message:
+    /// that message goes in with this id as its uuid, so its echo names it,
+    /// and so does the same message told again to a session cut off before
+    /// it took it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opening: Option<String>,
     /// Whether it was ended by a `stop`, rather than by whatever else can end
     /// a session: a crash, the machine going down.
     #[serde(skip)]
@@ -349,6 +355,7 @@ mod tests {
             claude: "c1".into(),
             from: 0,
             stream: false,
+            opening: None,
             stopped: false,
             ended: false,
         };
@@ -359,6 +366,7 @@ mod tests {
             claude: "c1".into(),
             from: 120,
             stream: true,
+            opening: None,
             stopped: false,
             ended: false,
         };
@@ -375,6 +383,7 @@ mod tests {
             claude: "c4".into(),
             from: 0,
             stream: true,
+            opening: None,
             stopped: false,
             ended: false,
         })
@@ -412,6 +421,7 @@ mod tests {
             claude: "c1".into(),
             from: 0,
             stream: false,
+            opening: None,
             stopped: false,
             ended: false,
         };

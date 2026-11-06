@@ -149,14 +149,21 @@ fn hold(workers_dir: &std::path::Path) -> Result<std::fs::File, String> {
     }
 }
 
-/// Command results not yet written on a socket, each once.
+/// Command results not yet written on a socket, each once: a message settled
+/// before its report that it was written went up is reported settled alone.
 #[derive(Default)]
 struct Unsent(Vec<CommandReport>);
 
 impl Unsent {
     fn add(&mut self, report: CommandReport) {
-        if !self.0.iter().any(|r| r.command_id == report.command_id) {
-            self.0.push(report);
+        match self
+            .0
+            .iter_mut()
+            .find(|r| r.command_id == report.command_id)
+        {
+            Some(held) if report.settled() => *held = report,
+            Some(_) => {}
+            None => self.0.push(report),
         }
     }
 }
@@ -192,11 +199,16 @@ fn take(
     match taken.take(command, workers, deliveries) {
         Some(report) => {
             if fresh {
+                let done = if report.settled() {
+                    "done"
+                } else {
+                    "written to its session, not yet taken"
+                };
                 log!(
                     "command {} ({}): {}",
                     command.id,
                     command.kind,
-                    report.error.as_deref().unwrap_or("done")
+                    report.error.as_deref().unwrap_or(done)
                 );
             }
             unsent.add(report);
@@ -222,7 +234,7 @@ fn run(client: &Client, config: &Config, workers: &Workers, socket: &Socket) -> 
     let mut told: Option<(u64, Vec<WorkerReport>)> = None;
     // Which worker's transcript is read first in the next report.
     let mut turn = 0;
-    let mut deliveries = Deliveries::new(worker::PATIENCE);
+    let mut deliveries = Deliveries::default();
     let mut taken = Taken::default();
     let mut waiting: Vec<Command> = Vec::new();
     let mut next_heartbeat = Instant::now();
@@ -242,7 +254,7 @@ fn run(client: &Client, config: &Config, workers: &Workers, socket: &Socket) -> 
         for (command, result) in deliveries.settle(workers) {
             log!(
                 "command {command} (message): {}",
-                result.as_ref().err().map_or("done", String::as_str)
+                result.as_ref().err().map_or("taken", String::as_str)
             );
             let report = CommandReport::new(command, result.err());
             taken.remember(&report);
@@ -442,7 +454,17 @@ mod tests {
             session_id: "s1".into(),
             from: "agent",
             text: text.into(),
+            command_id: None,
         }
+    }
+
+    #[test]
+    fn a_message_settled_before_its_written_report_went_up_goes_up_settled_alone() {
+        let mut unsent = Unsent::default();
+        unsent.add(CommandReport::written("c1".into()));
+        unsent.add(CommandReport::new("c1".into(), None));
+        unsent.add(CommandReport::written("c1".into()));
+        assert_eq!(unsent.0, [CommandReport::new("c1".into(), None)]);
     }
 
     #[test]
