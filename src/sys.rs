@@ -3,7 +3,7 @@
 //! time as the service reads it.
 
 use std::ffi::{c_char, c_int, CStr};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 const SIGHUP: c_int = 1;
 pub const SIGKILL: c_int = 9;
@@ -75,6 +75,13 @@ pub fn now() -> String {
     rfc3339(SystemTime::now())
 }
 
+/// `secs` after the epoch, as the service's `date-time` reads it; None when
+/// it is no such instant.
+pub fn epoch(secs: f64) -> Option<String> {
+    let d = Duration::try_from_secs_f64(secs).ok()?;
+    SystemTime::UNIX_EPOCH.checked_add(d).map(rfc3339)
+}
+
 /// UTC to the millisecond, as the service's `date-time` reads it.
 fn rfc3339(t: SystemTime) -> String {
     let d = t.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default();
@@ -102,7 +109,6 @@ fn rfc3339(t: SystemTime) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     #[test]
     fn times_are_utc_to_the_millisecond() {
@@ -112,5 +118,11 @@ mod tests {
             rfc3339(SystemTime::UNIX_EPOCH + Duration::from_secs(951_782_400)),
             "2000-02-29T00:00:00.000Z"
         );
+        assert_eq!(
+            epoch(1_793_965_200.0).as_deref(),
+            Some("2026-11-06T11:40:00.000Z")
+        );
+        assert_eq!(epoch(-1.0), None);
+        assert_eq!(epoch(f64::NAN), None);
     }
 }

@@ -78,9 +78,13 @@ v0.1.0-47) says Cargo.toml's version, `0.1.0`.
 
 Commands arrive only on the socket: pushed when written, and every one still
 pending pushed again when a socket opens. Reports (workers' states, transcript
-lines, command results) go only on it. What has not been written on a socket is
-kept, and each socket opened is first sent every worker's state, the lines not
-yet sent, and the results not yet sent.
+lines, command results, the account's usage) go only on it. What has not been
+written on a socket is kept, and each socket opened is first sent every
+worker's state, the lines not yet sent, and the results not yet sent.
+
+The usage is the newest `rate_limit_event` any session's stream has said and
+no report has yet carried: its 5-hour and weekly windows, each left out when
+the event does not carry it, read at the event's time.
 
 ## Workers
 

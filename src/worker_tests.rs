@@ -1557,6 +1557,39 @@ fn a_session_resumed_after_a_line_left_torn_marks_its_start_on_a_line_of_its_own
 }
 
 #[test]
+fn a_read_carries_the_last_usage_its_lines_said_at_the_time_it_was_said() {
+    let host = host("usage", FAKE_CLAUDE);
+    let path = events(&host, "s1");
+    let home = host.home("ana");
+    append(&path, concat!(
+        r#"{"type":"rate_limit_event","timestamp":"2026-11-06T08:28:17.268Z","rate_limit_info":{"unifiedWindows":{"five_hour":{"resetsAt":1793965200,"utilization":0.48},"seven_day":{"resetsAt":1794063600,"utilization":0.4}}}}"#, "\n",
+        r#"{"type":"rate_limit_event","timestamp":"2026-11-06T08:28:32.206Z","rate_limit_info":{"unifiedWindows":{"five_hour":{"resetsAt":1793965200,"utilization":0.49}}}}"#, "\n",
+        r#"{"type":"rate_limit_event","timestamp":"2026-11-06T08:28:40.000Z","rate_limit_info":{"status":"allowed"}}"#, "\n",
+    ).as_bytes());
+    let batch = host
+        .workers
+        .read(&home, Cursor::default(), 1 << 16)
+        .unwrap();
+    assert_eq!(batch.lines, []);
+    assert_eq!(
+        batch.usage,
+        Some(Usage {
+            read_at: "2026-11-06T08:28:32.206Z".into(),
+            windows: crate::protocol::Windows {
+                five_hour: Some(crate::protocol::Window {
+                    utilization: 0.49,
+                    resets_at: "2026-11-06T11:40:00.000Z".into(),
+                }),
+                seven_day: None,
+            },
+        })
+    );
+    append(&path, b"{\"type\":\"result\"}\n");
+    let after = host.workers.read(&home, batch.next, 1 << 16).unwrap();
+    assert_eq!(after.usage, None, "a reading is read once");
+}
+
+#[test]
 fn turns_written_after_lines_that_say_nothing_are_read() {
     let host = host("bookkeeping", FAKE_CLAUDE);
     let path = events(&host, "s1");

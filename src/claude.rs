@@ -28,6 +28,7 @@ use std::process::{Command, Stdio};
 use std::{env, fs, io};
 
 use crate::config::Permissions;
+use crate::protocol::{Window, Windows};
 use crate::worker::Entry;
 
 /// The Claude Code release the stream-json protocol here was checked
@@ -429,6 +430,33 @@ pub struct Read {
     /// Whether the turn under way was begun by a message the host delivered:
     /// false at a turn's start, true once a message the host wrote comes back.
     pub told: Option<bool>,
+    /// The account's usage, when the line is a `rate_limit_event` that says
+    /// any of it.
+    pub usage: Option<Windows>,
+}
+
+/// What a `rate_limit_event` says of the account's windows. A window whose
+/// numbers are missing or out of range is left out: the service refuses a
+/// whole report over one negative utilization.
+fn usage(v: &Value) -> Option<Windows> {
+    if v["type"] != "rate_limit_event" {
+        return None;
+    }
+    let windows = &v["rate_limit_info"]["unifiedWindows"];
+    let window = |name: &str| {
+        let w = &windows[name];
+        let utilization = w["utilization"].as_f64().filter(|u| *u >= 0.0)?;
+        let resets_at = crate::sys::epoch(w["resetsAt"].as_f64()?)?;
+        Some(Window {
+            utilization,
+            resets_at,
+        })
+    };
+    let read = Windows {
+        five_hour: window("five_hour"),
+        seven_day: window("seven_day"),
+    };
+    (read.five_hour.is_some() || read.seven_day.is_some()).then_some(read)
 }
 
 /// A line of a kind not read here says nothing, and the lines after it are
@@ -438,11 +466,13 @@ pub fn read(line: &str) -> Read {
         return Read::default();
     };
     let at = v["timestamp"].as_str().map(String::from);
+    let usage = usage(&v);
     // A subagent's own conversation (on stdout, the lines under a tool use),
     // and lines Claude Code adds for itself.
     if v["isSidechain"] == true || v["isMeta"] == true || v["parent_tool_use_id"].is_string() {
         return Read {
             at,
+            usage,
             ..Read::default()
         };
     }
@@ -542,6 +572,7 @@ pub fn read(line: &str) -> Read {
         waiting,
         tasks,
         told,
+        usage,
     }
 }
 
@@ -855,6 +886,68 @@ mod tests {
                 },
                 said("Done."),
             ]
+        );
+    }
+
+    #[test]
+    fn a_rate_limit_event_says_each_window_it_carries_and_no_other() {
+        // As a session on Claude Code 2.1.318 wrote it, stamped.
+        let recorded = r#"{"rate_limit_info":{"isUsingOverage":false,"overageDisabledReason":"org_level_disabled","overageStatus":"rejected","rateLimitType":"five_hour","resetsAt":1793965200,"status":"allowed","unifiedWindows":{"five_hour":{"resetsAt":1793965200,"status":"allowed","utilization":0.48},"seven_day":{"resetsAt":1794063600,"status":"allowed","utilization":0.4}}},"session_id":"ca93f5c1-ceed-487b-9f58-a8324b143b90","timestamp":"2026-11-06T08:28:17.268Z","type":"rate_limit_event","uuid":"7841a015-4552-4d11-93c0-e6a07bfd2d72"}"#;
+        let window = |utilization, resets_at: &str| {
+            Some(Window {
+                utilization,
+                resets_at: resets_at.into(),
+            })
+        };
+        let read = read(recorded);
+        assert_eq!(read.at.as_deref(), Some("2026-11-06T08:28:17.268Z"));
+        assert_eq!(read.entries, []);
+        assert_eq!(
+            read.usage,
+            Some(Windows {
+                five_hour: window(0.48, "2026-11-06T11:40:00.000Z"),
+                seven_day: window(0.4, "2026-11-07T15:00:00.000Z"),
+            })
+        );
+
+        let usage = |windows: Value| {
+            super::read(
+                &json!({"type":"rate_limit_event","rate_limit_info":{"unifiedWindows":windows}})
+                    .to_string(),
+            )
+            .usage
+        };
+        assert_eq!(
+            usage(json!({"five_hour":{"utilization":0,"resetsAt":1793965200}})),
+            Some(Windows {
+                five_hour: window(0.0, "2026-11-06T11:40:00.000Z"),
+                seven_day: None,
+            }),
+            "a window left out is not read as 0"
+        );
+        assert_eq!(
+            usage(json!({
+                "five_hour":{"utilization":-0.1,"resetsAt":1793965200},
+                "seven_day":{"utilization":0.4,"resetsAt":1794063600}
+            })),
+            Some(Windows {
+                five_hour: None,
+                seven_day: window(0.4, "2026-11-07T15:00:00.000Z"),
+            }),
+            "a window out of range is left out"
+        );
+        for none in [
+            json!({}),
+            json!({"five_hour":{"utilization":0.5}}),
+            json!({"seven_day":{"utilization":"half","resetsAt":1794063600}}),
+            json!({"seven_day":{"utilization":0.5,"resetsAt":-5}}),
+        ] {
+            assert_eq!(usage(none.clone()), None, "{none}");
+        }
+        assert_eq!(
+            super::read(r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}"#)
+                .usage,
+            None
         );
     }
 
