@@ -7,13 +7,12 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
 
 use crate::claude::{self, Begin, Claude};
 use crate::context::{self, Context};
 use crate::home::{self, Home, Record, Session};
 use crate::protocol::{Line, State, WorkerReport};
-use crate::session::{Sessions, Spawn};
+use crate::session::{Echoes, Sessions, Spawn};
 use crate::sys;
 
 /// What a new session is told when it was started with nothing to say. Claude
@@ -47,9 +46,11 @@ const MOST_TASKS: u32 = 1000;
 /// One step of a worker's conversation, as its transcript says it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Entry {
-    /// Its opening message, or a message carried to it.
+    /// Its opening message, or a message carried to it; `command` names the
+    /// command whose text it is, when it is one.
     Told {
         text: String,
+        command: Option<String>,
     },
     Said {
         text: String,
@@ -62,10 +63,10 @@ pub enum Entry {
 
 impl Entry {
     fn line(self, seq: u64, at: String, session_id: String) -> Line {
-        let (from, text) = match self {
-            Entry::Told { text } => ("instruction", text),
-            Entry::Said { text } => ("agent", text),
-            Entry::Ran { tool, input } => ("tool", format!("{tool} {input}")),
+        let (from, text, command_id) = match self {
+            Entry::Told { text, command } => ("instruction", text, command),
+            Entry::Said { text } => ("agent", text, None),
+            Entry::Ran { tool, input } => ("tool", format!("{tool} {input}"), None),
         };
         Line {
             seq,
@@ -73,6 +74,7 @@ impl Entry {
             session_id,
             from,
             text,
+            command_id,
         }
     }
 }
@@ -265,6 +267,7 @@ impl Workers {
             claude: previous.map_or_else(|| claude::uuid(session_id), |p| p.claude.clone()),
             from: previous.map_or(0, |p| transcript_len(&home, &p.claude)),
             stream: true,
+            opening: given.command.filter(|_| text.is_some()).map(claude::uuid),
             stopped: false,
             ended: false,
         };
@@ -299,14 +302,15 @@ impl Workers {
         // Written before it runs, so a machine that dies between the two
         // leaves a session it knows of, which is then resumed.
         home.begin(&session)?;
-        if let Err(e) = self.run(&home, id, &session, begin, text) {
+        if let Err(e) = self.run(&home, id, &session, begin, text, true) {
             let _ = home.withdraw(session_id);
             return Err(e);
         }
         Ok(())
     }
 
-    /// Runs Claude Code for `session` and tells it `text`.
+    /// Runs Claude Code for `session` and tells it `text`: the start's own
+    /// message when `opening`, or one the host made up.
     fn run(
         &self,
         home: &Home,
@@ -314,6 +318,7 @@ impl Workers {
         session: &Session,
         begin: Begin,
         text: &str,
+        opening: bool,
     ) -> Result<(), String> {
         let argv = self.claude.argv(begin, &home.credentials());
         let env = self.claude.env(&home.claude());
@@ -328,8 +333,11 @@ impl Workers {
                 errors: &home.errors(&session.session_id),
             },
         )?;
-        let opening = claude::uuid(&format!("{}/{}", session.session_id, sys::now()));
-        if let Err(e) = self.say(id, text, &opening) {
+        let uuid = match &session.opening {
+            Some(uuid) if opening => uuid.clone(),
+            _ => claude::host_uuid(&format!("{}/{}", session.session_id, sys::now())),
+        };
+        if let Err(e) = self.say(id, text, &uuid) {
             let _ = self.sessions.stop(id);
             return Err(e);
         }
@@ -408,14 +416,15 @@ impl Workers {
         };
         // A session cut off before Claude Code wrote anything has nothing to
         // resume, and is begun again as it was first.
-        let (begin, text) = match claude::transcript(&home.claude(), &session.claude) {
-            Some(_) => (Begin::Resume(&session.claude), RESUMED.to_string()),
+        let (begin, text, opening) = match claude::transcript(&home.claude(), &session.claude) {
+            Some(_) => (Begin::Resume(&session.claude), RESUMED.to_string(), false),
             None => (
                 Begin::Fresh(&session.claude),
                 fs::read_to_string(home.prompt()).unwrap_or_else(|_| NOTHING_YET.into()),
+                true,
             ),
         };
-        self.run(home, &record.id, &session, begin, &text)
+        self.run(home, &record.id, &session, begin, &text, opening)
     }
 
     /// What the worker is doing. `live` is whether it has a session running,
@@ -456,10 +465,6 @@ impl Workers {
     /// taken it.
     pub fn say(&self, id: &str, text: &str, uuid: &str) -> Result<(), String> {
         self.sessions.send(id, &claude::message(text, uuid))
-    }
-
-    fn echoed(&self, id: &str, uuid: &str) -> bool {
-        self.sessions.echoed(id, uuid)
     }
 
     /// Stops the turn the worker is in, as Escape does for a person at its
@@ -607,9 +612,10 @@ impl Workers {
     }
 }
 
-/// What a start carries besides its message.
+/// What a start carries besides its message, and the start's own id.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Given<'a> {
+    pub command: Option<&'a str>,
     pub context: Option<&'a Context>,
     pub documents: Option<&'a [Context]>,
     pub env: Option<&'a BTreeMap<String, String>>,
@@ -628,35 +634,26 @@ fn rules(home: &Home, record: &Record) -> String {
     )
 }
 
-/// How long a message may take to reach its worker before it is reported
-/// failed: well inside the five minutes after which a command not reported is
-/// worth asking about, so the failure is still heard.
-pub const PATIENCE: Duration = Duration::from_secs(120);
-
-/// Messages carried to workers and not yet settled. Each is written to its
-/// session's stdin at once, and is done only once Claude Code echoes it back:
-/// until then it is only in a pipe. Held in memory, so a host that restarts
-/// mid-delivery writes a message the service sends again a second time.
+/// Messages written to workers' sessions and not yet taken. Each is written
+/// to its session's stdin at once, and is taken only once Claude Code echoes
+/// it back, which it does at its next step: after it has thought, or once the
+/// tool it is in has finished, however long that is. Until then it is only in
+/// a pipe. Held in memory, so a host that restarts mid-delivery cannot say
+/// what became of a message; its echo still names it (`Entry::Told`).
+#[derive(Default)]
 pub struct Deliveries {
     held: Vec<Delivery>,
-    patience: Duration,
 }
 
 struct Delivery {
     command: String,
     worker: String,
+    session: String,
     uuid: String,
-    since: Instant,
+    echoes: Echoes,
 }
 
 impl Deliveries {
-    pub fn new(patience: Duration) -> Self {
-        Deliveries {
-            held: Vec::new(),
-            patience,
-        }
-    }
-
     #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.held.is_empty()
@@ -669,71 +666,52 @@ impl Deliveries {
         self.held.iter().any(|d| d.command == command)
     }
 
-    /// Takes a message to deliver, writing it to its worker's session. What
-    /// happened to it, if that is already known.
+    /// Writes a message to its worker's session, to be held until it is
+    /// taken. Err when it could not be written.
     pub fn hold(
         &mut self,
         workers: &Workers,
         command: &str,
         worker: &str,
         text: &str,
-    ) -> Option<Result<(), String>> {
-        if let Err(e) = workers.running(worker) {
-            return Some(Err(e));
-        }
+    ) -> Result<(), String> {
+        workers.running(worker)?;
+        let (session, echoes) = workers
+            .sessions
+            .echoes(worker)
+            .ok_or_else(|| format!("worker {worker} has no live session on this host"))?;
         let uuid = claude::uuid(command);
-        if let Err(e) = workers.say(worker, text, &uuid) {
-            return Some(Err(e));
-        }
-        let delivery = Delivery {
+        workers.say(worker, text, &uuid)?;
+        self.held.push(Delivery {
             command: command.into(),
             worker: worker.into(),
+            session,
             uuid,
-            since: Instant::now(),
-        };
-        let done = delivery.step(workers, self.patience);
-        if done.is_none() {
-            self.held.push(delivery);
-        }
-        done
+            echoes,
+        });
+        Ok(())
     }
 
-    /// Hands back, by command, the messages that have reached their worker
-    /// or never will.
+    /// Hands back, by command, the messages that have been taken or never
+    /// will be: their session has ended, whether or not another has begun.
     pub fn settle(&mut self, workers: &Workers) -> Vec<(String, Result<(), String>)> {
-        let patience = self.patience;
+        let live = workers.live();
         let mut settled = Vec::new();
-        self.held.retain(|d| match d.step(workers, patience) {
-            Some(result) => {
-                settled.push((d.command.clone(), result));
-                false
-            }
-            None => true,
+        self.held.retain(|d| {
+            let result = if d.echoes.contains(&d.uuid) {
+                Ok(())
+            } else if live.get(&d.worker) != Some(&d.session) {
+                Err(format!(
+                    "worker {}'s session ended before it took the message",
+                    d.worker
+                ))
+            } else {
+                return true;
+            };
+            settled.push((d.command.clone(), result));
+            false
         });
         settled
-    }
-}
-
-impl Delivery {
-    fn step(&self, workers: &Workers, patience: Duration) -> Option<Result<(), String>> {
-        if workers.echoed(&self.worker, &self.uuid) {
-            return Some(Ok(()));
-        }
-        if workers.running(&self.worker).is_err() {
-            return Some(Err(format!(
-                "worker {}'s session ended before it took the message",
-                self.worker
-            )));
-        }
-        if self.since.elapsed() < patience {
-            return None;
-        }
-        Some(Err(format!(
-            "written to worker {}'s session, but not taken after {}s: it may still take it at its \
-             next step",
-            self.worker,
-            patience.as_secs()
-        )))
     }
 }
 

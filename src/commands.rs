@@ -13,11 +13,12 @@ use crate::worker::{Deliveries, Given, Workers};
 /// this is far more than are ever settled in that time.
 const REMEMBERED: usize = 1000;
 
-/// The commands taken and settled, so one sent again is answered as before
-/// rather than done twice. Held in memory: a host that restarts takes again
-/// a command it had settled but not reported, which is why each kind is also
-/// safe to take again on its own (see `Workers`), except a message, which is
-/// written again.
+/// The commands taken, each with its latest report, so one sent again is
+/// answered as before rather than done twice: a message written and not yet
+/// taken is answered as written, not written again. Held in memory: a host
+/// that restarts takes again a command it had settled but not reported,
+/// which is why each kind is also safe to take again on its own (see
+/// `Workers`), except a message, which is written again.
 pub struct Taken {
     settled: VecDeque<CommandReport>,
 }
@@ -35,16 +36,17 @@ impl Taken {
         self.settled.iter().any(|r| r.command_id == command)
     }
 
+    /// Remembers `report`, in place of any earlier one for its command.
     pub fn remember(&mut self, report: &CommandReport) {
+        self.settled.retain(|r| r.command_id != report.command_id);
         if self.settled.len() == REMEMBERED {
             self.settled.pop_front();
         }
         self.settled.push_back(report.clone());
     }
 
-    /// Takes `command` unless it was settled already, in which case its
-    /// report is handed back again. None while a message is on its way, or
-    /// for a command already on its way.
+    /// Takes `command` unless it was taken already, in which case its last
+    /// report is handed back again. None for a command already on its way.
     pub fn take(
         &mut self,
         command: &Command,
@@ -61,9 +63,8 @@ impl Taken {
 }
 
 /// A kind the host does not handle is reported by name rather than dropped,
-/// so the sender learns the command went nowhere. A message is reported once
-/// it reaches its worker, by `Deliveries::settle`, so none is reported here
-/// while it is on its way.
+/// so the sender learns the command went nowhere. A message is reported
+/// written here, and again once its worker takes it, by `Deliveries::settle`.
 pub fn take(
     command: &Command,
     workers: &Workers,
@@ -81,6 +82,7 @@ pub fn take(
         ("start", Some(worker)) => match &command.session_id {
             Some(session) => {
                 let given = Given {
+                    command: Some(&command.id),
                     context: command.context.as_ref(),
                     documents: command.documents.as_deref(),
                     env: command.env.as_ref(),
@@ -99,7 +101,10 @@ pub fn take(
             None => Some("a start needs a sessionId".into()),
         },
         ("message", Some(worker)) => match text {
-            Some(text) => deliveries.hold(workers, &command.id, worker, text)?.err(),
+            Some(text) => match deliveries.hold(workers, &command.id, worker, text) {
+                Ok(()) => return Some(CommandReport::written(command.id.clone())),
+                Err(e) => Some(e),
+            },
             None => Some("a message needs text".into()),
         },
         ("interrupt", Some(worker)) => workers.interrupt(worker, &command.id, text).err(),
@@ -118,7 +123,6 @@ mod tests {
     use super::*;
     use crate::claude::Claude;
     use crate::session::Sessions;
-    use std::time::Duration;
 
     /// No folder holds a worker, so the host has none.
     fn no_workers() -> Workers {
@@ -134,12 +138,7 @@ mod tests {
     }
 
     fn take_now(json: &str) -> CommandReport {
-        take(
-            &command(json),
-            &no_workers(),
-            &mut Deliveries::new(Duration::ZERO),
-        )
-        .unwrap()
+        take(&command(json), &no_workers(), &mut Deliveries::default()).unwrap()
     }
 
     #[test]
@@ -220,7 +219,7 @@ mod tests {
     #[test]
     fn a_command_settled_once_is_answered_again_and_not_done_again() {
         let workers = no_workers();
-        let mut deliveries = Deliveries::new(Duration::ZERO);
+        let mut deliveries = Deliveries::default();
         let mut taken = Taken::default();
         let start = command(r#"{"id":"c1","kind":"start","workerId":"w9","sessionId":"s1"}"#);
         let first = taken.take(&start, &workers, &mut deliveries).unwrap();

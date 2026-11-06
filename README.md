@@ -127,8 +127,11 @@ session has open (from Claude Code's latest `background_tasks_changed`), and
 rather than by itself, as one a background task's end begins is. The host
 writes a `process_started` line in `logs/<id>.jsonl` before each Claude Code
 it runs, so a session resumed there starts with no tasks. A `message` is
-written to the session's stdin at once and reported done once Claude Code
-echoes it back, as it does when it takes it at its next step; `interrupt` asks
+written to the session's stdin at once and reported written (`taken: false`),
+then reported again once Claude Code echoes it back, as it does when it takes
+it at its next step however long that is, or failed if its session ends
+first. The `instruction` line of a message, a `start`'s text or an
+`interrupt`'s carries that command's `commandId`; `interrupt` asks
 Claude Code to stop the turn, as Escape does; `stop` ends the session and
 whatever it started; `retire` stops it and moves the folder to
 `<workers_dir>/.retired/<name>-<id>/`. Every command is idempotent: one sent

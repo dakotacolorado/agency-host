@@ -113,6 +113,10 @@ pub struct Line {
     pub session_id: String,
     pub from: &'static str,
     pub text: String,
+    /// On an `instruction` that is a command's text as the session took it:
+    /// that command's id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -130,6 +134,10 @@ pub struct CommandReport {
     pub ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// `Some(false)`: a message written to its session and not yet taken,
+    /// which is reported again once it is settled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub taken: Option<bool>,
 }
 
 impl CommandReport {
@@ -138,7 +146,19 @@ impl CommandReport {
             command_id,
             ok: error.is_none(),
             error,
+            taken: None,
         }
+    }
+
+    pub fn written(command_id: String) -> Self {
+        CommandReport {
+            taken: Some(false),
+            ..CommandReport::new(command_id, None)
+        }
+    }
+
+    pub fn settled(&self) -> bool {
+        self.taken != Some(false)
     }
 }
 
@@ -248,17 +268,26 @@ mod tests {
                 ..WorkerReport::new("w3".into(), State::Waiting, Some("s3".into()))
             },
         ];
+        let line = |seq, from, text: &str, command_id: Option<&str>| Line {
+            seq,
+            at: "2026-10-28T00:00:00.000Z".into(),
+            session_id: "s1".into(),
+            from,
+            text: text.into(),
+            command_id: command_id.map(String::from),
+        };
         let lines = [(
             "w1".to_string(),
-            vec![Line {
-                seq: 4,
-                at: "2026-10-28T00:00:00.000Z".into(),
-                session_id: "s1".into(),
-                from: "agent",
-                text: "hi".into(),
-            }],
+            vec![
+                line(4, "instruction", "go", Some("c2")),
+                line(5, "agent", "hi", None),
+            ],
         )];
-        let results = [CommandReport::new("c1".into(), Some("no".into()))];
+        let results = [
+            CommandReport::new("c1".into(), Some("no".into())),
+            CommandReport::written("c2".into()),
+            CommandReport::new("c3".into(), None),
+        ];
         let up = Up::Report {
             workers: &workers,
             lines: line_reports(&lines),
@@ -273,8 +302,15 @@ mod tests {
                     {"id":"w2","state":"idle","sessionId":null,"tasks":0},
                     {"id":"w3","state":"waiting","sessionId":"s3","tasks":0,"told":true}
                 ],
-                "lines":[{"workerId":"w1","seq":4,"at":"2026-10-28T00:00:00.000Z","sessionId":"s1","from":"agent","text":"hi"}],
-                "commandResults":[{"commandId":"c1","ok":false,"error":"no"}]
+                "lines":[
+                    {"workerId":"w1","seq":4,"at":"2026-10-28T00:00:00.000Z","sessionId":"s1","from":"instruction","text":"go","commandId":"c2"},
+                    {"workerId":"w1","seq":5,"at":"2026-10-28T00:00:00.000Z","sessionId":"s1","from":"agent","text":"hi"}
+                ],
+                "commandResults":[
+                    {"commandId":"c1","ok":false,"error":"no"},
+                    {"commandId":"c2","ok":true,"taken":false},
+                    {"commandId":"c3","ok":true}
+                ]
             })
         );
         assert_eq!(

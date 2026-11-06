@@ -62,7 +62,9 @@ fn a_command_pushed_on_the_socket_is_taken_and_reported_at_once() {
         "no turn yet, so nothing said of one"
     );
 
-    let start = json!({"id":"c2","kind":"start","workerId":"w1","sessionId":"5a1e2b3c-4d5e-4f60-8a7b-8c9d0e1f2a3b","resume":false,"text":"hello"});
+    // Its id is a uuid, as the service's are, so its text's line names it.
+    let c2 = "6b2f3c4d-5e6f-4a70-8b8c-9d0e1f2a3b4c";
+    let start = json!({"id":c2,"kind":"start","workerId":"w1","sessionId":"5a1e2b3c-4d5e-4f60-8a7b-8c9d0e1f2a3b","resume":false,"text":"hello"});
     push(&mut socket, start.clone());
     // Its result, its turn ending and what it said may come in one report
     // or in several.
@@ -71,7 +73,7 @@ fn a_command_pushed_on_the_socket_is_taken_and_reported_at_once() {
     while ok.is_none() || !waiting || lines.len() < 2 {
         assert!(Instant::now() < deadline, "{ok:?} {waiting} {lines:?}");
         let report = report_until(&mut socket, quick, |_| true);
-        ok = ok.or(result(&report, "c2").map(|r| r["ok"].clone()));
+        ok = ok.or(result(&report, c2).map(|r| r["ok"].clone()));
         let worker = &report["workers"][0];
         if worker["state"] == "waiting" {
             assert_eq!(
@@ -87,10 +89,37 @@ fn a_command_pushed_on_the_socket_is_taken_and_reported_at_once() {
     assert_eq!(
         lines,
         [
-            json!({"workerId":"w1","seq":0,"at":lines[0]["at"],"sessionId":"5a1e2b3c-4d5e-4f60-8a7b-8c9d0e1f2a3b","from":"instruction","text":"hello"}),
+            json!({"workerId":"w1","seq":0,"at":lines[0]["at"],"sessionId":"5a1e2b3c-4d5e-4f60-8a7b-8c9d0e1f2a3b","from":"instruction","text":"hello","commandId":c2}),
             json!({"workerId":"w1","seq":1,"at":lines[1]["at"],"sessionId":"5a1e2b3c-4d5e-4f60-8a7b-8c9d0e1f2a3b","from":"agent","text":"ready"}),
         ]
     );
+
+    // A message is reported written, not yet taken, and then taken; when the
+    // two come between reports, only the last goes up. Its line names it.
+    let c4 = "7c3a4d5e-6f70-4b81-9c9d-0e1f2a3b4c5d";
+    push(
+        &mut socket,
+        json!({"id":c4,"kind":"message","workerId":"w1","text":"are you there"}),
+    );
+    let (mut results, mut lines) = (vec![], vec![]);
+    let deadline = Instant::now() + quick;
+    while results.last() != Some(&json!({"commandId":c4,"ok":true})) || lines.len() < 2 {
+        assert!(Instant::now() < deadline, "{results:?} {lines:?}");
+        let report = report_until(&mut socket, quick, |_| true);
+        results.extend(result(&report, c4));
+        lines.extend(report["lines"].as_array().cloned().unwrap_or_default());
+    }
+    assert!(
+        results[..results.len() - 1] == [json!({"commandId":c4,"ok":true,"taken":false})]
+            || results.len() == 1,
+        "{results:?}"
+    );
+    assert_eq!(
+        (&lines[0]["text"], &lines[0]["commandId"], &lines[1]["text"]),
+        (&json!("are you there"), &json!(c4), &json!("heard")),
+        "{lines:?}"
+    );
+    assert!(lines[1].get("commandId").is_none(), "{lines:?}");
 
     push(
         &mut socket,
@@ -121,7 +150,7 @@ fn a_command_pushed_on_the_socket_is_taken_and_reported_at_once() {
     // Pushed again as pending, as the service does when a socket opens, the
     // start is answered as before and not done again.
     push(&mut socket, start);
-    let again = report_until(&mut socket, quick, |r| result(r, "c2").is_some());
-    assert_eq!(result(&again, "c2").unwrap()["ok"], true, "{again}");
+    let again = report_until(&mut socket, quick, |r| result(r, c2).is_some());
+    assert_eq!(result(&again, c2).unwrap()["ok"], true, "{again}");
     assert_eq!(again["workers"][0]["state"], "idle", "{again}");
 }

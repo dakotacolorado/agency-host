@@ -1,7 +1,7 @@
 use super::*;
 use crate::commands;
 use crate::config::Permissions;
-use crate::protocol::Command;
+use crate::protocol::{Command, CommandReport};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -338,7 +338,7 @@ fn a_worker_is_spoken_to_while_it_works_and_answered_in_the_same_session() {
 #[test]
 fn create_and_start_commands_run_a_worker_in_its_own_folder_and_session() {
     let host = host("start", FAKE_CLAUDE);
-    let mut deliveries = Deliveries::new(PATIENCE);
+    let mut deliveries = Deliveries::default();
     for json in [
         r#"{"id":"c1","kind":"create","workerId":"w1","name":"ana"}"#,
         r#"{"id":"c2","kind":"start","workerId":"w1","sessionId":"s1","resume":false}"#,
@@ -383,7 +383,7 @@ while next; do :; done
 #[test]
 fn a_start_writes_its_context_before_claude_code_starts_and_sets_its_variables() {
     let host = host("context", CONTEXT_CLAUDE);
-    let mut deliveries = Deliveries::new(PATIENCE);
+    let mut deliveries = Deliveries::default();
     let start = |session: &str, version: u64, skill: &str| {
         format!(
             r#"{{"id":"c-{session}","kind":"start","workerId":"w1","sessionId":"{session}","resume":false,
@@ -426,7 +426,7 @@ fn a_start_writes_its_context_before_claude_code_starts_and_sets_its_variables()
 #[test]
 fn a_start_writes_its_documents_after_its_context_and_their_rules_after_its_own() {
     let host = host("documents", CONTEXT_CLAUDE);
-    let mut deliveries = Deliveries::new(PATIENCE);
+    let mut deliveries = Deliveries::default();
     let take = |json: &str, deliveries: &mut Deliveries| {
         let report = commands::take(&command(json), &host.workers, deliveries).unwrap();
         assert!(report.ok, "{report:?}");
@@ -483,7 +483,7 @@ while next; do :; done
 fn a_start_gives_its_session_tokens_from_a_file_only_the_host_can_read_and_never_on_a_command_line()
 {
     let host = host("secrets", SECRET_CLAUDE);
-    let mut deliveries = Deliveries::new(PATIENCE);
+    let mut deliveries = Deliveries::default();
     let take = |json: &str, deliveries: &mut Deliveries| {
         let report = commands::take(&command(json), &host.workers, deliveries).unwrap();
         assert!(report.ok, "{report:?}");
@@ -682,6 +682,68 @@ fn a_session_cut_off_before_claude_code_wrote_anything_is_begun_again() {
     assert_eq!(
         host.begun("ana", 2),
         [format!("new {claude}"), format!("new {claude}")]
+    );
+}
+
+/// Cut off before it reads anything the first time it runs; after that,
+/// answers each message.
+const CUT_OFF_ONCE_CLAUDE: &str = r#"
+[ "$(wc -l < "$dir/begun")" -gt 1 ] || sleep 60
+while next; do [ -n "$text" ] || continue; said "on $text"; ended; done
+"#;
+
+#[test]
+fn the_line_of_a_commands_text_names_the_command_and_one_the_host_made_names_none() {
+    let host = host("named", CUT_OFF_ONCE_CLAUDE);
+    host.create("w1", "ana");
+    let mut deliveries = Deliveries::default();
+    let start = "00000000-0000-4000-8000-00000000000a";
+    let report = commands::take(
+        &command(&format!(
+            r#"{{"id":"{start}","kind":"start","workerId":"w1","sessionId":"s1","text":"hello"}}"#
+        )),
+        &host.workers,
+        &mut deliveries,
+    )
+    .unwrap();
+    assert!(report.ok, "{report:?}");
+    // Cut off before it took its first message, which it is told again.
+    host.kill("ana", &claude::uuid("s1"));
+    let workers = host.restarted();
+    workers.reconcile();
+    let home = host.home("ana");
+    let mut cursor = Cursor::default();
+    let named = |lines: Vec<Line>| -> Vec<(String, Option<String>)> {
+        lines
+            .into_iter()
+            .filter(|l| l.from == "instruction")
+            .map(|l| (l.text, l.command_id))
+            .collect()
+    };
+    assert_eq!(
+        named(lines_until(&workers, &home, &mut cursor, "on hello")),
+        [("hello".into(), Some(start.into()))]
+    );
+
+    let interrupt = "00000000-0000-4000-8000-00000000000b";
+    workers
+        .interrupt("w1", interrupt, Some("stop that"))
+        .unwrap();
+    assert_eq!(
+        named(lines_until(&workers, &home, &mut cursor, "on stop that")),
+        [("stop that".into(), Some(interrupt.into()))]
+    );
+
+    workers.stop("w1").unwrap();
+    workers.start("w1", "s2", true, None).unwrap();
+    assert_eq!(
+        named(lines_until(
+            &workers,
+            &home,
+            &mut cursor,
+            &format!("on {CARRY_ON}")
+        )),
+        [(CARRY_ON.into(), None)]
     );
 }
 
@@ -887,30 +949,41 @@ fn settle_all(workers: &Workers, deliveries: &mut Deliveries) -> Vec<(String, Re
 }
 
 #[test]
-fn a_message_taken_with_its_workers_start_is_done_once_claude_code_takes_it() {
+fn a_message_taken_with_its_workers_start_is_written_at_once_and_taken_once_claude_code_takes_it() {
     let host = host("slow", SLOW_CLAUDE);
     let workers = &host.workers;
     host.create("w1", "ana");
-    let mut deliveries = Deliveries::new(PATIENCE);
+    let mut deliveries = Deliveries::default();
+    let mut taken = commands::Taken::default();
     // Two commands pushed together, taken one after the other.
     let start = command(r#"{"id":"c1","kind":"start","workerId":"w1","sessionId":"s1"}"#);
     let message = command(r#"{"id":"c2","kind":"message","workerId":"w1","text":"hello"}"#);
-    let started = commands::take(&start, workers, &mut deliveries).unwrap();
+    let started = taken.take(&start, workers, &mut deliveries).unwrap();
     assert!(started.ok, "{started:?}");
+    let written = CommandReport::written("c2".into());
     assert_eq!(
-        commands::take(&message, workers, &mut deliveries),
-        None,
-        "not reported until Claude Code has taken it"
+        taken.take(&message, workers, &mut deliveries),
+        Some(written.clone()),
+        "reported written before Claude Code has taken it"
+    );
+    assert_eq!(
+        taken.take(&message, workers, &mut deliveries),
+        Some(written),
+        "sent again by the service, it is answered as written and not written twice"
     );
     assert_eq!(
         commands::take(&message, workers, &mut deliveries),
         None,
-        "sent again by the service, it is not written twice"
+        "nor while it is held"
     );
 
+    let settled = settle_all(workers, &mut deliveries);
+    assert_eq!(settled, [("c2".to_string(), Ok(()))]);
+    taken.remember(&CommandReport::new("c2".into(), None));
     assert_eq!(
-        settle_all(workers, &mut deliveries),
-        [("c2".to_string(), Ok(()))]
+        taken.take(&message, workers, &mut deliveries),
+        Some(CommandReport::new("c2".into(), None)),
+        "sent again once taken, it is answered as taken"
     );
     let home = host.home("ana");
     let (mut seen, mut cursor) = (vec![], Cursor::default());
@@ -920,9 +993,20 @@ fn a_message_taken_with_its_workers_start_is_done_once_claude_code_takes_it() {
     assert_eq!(seen.iter().filter(|e| **e == told("hello")).count(), 1);
 }
 
+/// Works on, reading nothing, for longer than a test waits on one settle;
+/// then takes what was said meanwhile.
+const LATE_CLAUDE: &str = r#"
+next
+said "busy"
+sleep 2
+next
+said "on $text"; ended
+while next; do :; done
+"#;
+
 #[test]
-fn a_message_is_done_only_once_claude_code_echoes_it() {
-    let host = host("delivered", FAKE_CLAUDE);
+fn a_message_is_taken_once_claude_code_echoes_it_however_late() {
+    let host = host("delivered", LATE_CLAUDE);
     let workers = &host.workers;
     host.create("w1", "ana");
     workers
@@ -931,28 +1015,34 @@ fn a_message_is_done_only_once_claude_code_echoes_it() {
     let home = host.home("ana");
     let (mut seen, mut cursor) = (vec![], Cursor::default());
     read_until(workers, &home, &mut seen, &mut cursor, |s| {
-        s.contains(&said("step one"))
+        s.contains(&said("busy"))
     });
 
-    // Written at once, but taken only at its next step, a second from now.
-    let mut deliveries = Deliveries::new(PATIENCE);
-    assert_eq!(deliveries.hold(workers, "c1", "w1", "use main"), None);
-    assert_eq!(deliveries.settle(workers), []);
-    assert!(!workers.echoed("w1", &claude::uuid("c1")), "not taken yet");
-
+    // Written at once, but taken only at its next step, seconds from now.
+    let mut deliveries = Deliveries::default();
+    let id = "00000000-0000-4000-8000-0000000000c1";
+    assert_eq!(deliveries.hold(workers, id, "w1", "use main"), Ok(()));
+    let held = Instant::now();
+    while held.elapsed() < Duration::from_millis(1200) {
+        assert_eq!(deliveries.settle(workers), [], "not taken yet");
+        thread::sleep(Duration::from_millis(100));
+    }
     assert_eq!(
         settle_all(workers, &mut deliveries),
-        [("c1".to_string(), Ok(()))]
+        [(id.to_string(), Ok(()))]
     );
-    read_until(workers, &home, &mut seen, &mut cursor, |s| {
-        s.contains(&told("use main"))
-    });
+
+    let lines = lines_until(workers, &home, &mut cursor, "on use main");
+    let told: Vec<_> = lines
+        .iter()
+        .filter(|l| l.from == "instruction")
+        .map(|l| (l.text.as_str(), l.command_id.as_deref()))
+        .collect();
+    assert_eq!(told, [("use main", Some(id))], "its line names its command");
 }
 
 #[test]
-fn a_message_that_cannot_be_delivered_in_time_fails_with_why() {
-    let patience = Duration::from_millis(300);
-
+fn a_message_never_taken_fails_only_when_its_session_ends() {
     let away = host("away", AWAY_CLAUDE);
     away.create("w1", "ana");
     away.workers.start("w1", "s1", false, None).unwrap();
@@ -961,12 +1051,17 @@ fn a_message_that_cannot_be_delivered_in_time_fails_with_why() {
     read_until(&away.workers, &home, &mut seen, &mut cursor, |s| {
         s.contains(&said("busy"))
     });
-    let mut deliveries = Deliveries::new(patience);
-    assert_eq!(deliveries.hold(&away.workers, "c1", "w1", "hello"), None);
+    let mut deliveries = Deliveries::default();
+    assert_eq!(deliveries.hold(&away.workers, "c1", "w1", "hello"), Ok(()));
+    thread::sleep(Duration::from_millis(500));
+    assert_eq!(deliveries.settle(&away.workers), [], "held, however long");
+    // Begun again: the new session never had it.
+    away.workers.stop("w1").unwrap();
+    away.workers.start("w1", "s2", true, None).unwrap();
     let [(_, Err(why))] = &settle_all(&away.workers, &mut deliveries)[..] else {
         panic!("expected one failure")
     };
-    assert!(why.contains("not taken after"), "{why}");
+    assert!(why.contains("ended before it took the message"), "{why}");
 
     let leaving = host("leaving", LEAVING_CLAUDE);
     leaving.create("w1", "ana");
@@ -976,12 +1071,35 @@ fn a_message_that_cannot_be_delivered_in_time_fails_with_why() {
     read_until(&leaving.workers, &home, &mut seen, &mut cursor, |s| {
         s.contains(&said("bye"))
     });
-    let mut deliveries = Deliveries::new(PATIENCE);
-    assert_eq!(deliveries.hold(&leaving.workers, "c1", "w1", "hello"), None);
+    let mut deliveries = Deliveries::default();
+    assert_eq!(
+        deliveries.hold(&leaving.workers, "c1", "w1", "hello"),
+        Ok(())
+    );
     let [(_, Err(why))] = &settle_all(&leaving.workers, &mut deliveries)[..] else {
         panic!("expected one failure")
     };
     assert!(why.contains("ended before it took the message"), "{why}");
+}
+
+/// Takes its opening message and the one after it, then ends by itself.
+const TAKE_AND_GO_CLAUDE: &str = r#"
+next
+next
+"#;
+
+#[test]
+fn a_message_taken_just_before_its_session_ends_is_taken() {
+    let host = host("taken-then-gone", TAKE_AND_GO_CLAUDE);
+    host.create("w1", "ana");
+    host.workers.start("w1", "s1", false, None).unwrap();
+    let mut deliveries = Deliveries::default();
+    assert_eq!(deliveries.hold(&host.workers, "c1", "w1", "hello"), Ok(()));
+    wait_for("its session ends", || host.workers.live().is_empty());
+    assert_eq!(
+        settle_all(&host.workers, &mut deliveries),
+        [("c1".to_string(), Ok(()))]
+    );
 }
 
 #[test]
@@ -1057,6 +1175,7 @@ fn events(host: &Host, session: &str) -> PathBuf {
         claude: claude::uuid(session),
         from: 0,
         stream: true,
+        opening: None,
         stopped: false,
         ended: false,
     })
@@ -1085,6 +1204,7 @@ fn a_transcript_carried_on_headless_is_read_up_to_where_it_was_then_its_events()
         claude: claude.clone(),
         from: end,
         stream: true,
+        opening: None,
         stopped: false,
         ended: false,
     })
@@ -1122,7 +1242,11 @@ fn a_read_stops_at_its_budget_and_the_next_picks_up_there() {
     let path = events(&host, "s1");
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, &body).unwrap();
-    let one = Entry::Told { text: "one".into() }.line(0, sys::now(), "s1".into());
+    let one = Entry::Told {
+        text: "one".into(),
+        command: None,
+    }
+    .line(0, sys::now(), "s1".into());
     let one = serde_json::to_string(&one).unwrap().len();
     let home = host.home("ana");
 
@@ -1551,7 +1675,7 @@ fn a_stop_ends_the_session_and_what_it_started_and_leaves_its_work_where_it_is()
     let work = host.home("ana").dir.join("WORK");
     fs::write(&work, "half-done\n").unwrap();
     let stop = command(r#"{"id":"c1","kind":"stop","workerId":"w1"}"#);
-    let mut deliveries = Deliveries::new(PATIENCE);
+    let mut deliveries = Deliveries::default();
 
     let report = commands::take(&stop, workers, &mut deliveries).unwrap();
     assert!(report.ok, "{report:?}");
@@ -1574,7 +1698,7 @@ fn a_retired_worker_is_kept_aside_and_its_name_can_be_given_again() {
     workers.start("w1", "s1", false, Some("hello")).unwrap();
     fs::write(host.home("ana").dir.join("WORK"), "kept\n").unwrap();
 
-    let mut deliveries = Deliveries::new(PATIENCE);
+    let mut deliveries = Deliveries::default();
     let retire = command(r#"{"id":"c1","kind":"retire","workerId":"w1"}"#);
     let report = commands::take(&retire, workers, &mut deliveries).unwrap();
     assert!(report.ok, "{report:?}");
@@ -1684,7 +1808,7 @@ fn real_claude() {
         )
         .unwrap();
     let (mut seen, mut cursor): (Seen, _) = (vec![], Cursor::default());
-    let mut deliveries = Deliveries::new(PATIENCE);
+    let mut deliveries = Deliveries::default();
     let mut said = false;
     let ran_third = |s: &Seen| {
         s.iter()
@@ -1704,7 +1828,12 @@ fn real_claude() {
                     "real",
                     "Correction: echo third instead of second.",
                 );
-                assert_eq!(held, None, "taken only at its next step");
+                assert_eq!(held, Ok(()));
+                assert_eq!(
+                    deliveries.settle(&workers),
+                    [],
+                    "taken only at its next step"
+                );
                 said = true;
             }
         },
@@ -1713,6 +1842,13 @@ fn real_claude() {
     assert_eq!(
         settle_all(&workers, &mut deliveries),
         [("00000000-0000-4000-8000-0000000000c1".to_string(), Ok(()))]
+    );
+    assert_eq!(
+        seen.iter()
+            .filter(|e| **e == told("Correction: echo third instead of second."))
+            .count(),
+        1,
+        "a message taken mid-turn is one line"
     );
     read_real(
         &workers,
