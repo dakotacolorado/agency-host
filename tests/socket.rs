@@ -66,14 +66,18 @@ fn a_command_pushed_on_the_socket_is_taken_and_reported_at_once() {
     let c2 = "6b2f3c4d-5e6f-4a70-8b8c-9d0e1f2a3b4c";
     let start = json!({"id":c2,"kind":"start","workerId":"w1","sessionId":"5a1e2b3c-4d5e-4f60-8a7b-8c9d0e1f2a3b","resume":false,"text":"hello"});
     push(&mut socket, start.clone());
-    // Its result, its turn ending and what it said may come in one report
-    // or in several.
-    let (mut ok, mut waiting, mut lines) = (None, false, vec![]);
+    // Its result, its turn ending, the account's usage and what it said may
+    // come in one report or in several.
+    let (mut ok, mut waiting, mut lines, mut usage) = (None, false, vec![], None);
     let deadline = Instant::now() + quick;
-    while ok.is_none() || !waiting || lines.len() < 2 {
-        assert!(Instant::now() < deadline, "{ok:?} {waiting} {lines:?}");
+    while ok.is_none() || !waiting || lines.len() < 2 || usage.is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "{ok:?} {waiting} {lines:?} {usage:?}"
+        );
         let report = report_until(&mut socket, quick, |_| true);
         ok = ok.or(result(&report, c2).map(|r| r["ok"].clone()));
+        usage = usage.or(report.get("usage").cloned());
         let worker = &report["workers"][0];
         if worker["state"] == "waiting" {
             assert_eq!(
@@ -86,6 +90,19 @@ fn a_command_pushed_on_the_socket_is_taken_and_reported_at_once() {
         lines.extend(report["lines"].as_array().cloned().unwrap_or_default());
     }
     assert_eq!(ok, Some(json!(true)));
+    let usage = usage.unwrap();
+    assert_eq!(
+        usage,
+        json!({
+            "readAt": usage["readAt"],
+            "fiveHour": {"utilization": 0.48, "resetsAt": "2026-11-06T11:40:00.000Z"},
+            "sevenDay": {"utilization": 0.4, "resetsAt": "2026-11-07T15:00:00.000Z"},
+        })
+    );
+    assert!(
+        usage["readAt"].as_str().is_some_and(|at| at.ends_with('Z')),
+        "{usage}"
+    );
     assert_eq!(
         lines,
         [
@@ -146,6 +163,7 @@ fn a_command_pushed_on_the_socket_is_taken_and_reported_at_once() {
         json!([]),
         "lines sent are not sent again"
     );
+    assert!(reopened.get("usage").is_none(), "nor is usage: {reopened}");
 
     // Pushed again as pending, as the service does when a socket opens, the
     // start is answered as before and not done again.

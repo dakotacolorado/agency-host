@@ -162,6 +162,32 @@ impl CommandReport {
     }
 }
 
+/// The account's usage, as a session's `rate_limit_event` said it at
+/// `read_at`. A window the event did not carry is left out, never sent as 0.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Usage {
+    pub read_at: String,
+    #[serde(flatten)]
+    pub windows: Windows,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Windows {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub five_hour: Option<Window>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seven_day: Option<Window>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Window {
+    pub utilization: f64,
+    pub resets_at: String,
+}
+
 /// The lines read for each worker, by worker id.
 pub type Lines = [(String, Vec<Line>)];
 
@@ -182,6 +208,8 @@ pub enum Up<'a> {
         workers: &'a [WorkerReport],
         lines: Vec<LineReport<'a>>,
         command_results: &'a [CommandReport],
+        #[serde(skip_serializing_if = "Option::is_none")]
+        usage: Option<&'a Usage>,
     },
     Ping,
 }
@@ -255,7 +283,7 @@ mod tests {
     }
 
     #[test]
-    fn a_report_is_workers_lines_and_results_under_its_type() {
+    fn a_report_is_workers_lines_results_and_usage_under_its_type() {
         let workers = [
             WorkerReport {
                 tasks: 2,
@@ -292,6 +320,7 @@ mod tests {
             workers: &workers,
             lines: line_reports(&lines),
             command_results: &results,
+            usage: None,
         };
         assert_eq!(
             serde_json::to_value(&up).unwrap(),
@@ -312,6 +341,27 @@ mod tests {
                     {"commandId":"c3","ok":true}
                 ]
             })
+        );
+        let usage = Usage {
+            read_at: "2026-11-06T08:28:17.268Z".into(),
+            windows: Windows {
+                five_hour: Some(Window {
+                    utilization: 0.48,
+                    resets_at: "2026-11-06T10:00:00.000Z".into(),
+                }),
+                seven_day: None,
+            },
+        };
+        let up = Up::Report {
+            workers: &[],
+            lines: vec![],
+            command_results: &[],
+            usage: Some(&usage),
+        };
+        assert_eq!(
+            serde_json::to_value(&up).unwrap()["usage"],
+            json!({"readAt":"2026-11-06T08:28:17.268Z","fiveHour":{"utilization":0.48,"resetsAt":"2026-11-06T10:00:00.000Z"}}),
+            "a window not read is left out"
         );
         assert_eq!(
             serde_json::to_value(Up::Ping).unwrap(),

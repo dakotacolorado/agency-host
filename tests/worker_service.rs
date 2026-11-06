@@ -1,7 +1,7 @@
 //! The built binary against a deployed worker-service, through the routes a
 //! person uses: a worker created with a brief on this host is created and
-//! started here, a message reaches it, an interrupt and a stop are taken, and
-//! it is retired -- each heard over the socket well inside one heartbeat. The
+//! started here, the account's usage its session says is kept, a message
+//! reaches it, an interrupt and a stop are taken, and it is retired -- each heard over the socket well inside one heartbeat. The
 //! worker's Claude Code is a stand-in, so this costs no session. It runs only
 //! with `WORKER_SERVICE_URL` and `WORKER_SERVICE_TOKEN` (beta's `ApiUrl` and
 //! token), and otherwise says so and passes.
@@ -45,6 +45,11 @@ impl Service {
     fn worker(&self, id: &str) -> Value {
         let got = self.call("GET", &format!("/fleet/workers/{id}"), None);
         got.get("worker").cloned().unwrap_or(got)
+    }
+
+    fn usage(&self) -> Value {
+        let got = self.call("GET", "/fleet/usage", None);
+        got.get("usage").cloned().unwrap_or(got)
     }
 
     /// Waits until `done` holds of the worker, or fails after `within`.
@@ -168,6 +173,7 @@ fn a_worker_is_created_spoken_to_stopped_and_retired_over_the_socket() {
     // Long enough after the first heartbeat for the socket it named to open.
     thread::sleep(Duration::from_secs(3));
 
+    let before = service.usage()["fiveHour"]["readAt"].clone();
     let name = format!("t{}", std::process::id());
     let created = service.call(
         "POST",
@@ -180,6 +186,24 @@ fn a_worker_is_created_spoken_to_stopped_and_retired_over_the_socket() {
     service.until(&worker, PUSHED, "created and started by push", |w| {
         w["state"] == "waiting" && !w["reportedAt"].is_null()
     });
+    // The stand-in's reading is stamped as the host reads it, so it is newer
+    // than any the service held before.
+    let deadline = Instant::now() + PUSHED;
+    loop {
+        let usage = service.usage();
+        let five_hour = &usage["fiveHour"];
+        if five_hour["utilization"] == 0.48
+            && five_hour["readAt"].as_str() > before.as_str()
+            && usage["sevenDay"]["utilization"] == 0.4
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the session's usage, kept within {PUSHED:?}: {usage}, newer than {before}"
+        );
+        thread::sleep(Duration::from_millis(250));
+    }
 
     let sent = service.call(
         "POST",

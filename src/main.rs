@@ -13,7 +13,7 @@ mod worker;
 use commands::Taken;
 use config::Config;
 use heartbeat::{Client, Failure, Heartbeat};
-use protocol::{line_reports, Command, CommandReport, Line, LineReport, Up, WorkerReport};
+use protocol::{line_reports, Command, CommandReport, Line, LineReport, Up, Usage, WorkerReport};
 use socket::Socket;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -232,6 +232,8 @@ fn run(client: &Client, config: &Config, workers: &Workers, socket: &Socket) -> 
     let mut sent_at: HashMap<String, Cursor> = HashMap::new();
     // What the socket was last told of the workers, and on which socket.
     let mut told: Option<(u64, Vec<WorkerReport>)> = None;
+    // The newest reading of the account's usage not yet written on a socket.
+    let mut usage: Option<Usage> = None;
     // Which worker's transcript is read first in the next report.
     let mut turn = 0;
     let mut deliveries = Deliveries::default();
@@ -268,6 +270,7 @@ fn run(client: &Client, config: &Config, workers: &Workers, socket: &Socket) -> 
                 &mut unsent,
                 &mut sent_at,
                 &mut told,
+                &mut usage,
                 &mut turn,
             );
         }
@@ -313,8 +316,9 @@ fn run(client: &Client, config: &Config, workers: &Workers, socket: &Socket) -> 
 
 /// Sends what the socket has not yet been told: every worker's state when it
 /// is a socket not told before or the states have changed, transcript lines
-/// past what was written, and command results not yet written. Nothing is
-/// counted as sent until the write is.
+/// past what was written, command results not yet written, and the newest
+/// reading of the account's usage, if one is. Nothing is counted as sent until
+/// the write is.
 ///
 /// A read takes its first line however long it is, so once the report's
 /// budget is spent no more are read: two long lines could not share one
@@ -326,6 +330,7 @@ fn report(
     unsent: &mut Unsent,
     sent_at: &mut HashMap<String, Cursor>,
     told: &mut Option<(u64, Vec<WorkerReport>)>,
+    usage: &mut Option<Usage>,
     turn: &mut usize,
 ) {
     let mut all = workers.all();
@@ -339,7 +344,17 @@ fn report(
         let from = sent_at.get(&record.id).copied().unwrap_or_default();
         let batch = (room > 0).then(|| workers.read(home, from, room)).flatten();
         let (next, lines) = match batch {
-            Some(batch) => (batch.next, batch.lines),
+            Some(batch) => {
+                // Every worker shares the account, so only the newest reading
+                // matters. A read put back by `fit` is read again later, and
+                // a reading sent twice is kept once.
+                if let Some(read) = batch.usage {
+                    if usage.as_ref().is_none_or(|u| u.read_at <= read.read_at) {
+                        *usage = Some(read);
+                    }
+                }
+                (batch.next, batch.lines)
+            }
             None => (from, vec![]),
         };
         room = room.saturating_sub(lines.iter().map(|l| line_size(&record.id, l)).sum());
@@ -353,7 +368,7 @@ fn report(
         .rev()
         .map(|i| (i + first) % read.len())
         .collect();
-    let states = fit(&mut read, &last_read, unsent, |read| {
+    let states = fit(&mut read, &last_read, unsent, usage.as_ref(), |read| {
         all.iter()
             .zip(read)
             .map(|((home, record), (_, _, next, _))| {
@@ -366,7 +381,7 @@ fn report(
         .as_ref()
         .is_none_or(|(on, was)| *on != opened || *was != states);
     let said = read.iter().any(|(.., lines)| !lines.is_empty());
-    if !(changed || said || !unsent.0.is_empty()) {
+    if !(changed || said || !unsent.0.is_empty() || usage.is_some()) {
         // Bytes read that said nothing need no report to be passed.
         for (id, _, next, _) in read {
             sent_at.insert(id, next);
@@ -381,8 +396,10 @@ fn report(
         workers: &states,
         lines: line_reports(&lines),
         command_results: &unsent.0,
+        usage: usage.as_ref(),
     }) {
         unsent.0.clear();
+        *usage = None;
         for (id, _, next, _) in read {
             sent_at.insert(id, next);
         }
@@ -408,11 +425,12 @@ fn fit(
     read: &mut [Read],
     last_read: &[usize],
     unsent: &Unsent,
+    usage: Option<&Usage>,
     states_of: impl Fn(&[Read]) -> Vec<WorkerReport>,
 ) -> Vec<WorkerReport> {
     let mut states = states_of(read);
     for &i in last_read {
-        if report_size(&states, read, unsent) <= REPORT_LIMIT {
+        if report_size(&states, read, unsent, usage) <= REPORT_LIMIT {
             break;
         }
         let (id, from, next, lines) = &mut read[i];
@@ -430,7 +448,12 @@ fn fit(
 }
 
 /// A report's bytes as it would be written.
-fn report_size(states: &[WorkerReport], read: &[Read], unsent: &Unsent) -> usize {
+fn report_size(
+    states: &[WorkerReport],
+    read: &[Read],
+    unsent: &Unsent,
+    usage: Option<&Usage>,
+) -> usize {
     let lines: Vec<(String, Vec<Line>)> = read
         .iter()
         .map(|(id, _, _, lines)| (id.clone(), lines.clone()))
@@ -439,6 +462,7 @@ fn report_size(states: &[WorkerReport], read: &[Read], unsent: &Unsent) -> usize
         workers: states,
         lines: line_reports(&lines),
         command_results: &unsent.0,
+        usage,
     };
     serde_json::to_string(&up).map_or(usize::MAX, |s| s.len())
 }
@@ -493,8 +517,8 @@ mod tests {
                 .collect()
         };
         // w3 was read first, then w1 and w2: w2 and then w1 are put back.
-        let states = fit(&mut read, &[1, 0, 2], &unsent, states_of);
-        assert!(report_size(&states, &read, &unsent) <= REPORT_LIMIT);
+        let states = fit(&mut read, &[1, 0, 2], &unsent, None, states_of);
+        assert!(report_size(&states, &read, &unsent, None) <= REPORT_LIMIT);
         let kept: Vec<_> = read
             .iter()
             .map(|(id, _, next, lines)| (id.as_str(), next.offset, lines.len()))
@@ -503,7 +527,7 @@ mod tests {
         assert_eq!(states, states_of(&read), "states follow what is kept");
 
         let mut fits = read.clone();
-        fit(&mut fits, &[1, 0, 2], &unsent, states_of);
+        fit(&mut fits, &[1, 0, 2], &unsent, None, states_of);
         assert_eq!(fits, read, "a report that fits is left as it is");
     }
 }

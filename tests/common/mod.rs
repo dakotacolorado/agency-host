@@ -90,8 +90,10 @@ impl Service {
 }
 
 /// A stand-in for Claude Code, headless over stream-json as the host runs it:
-/// it begins a turn for each message and echoes it back as taken, answers the
-/// first `ready` and every one after `heard`, and ends each turn.
+/// it begins a turn for each message and echoes it back as taken, says the
+/// account's usage, answers the first `ready` and every one after `heard`, and
+/// ends each turn. The usage is a recorded `rate_limit_event` without its
+/// time, so the host stamps it with when it read it.
 pub const CLAUDE: &str = r#"#!/bin/sh
 [ "$1" = -p ] || exit 64
 reply=ready
@@ -101,6 +103,8 @@ while IFS= read -r line; do
 ' '{"type":"system","subtype":"init","session_id":"s"}'
   printf '%s
 ' "$line" | sed 's/^{/{"isReplay":true,/'
+  printf '%s
+' '{"rate_limit_info":{"isUsingOverage":false,"overageDisabledReason":"org_level_disabled","overageStatus":"rejected","rateLimitType":"five_hour","resetsAt":1793965200,"status":"allowed","unifiedWindows":{"five_hour":{"resetsAt":1793965200,"status":"allowed","utilization":0.48},"seven_day":{"resetsAt":1794063600,"status":"allowed","utilization":0.4}}},"session_id":"s","type":"rate_limit_event","uuid":"7841a015-4552-4d11-93c0-e6a07bfd2d72"}'
   printf '%s
 ' "{\"type\":\"assistant\",\"message\":{\"id\":\"m\",\"content\":[{\"type\":\"text\",\"text\":\"$reply\"}]},\"parent_tool_use_id\":null}"
   printf '%s

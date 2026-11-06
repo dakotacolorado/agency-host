@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use crate::claude::{self, Begin, Claude};
 use crate::context::{self, Context};
 use crate::home::{self, Home, Record, Session};
-use crate::protocol::{Line, State, WorkerReport};
+use crate::protocol::{Line, State, Usage, WorkerReport};
 use crate::session::{Echoes, Sessions, Spawn};
 use crate::sys;
 
@@ -112,6 +112,8 @@ impl Cursor {
 pub struct Batch {
     pub lines: Vec<Line>,
     pub next: Cursor,
+    /// The last reading of the account's usage among the lines read.
+    pub usage: Option<Usage>,
 }
 
 /// Where a worker's lines are read from, in the order they were written.
@@ -514,6 +516,7 @@ impl Workers {
         let sessions = home.sessions();
         let sources = sources(&sessions);
         let (mut next, mut lines, mut size) = (from, Vec::new(), 0);
+        let mut last_usage = None;
         'files: while next.file < sources.len() {
             let source = &sources[next.file];
             let last = next.file + 1 == sources.len();
@@ -581,6 +584,7 @@ impl Workers {
                     waiting,
                     tasks,
                     told,
+                    usage,
                 } = claude::read(&String::from_utf8_lossy(&line));
                 let at = at.filter(|at| instant(at)).unwrap_or_else(sys::now);
                 let read: Vec<Line> = entries
@@ -605,10 +609,20 @@ impl Workers {
                 next.waiting = waiting.unwrap_or(next.waiting);
                 next.tasks = tasks.unwrap_or(next.tasks);
                 next.told = told.or(next.told);
+                if let Some(windows) = usage {
+                    last_usage = Some(Usage {
+                        read_at: at,
+                        windows,
+                    });
+                }
                 lines.extend(read);
             }
         }
-        (next != from).then_some(Batch { lines, next })
+        (next != from).then_some(Batch {
+            lines,
+            next,
+            usage: last_usage,
+        })
     }
 }
 
