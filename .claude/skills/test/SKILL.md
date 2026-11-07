@@ -41,8 +41,7 @@ commands are only there, so read them there.
 `rollback` jobs: it runs every step, records the releases from the
 `deployed:` line, and a rollback is the `rollback` job submitted at the last
 good release's commit (`approval releases dakotacolorado/worker-host`). No
-author or agent runs `release` or `rollback`, or `scripts/release` or
-`scripts/rollback` without `DRY_RUN=1`. A host that installed a bad release
+author or agent runs `release` or `rollback`. A host that installed a bad release
 keeps it until its owner runs `scripts/install-host.sh` again.
 
 ## Setup
