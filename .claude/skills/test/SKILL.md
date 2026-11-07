@@ -29,6 +29,11 @@ worker-host is not deployed: it is a binary that each machine installs with
 
 GitHub Actions is off, so nothing builds, tests against beta or releases on
 its own: the pipeline's jobs below do, or the by-hand commands after them.
+worker-host is switched onto jobs
+(`approval call GET /packages/dakotacolorado/worker-host` reads `jobs`), so
+approval-service runs every step of a release by those jobs, and no agent
+does; the by-hand commands are for when it cannot: switched back to `agent`,
+or job-service down.
 
 ## The pipeline
 
