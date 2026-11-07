@@ -30,7 +30,7 @@ run = ["cargo", "fmt", "--check"]
 run = [".claude/skills/test/bin/beta-test"]
 credentials = ["aws"]
 
-# Reviewer or approval-service only: publishes the next release, which hosts
+# approval-service's only: publishes the next release, which hosts
 # install. Prints `deployed: <commit>`.
 [jobs.release]
 run = ["scripts/release"]
@@ -44,7 +44,7 @@ credentials = ["github"]
 memory = 512
 timeout = 600
 
-# Reviewer or approval-service only, at the good release's commit: makes that
+# approval-service's only, at the good release's commit: makes that
 # release Latest and each one published after it a prerelease. Prints
 # `deployed: <commit>`.
 [jobs.rollback]
