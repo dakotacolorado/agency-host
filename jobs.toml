@@ -1,0 +1,54 @@
+# worker-host's release steps as job-service jobs, each in the image `Containerfile`
+# builds, at the commit it is submitted for:
+#   jobs submit dakotacolorado/worker-host <commit> test
+# Each starts from a clean checkout, so each builds what it needs. pipeline.toml
+# says which step runs which.
+
+[defaults]
+memory = 1024
+timeout = 1800
+
+# The release's own build of all four binaries, checked as it checks them,
+# short of publishing. Needs no credentials.
+[jobs.build]
+run = ["env", "DRY_RUN=1", "scripts/release"]
+timeout = 3600
+
+[jobs.test]
+run = ["cargo", "test", "--locked"]
+
+[jobs.clippy]
+run = ["cargo", "clippy", "--locked", "--all-targets", "--", "-D", "warnings"]
+
+[jobs.fmt]
+run = ["cargo", "fmt", "--check"]
+
+# The binary run as a host against WorkerService-beta, driving a worker through
+# create, start, message, stop and retire. Anyone may run it; it never touches prod.
+# Prints `deployed: <commit>`.
+[jobs.beta-test]
+run = [".claude/skills/test/bin/beta-test"]
+credentials = ["aws"]
+
+# Reviewer or approval-service only: publishes the next release, which hosts
+# install. Prints `deployed: <commit>`.
+[jobs.release]
+run = ["scripts/release"]
+credentials = ["github"]
+timeout = 3600
+
+# Read-only: the Latest release's binaries match its SHA256SUMS and say its tag.
+[jobs.check-prod]
+run = [".claude/skills/test/bin/check-prod"]
+credentials = ["github"]
+memory = 512
+timeout = 600
+
+# Reviewer or approval-service only, at the good release's commit: makes that
+# release Latest and each one published after it a prerelease. Prints
+# `deployed: <commit>`.
+[jobs.rollback]
+run = ["scripts/rollback"]
+credentials = ["github"]
+memory = 256
+timeout = 300

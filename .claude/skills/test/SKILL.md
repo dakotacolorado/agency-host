@@ -28,7 +28,47 @@ worker-host is not deployed: it is a binary that each machine installs with
   them. Installing on a machine is the person's step, not the reviewer's.
 
 GitHub Actions is off, so nothing builds, tests against beta or releases on
-its own; the commands below do it by hand.
+its own: the pipeline's jobs below do, or the by-hand commands after them.
+
+## The pipeline
+
+Every step of a release is a job: `jobs.toml` defines them, `pipeline.toml`
+says which step runs which (approval-service's `docs/PIPELINE.md`), and each
+runs in the image `Containerfile` builds on base-rust (Rust, zig and
+cargo-zigbuild from base-rust; the musl and macOS targets, `gh`, the AWS CLI
+and `file` added), from a clean checkout:
+
+| Step | Job | Runs |
+|---|---|---|
+| `build` | `build` | `DRY_RUN=1 scripts/release`: the release's four builds and checks, publishing nothing |
+| `unit-test` | `test`, `clippy`, `fmt` | the checks below |
+| `deploy-beta` | `beta-test` | `bin/beta-test`: the beta test against WorkerService-beta, then `deployed: <commit>` |
+| `integration-test-beta` | skipped | the beta test is `deploy-beta`; no host stays on beta after it |
+| `rollback-beta` | skipped | nothing stays on beta |
+| `deploy-prod` | `release` | `scripts/release`: publishes the next release as Latest, then `deployed: <commit> <tag>` (reviewer only) |
+| `integration-test-prod` | `check-prod` | `bin/check-prod`: the prod read-only checks of the Latest release |
+| `rollback-prod` | `rollback` | `scripts/rollback` at the good release's commit (reviewer only) |
+
+`bin/` is `.claude/skills/test/bin/`. An author may run `build`, `test`,
+`clippy`, `fmt`, `beta-test` and `check-prod`; never `release` or `rollback`.
+Run one as approval-service does, at a pushed commit:
+
+```sh
+jobs submit dakotacolorado/worker-host <commit> test    # job-service's skill/bin/jobs
+```
+
+`check-prod` checks Latest, whichever commit you run it at. Both
+`scripts/release` and `scripts/rollback` take `DRY_RUN=1` to do all but
+publish or edit, which an author may run by hand: `scripts/rollback`, run in a
+checkout of an older release's commit, says which releases it would edit.
+
+After `pipeline.toml` or `jobs.toml` changes, check them:
+
+```sh
+"$CLAUDE_CONFIG_DIR/skills/approval/bin/approval" pipeline . dakotacolorado/worker-host; echo "exit $?"
+```
+
+The sections below are the same steps by hand, for when the jobs cannot run.
 
 ## Setup
 
@@ -46,7 +86,7 @@ Run it again in each new shell; it skips what is there. AWS credentials for
 the account (`aws sts get-caller-identity`), region `us-east-1`, for the beta
 test.
 
-## Checks
+## Checks: `build` and `unit-test`
 
 The session's `*_URL`/`*_TOKEN` are prod's, so every check runs with them
 unset. Each must exit 0.
@@ -73,9 +113,10 @@ env -u CLAUDE_CONFIG_DIR -u DS_URL -u DS_TOKEN -u WT_URL -u WT_TOKEN -u WS_URL -
 A pass: `2 passed`. `real_claude` fails first on a Claude Code that is not
 `CHECKED`; once it passes on another, that release is the new `CHECKED`.
 
-## Beta: the integration test
+## Beta: the integration test, `deploy-beta`
 
-Against beta only, never prod. Its URL is stack `WorkerService-beta`'s
+Against beta only, never prod. `bin/beta-test` runs it as below, failing if
+it says `skipped:`. Its URL is stack `WorkerService-beta`'s
 `ApiUrl`; its token is secret `worker-service/beta/token` (not `api-token`),
 never printed.
 
@@ -90,9 +131,10 @@ sets no capacity, so the service places no other worker on it: when it set
 landed there and the test's own create got
 `409 test-<pid> is running all 1 sessions it will.`
 
-## Prod read-only checks
+## Prod read-only checks: `integration-test-prod`
 
-What hosts install now, and that it runs here:
+What hosts install now, and that it runs here (`bin/check-prod` does this for
+all four binaries):
 
 ```sh
 gh release view --repo dakotacolorado/worker-host --json tagName,targetCommitish,assets --jq '.tagName, .targetCommitish, (.assets | length)'
@@ -114,10 +156,12 @@ A pass: 200 and each host the person runs `"status":"connected"`. A host's
 `version` is the release tag it runs (e.g. `v0.1.0-48`); `0.1.0` is a release
 up to v0.1.0-47, or a build that is not a release.
 
-## Release to prod (reviewer only)
+## Release to prod: `deploy-prod` (reviewer only)
 
 At the merged commit on `main`, clean tree, after the checks and the beta test
-pass there. The tag is numbered one past the last release, and the build is
+pass there. `scripts/release` does all of this but recording the releases,
+which approval-service does from its `deployed:` line; by hand, on a machine
+with the setup above and `file`, run it, or the steps below. The tag is numbered one past the last release, and the build is
 given it in `WORKER_HOST_RELEASE`, so the binary reports it:
 
 ```sh
@@ -156,9 +200,11 @@ one you built. Record both releases (`POST /releases`) at that commit's full
 refuses; name the tag in the prod release's `checked`. Tell the person a release is out: their hosts take it when they run
 `scripts/install-host.sh` and restart the host.
 
-## Roll back (reviewer only)
+## Roll back: `rollback-prod` (reviewer only)
 
-Find the last good release:
+`scripts/rollback`, run in a checkout of the good release's commit, makes the
+newest release at that commit Latest and marks each one numbered after it a
+prerelease, as below. By hand, find the last good release:
 
 ```sh
 approval releases dakotacolorado/worker-host
