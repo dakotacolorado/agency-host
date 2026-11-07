@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use crate::claude::{self, Begin, Claude};
 use crate::context::{self, Context};
 use crate::home::{self, Home, Record, Session};
-use crate::protocol::{Line, State, Usage, WorkerReport};
+use crate::protocol::{Line, State, Tokens, Usage, WorkerReport};
 use crate::session::{Echoes, Sessions, Spawn};
 use crate::sys;
 
@@ -83,8 +83,10 @@ impl Entry {
 /// (see `transcripts`), the byte after the last whole line read in it, the
 /// `seq` of the line that comes next, and as of that line: whether the
 /// worker's last turn has ended with nothing said to it since, how many
-/// background tasks its session has open, and whether its last turn was begun
-/// by a message (None before any turn of the session).
+/// background tasks its session has open, whether its last turn was begun
+/// by a message (None before any turn of the session), and the tokens its
+/// session has used. Each is worked out from the lines alone, so a host that
+/// restarts and reads them again from the start comes to the same.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Cursor {
     pub file: usize,
@@ -93,6 +95,7 @@ pub struct Cursor {
     pub waiting: bool,
     pub tasks: u32,
     pub told: Option<bool>,
+    pub tokens: Tokens,
 }
 
 impl Cursor {
@@ -102,6 +105,7 @@ impl Cursor {
         self.offset = 0;
         self.tasks = 0;
         self.told = None;
+        self.tokens = Tokens::default();
     }
 }
 
@@ -114,6 +118,9 @@ pub struct Batch {
     pub next: Cursor,
     /// The last reading of the account's usage among the lines read.
     pub usage: Option<Usage>,
+    /// Each session whose tokens the lines read added to, with its total as
+    /// of the last of them.
+    pub tokens: Vec<(String, Tokens)>,
 }
 
 /// Where a worker's lines are read from, in the order they were written.
@@ -517,6 +524,7 @@ impl Workers {
         let sources = sources(&sessions);
         let (mut next, mut lines, mut size) = (from, Vec::new(), 0);
         let mut last_usage = None;
+        let mut tokens: Vec<(String, Tokens)> = Vec::new();
         'files: while next.file < sources.len() {
             let source = &sources[next.file];
             let last = next.file + 1 == sources.len();
@@ -585,6 +593,7 @@ impl Workers {
                     tasks,
                     told,
                     usage,
+                    tokens: used,
                 } = claude::read(&String::from_utf8_lossy(&line));
                 let at = at.filter(|at| instant(at)).unwrap_or_else(sys::now);
                 let read: Vec<Line> = entries
@@ -609,6 +618,13 @@ impl Workers {
                 next.waiting = waiting.unwrap_or(next.waiting);
                 next.tasks = tasks.unwrap_or(next.tasks);
                 next.told = told.or(next.told);
+                if let Some(used) = used {
+                    next.tokens = next.tokens.add(used);
+                    match tokens.last_mut() {
+                        Some((s, total)) if s == session => *total = next.tokens,
+                        _ => tokens.push((session.into(), next.tokens)),
+                    }
+                }
                 if let Some(windows) = usage {
                     last_usage = Some(Usage {
                         read_at: at,
@@ -622,6 +638,7 @@ impl Workers {
             lines,
             next,
             usage: last_usage,
+            tokens,
         })
     }
 }

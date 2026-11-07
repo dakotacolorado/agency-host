@@ -472,6 +472,7 @@ mod tests {
             lines: vec![],
             command_results: &results,
             usage: None,
+            tokens: &[],
         }));
         let (path, authorization, sent) = service.join().unwrap();
         assert_eq!(path, "/beta?hostId=studio");
@@ -510,6 +511,7 @@ mod tests {
             lines: crate::protocol::line_reports(&lines),
             command_results: &[],
             usage: None,
+            tokens: &[],
         }));
         let (_, _, sent) = service.join().expect("the report, taken whole");
         assert!(sent.len() > 2 * FRAME);

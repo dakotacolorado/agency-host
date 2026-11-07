@@ -1,8 +1,9 @@
 //! The built binary, running on, takes a command pushed on its socket at once
 //! and reports on the socket as soon as what it did shows: well inside the 30
 //! seconds between heartbeats. A socket that drops is opened again and told
-//! every worker's state, and a command the service pushes again on it is
-//! answered, not done again.
+//! every worker's state and every session's tokens, and a command the
+//! service pushes again on it is answered, not done again. A host that
+//! restarts tells the same totals again.
 
 mod common;
 
@@ -34,14 +35,12 @@ fn a_command_pushed_on_the_socket_is_taken_and_reported_at_once() {
     common::install_claude(&dir);
 
     let service = Service::start();
-    let child = common::host(
-        &dir,
-        &format!(
-            "service_url = \"{}\"\ntoken = \"the-hosts-own\"\nhost_id = \"studio\"\n",
-            service.url
-        ),
+    let config = format!(
+        "service_url = \"{}\"\ntoken = \"the-hosts-own\"\nhost_id = \"studio\"\n",
+        service.url
     );
-    let _machine = Machine { dir, child };
+    let child = common::host(&dir, &config);
+    let mut machine = Machine { dir, child };
 
     let (mut socket, path, authorization) = service.accept();
     assert_eq!(path, "/beta?hostId=studio");
@@ -164,6 +163,13 @@ fn a_command_pushed_on_the_socket_is_taken_and_reported_at_once() {
         "lines sent are not sent again"
     );
     assert!(reopened.get("usage").is_none(), "nor is usage: {reopened}");
+    // Two turns, each of which said the same tokens.
+    let total = json!([{"workerId":"w1","sessionId":"5a1e2b3c-4d5e-4f60-8a7b-8c9d0e1f2a3b",
+        "inputTokens":6,"outputTokens":10,"cacheCreationInputTokens":14,"cacheReadInputTokens":22}]);
+    assert_eq!(
+        reopened["tokens"], total,
+        "but every session's total is: {reopened}"
+    );
 
     // Pushed again as pending, as the service does when a socket opens, the
     // start is answered as before and not done again.
@@ -171,4 +177,14 @@ fn a_command_pushed_on_the_socket_is_taken_and_reported_at_once() {
     let again = report_until(&mut socket, quick, |r| result(r, c2).is_some());
     assert_eq!(result(&again, c2).unwrap()["ok"], true, "{again}");
     assert_eq!(again["workers"][0]["state"], "idle", "{again}");
+
+    // The host goes and comes back, and reads the session again from its
+    // start to the same total.
+    machine.child.kill().unwrap();
+    let _ = machine.child.wait();
+    drop(socket);
+    machine.child = common::host(&machine.dir, &config);
+    let (mut socket, _, _) = service.accept();
+    let restarted = report_until(&mut socket, quick, |r| r.get("tokens").is_some());
+    assert_eq!(restarted["tokens"], total, "{restarted}");
 }
