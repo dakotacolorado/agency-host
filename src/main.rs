@@ -13,9 +13,12 @@ mod worker;
 use commands::Taken;
 use config::Config;
 use heartbeat::{Client, Failure, Heartbeat};
-use protocol::{line_reports, Command, CommandReport, Line, LineReport, Up, Usage, WorkerReport};
+use protocol::{
+    line_reports, Command, CommandReport, Line, LineReport, TokenReport, Tokens, Up, Usage,
+    WorkerReport, MOST_TOKENS,
+};
 use socket::Socket;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 use std::{env, path::PathBuf, process::ExitCode};
 use worker::{Cursor, Deliveries, Workers};
@@ -154,6 +157,67 @@ fn hold(workers_dir: &std::path::Path) -> Result<std::fs::File, String> {
 #[derive(Default)]
 struct Unsent(Vec<CommandReport>);
 
+/// Each session's tokens as its lines were read, by worker and session, and
+/// what the socket was last told of them, and on which socket. A host that
+/// restarts reads every session's lines again from the start and comes to the
+/// same totals, which it tells again: the service keeps one of each.
+#[derive(Default)]
+struct Totals {
+    read: BySession,
+    told: Option<(u64, BySession)>,
+}
+
+type BySession = BTreeMap<(String, String), Tokens>;
+
+impl Totals {
+    fn read(&mut self, worker: &str, totals: Vec<(String, Tokens)>) {
+        for (session, total) in totals {
+            self.read.insert((worker.into(), session), total);
+        }
+    }
+
+    /// Only the workers still here are kept, so a retired worker's sessions
+    /// are not told again on every socket.
+    fn keep(&mut self, here: impl Fn(&str) -> bool) {
+        self.read.retain(|(worker, _), _| here(worker));
+    }
+
+    /// The totals `opened` has not been told, every one on a socket not told
+    /// before, as many as one report takes.
+    fn untold(&self, opened: u64) -> Vec<TokenReport> {
+        let told = self.told.as_ref().filter(|(on, _)| *on == opened);
+        self.read
+            .iter()
+            .filter(|(key, total)| told.is_none_or(|(_, was)| was.get(*key) != Some(*total)))
+            .take(MOST_TOKENS)
+            .map(|((worker, session), total)| TokenReport {
+                worker_id: worker.clone(),
+                session_id: session.clone(),
+                tokens: *total,
+            })
+            .collect()
+    }
+
+    fn sent(&mut self, opened: u64, sent: &[TokenReport]) {
+        if self.told.as_ref().is_none_or(|(on, _)| *on != opened) {
+            self.told = Some((opened, BTreeMap::new()));
+        }
+        if let Some((_, told)) = &mut self.told {
+            for t in sent {
+                told.insert((t.worker_id.clone(), t.session_id.clone()), t.tokens);
+            }
+        }
+    }
+}
+
+/// How far each worker's transcript has been written on a socket, and which
+/// worker's is read first in the next report.
+#[derive(Default)]
+struct Reads {
+    sent_at: HashMap<String, Cursor>,
+    turn: usize,
+}
+
 impl Unsent {
     fn add(&mut self, report: CommandReport) {
         match self
@@ -228,14 +292,12 @@ fn take(
 /// line says it is the same.
 fn run(client: &Client, config: &Config, workers: &Workers, socket: &Socket) -> ExitCode {
     let mut unsent = Unsent::default();
-    // How far each worker's transcript has been written on a socket.
-    let mut sent_at: HashMap<String, Cursor> = HashMap::new();
+    let mut reads = Reads::default();
     // What the socket was last told of the workers, and on which socket.
     let mut told: Option<(u64, Vec<WorkerReport>)> = None;
     // The newest reading of the account's usage not yet written on a socket.
     let mut usage: Option<Usage> = None;
-    // Which worker's transcript is read first in the next report.
-    let mut turn = 0;
+    let mut totals = Totals::default();
     let mut deliveries = Deliveries::default();
     let mut taken = Taken::default();
     let mut waiting: Vec<Command> = Vec::new();
@@ -268,10 +330,10 @@ fn run(client: &Client, config: &Config, workers: &Workers, socket: &Socket) -> 
                 workers,
                 socket,
                 &mut unsent,
-                &mut sent_at,
+                &mut reads,
                 &mut told,
                 &mut usage,
-                &mut turn,
+                &mut totals,
             );
         }
 
@@ -316,9 +378,9 @@ fn run(client: &Client, config: &Config, workers: &Workers, socket: &Socket) -> 
 
 /// Sends what the socket has not yet been told: every worker's state when it
 /// is a socket not told before or the states have changed, transcript lines
-/// past what was written, command results not yet written, and the newest
-/// reading of the account's usage, if one is. Nothing is counted as sent until
-/// the write is.
+/// past what was written, command results not yet written, the newest
+/// reading of the account's usage, if one is, and each session's tokens it was
+/// not told. Nothing is counted as sent until the write is.
 ///
 /// A read takes its first line however long it is, so once the report's
 /// budget is spent no more are read: two long lines could not share one
@@ -328,11 +390,12 @@ fn report(
     workers: &Workers,
     socket: &Socket,
     unsent: &mut Unsent,
-    sent_at: &mut HashMap<String, Cursor>,
+    reads: &mut Reads,
     told: &mut Option<(u64, Vec<WorkerReport>)>,
     usage: &mut Option<Usage>,
-    turn: &mut usize,
+    totals: &mut Totals,
 ) {
+    let Reads { sent_at, turn } = reads;
     let mut all = workers.all();
     let first = *turn % all.len().max(1);
     *turn = turn.wrapping_add(1);
@@ -353,6 +416,8 @@ fn report(
                         *usage = Some(read);
                     }
                 }
+                // A total put back by `fit` is the same when read again.
+                totals.read(&record.id, batch.tokens);
                 (batch.next, batch.lines)
             }
             None => (from, vec![]),
@@ -368,7 +433,15 @@ fn report(
         .rev()
         .map(|i| (i + first) % read.len())
         .collect();
-    let states = fit(&mut read, &last_read, unsent, usage.as_ref(), |read| {
+    totals.keep(|worker| all.iter().any(|(_, r)| r.id == worker));
+    let opened = socket.opened();
+    let tokens = totals.untold(opened);
+    let rest = Rest {
+        unsent,
+        usage: usage.as_ref(),
+        tokens: &tokens,
+    };
+    let states = fit(&mut read, &last_read, &rest, |read| {
         all.iter()
             .zip(read)
             .map(|((home, record), (_, _, next, _))| {
@@ -376,12 +449,11 @@ fn report(
             })
             .collect()
     });
-    let opened = socket.opened();
     let changed = told
         .as_ref()
         .is_none_or(|(on, was)| *on != opened || *was != states);
     let said = read.iter().any(|(.., lines)| !lines.is_empty());
-    if !(changed || said || !unsent.0.is_empty() || usage.is_some()) {
+    if !(changed || said || !unsent.0.is_empty() || usage.is_some() || !tokens.is_empty()) {
         // Bytes read that said nothing need no report to be passed.
         for (id, _, next, _) in read {
             sent_at.insert(id, next);
@@ -397,9 +469,11 @@ fn report(
         lines: line_reports(&lines),
         command_results: &unsent.0,
         usage: usage.as_ref(),
+        tokens: &tokens,
     }) {
         unsent.0.clear();
         *usage = None;
+        totals.sent(opened, &tokens);
         for (id, _, next, _) in read {
             sent_at.insert(id, next);
         }
@@ -415,6 +489,13 @@ fn line_size(worker_id: &str, line: &Line) -> usize {
 /// Each worker's id, where its read began and ended, and what it read.
 type Read = (String, Cursor, Cursor, Vec<Line>);
 
+/// What a report carries besides the workers' states and lines.
+struct Rest<'a> {
+    unsent: &'a Unsent,
+    usage: Option<&'a Usage>,
+    tokens: &'a [TokenReport],
+}
+
 /// The workers' states for a report of `read`, once it is short enough to
 /// send. A report over API Gateway's limit closes the socket only once it has
 /// been written, so it would be counted sent and lost with all it held: the
@@ -424,13 +505,12 @@ type Read = (String, Cursor, Cursor, Vec<Line>);
 fn fit(
     read: &mut [Read],
     last_read: &[usize],
-    unsent: &Unsent,
-    usage: Option<&Usage>,
+    rest: &Rest,
     states_of: impl Fn(&[Read]) -> Vec<WorkerReport>,
 ) -> Vec<WorkerReport> {
     let mut states = states_of(read);
     for &i in last_read {
-        if report_size(&states, read, unsent, usage) <= REPORT_LIMIT {
+        if report_size(&states, read, rest) <= REPORT_LIMIT {
             break;
         }
         let (id, from, next, lines) = &mut read[i];
@@ -448,12 +528,7 @@ fn fit(
 }
 
 /// A report's bytes as it would be written.
-fn report_size(
-    states: &[WorkerReport],
-    read: &[Read],
-    unsent: &Unsent,
-    usage: Option<&Usage>,
-) -> usize {
+fn report_size(states: &[WorkerReport], read: &[Read], rest: &Rest) -> usize {
     let lines: Vec<(String, Vec<Line>)> = read
         .iter()
         .map(|(id, _, _, lines)| (id.clone(), lines.clone()))
@@ -461,8 +536,9 @@ fn report_size(
     let up = Up::Report {
         workers: states,
         lines: line_reports(&lines),
-        command_results: &unsent.0,
-        usage,
+        command_results: &rest.unsent.0,
+        usage: rest.usage,
+        tokens: rest.tokens,
     };
     serde_json::to_string(&up).map_or(usize::MAX, |s| s.len())
 }
@@ -504,6 +580,11 @@ mod tests {
             ("w3".into(), at(5), at(30), vec![line(0, &long)]),
         ];
         let unsent = Unsent(vec![CommandReport::new("c1".into(), None)]);
+        let rest = Rest {
+            unsent: &unsent,
+            usage: None,
+            tokens: &[],
+        };
         let states_of = |read: &[Read]| -> Vec<WorkerReport> {
             read.iter()
                 .map(|(id, _, next, _)| {
@@ -517,8 +598,8 @@ mod tests {
                 .collect()
         };
         // w3 was read first, then w1 and w2: w2 and then w1 are put back.
-        let states = fit(&mut read, &[1, 0, 2], &unsent, None, states_of);
-        assert!(report_size(&states, &read, &unsent, None) <= REPORT_LIMIT);
+        let states = fit(&mut read, &[1, 0, 2], &rest, states_of);
+        assert!(report_size(&states, &read, &rest) <= REPORT_LIMIT);
         let kept: Vec<_> = read
             .iter()
             .map(|(id, _, next, lines)| (id.as_str(), next.offset, lines.len()))
@@ -527,7 +608,55 @@ mod tests {
         assert_eq!(states, states_of(&read), "states follow what is kept");
 
         let mut fits = read.clone();
-        fit(&mut fits, &[1, 0, 2], &unsent, None, states_of);
+        fit(&mut fits, &[1, 0, 2], &rest, states_of);
         assert_eq!(fits, read, "a report that fits is left as it is");
+    }
+
+    #[test]
+    fn a_sessions_total_is_told_once_it_changes_and_every_total_on_a_new_socket() {
+        let used = |n: u64| Tokens {
+            input_tokens: n,
+            output_tokens: 10 * n,
+            cache_creation_input_tokens: 100 * n,
+            cache_read_input_tokens: 1000 * n,
+        };
+        let told = |reports: &[TokenReport]| -> Vec<(String, u64)> {
+            reports
+                .iter()
+                .map(|t| (t.session_id.clone(), t.tokens.input_tokens))
+                .collect()
+        };
+        let mut totals = Totals::default();
+        totals.read("w1", vec![("s1".into(), used(1)), ("s2".into(), used(2))]);
+        totals.read("w2", vec![("s3".into(), used(3))]);
+        let first = totals.untold(1);
+        assert_eq!(
+            told(&first),
+            [("s1".into(), 1), ("s2".into(), 2), ("s3".into(), 3)]
+        );
+        assert_eq!(told(&totals.untold(1)), told(&first), "until it is sent");
+        totals.sent(1, &first);
+        assert_eq!(totals.untold(1), []);
+
+        totals.read("w1", vec![("s2".into(), used(5))]);
+        totals.read("w2", vec![("s3".into(), used(3))]);
+        let changed = totals.untold(1);
+        assert_eq!(told(&changed), [("s2".into(), 5)], "only what changed");
+        totals.sent(1, &changed);
+        assert_eq!(
+            told(&totals.untold(2)),
+            [("s1".into(), 1), ("s2".into(), 5), ("s3".into(), 3)],
+            "a socket opened again is told every total"
+        );
+
+        totals.keep(|worker| worker == "w2");
+        assert_eq!(told(&totals.untold(3)), [("s3".into(), 3)]);
+        for n in 0..MOST_TOKENS as u64 + 10 {
+            totals.read("w2", vec![(format!("t{n:03}"), used(n))]);
+        }
+        let most = totals.untold(3);
+        assert_eq!(most.len(), MOST_TOKENS, "as many as one report takes");
+        totals.sent(3, &most);
+        assert_eq!(totals.untold(3).len(), 11, "and the rest in the next");
     }
 }

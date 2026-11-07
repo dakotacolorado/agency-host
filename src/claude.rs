@@ -28,7 +28,7 @@ use std::process::{Command, Stdio};
 use std::{env, fs, io};
 
 use crate::config::Permissions;
-use crate::protocol::{Window, Windows};
+use crate::protocol::{Tokens, Window, Windows};
 use crate::worker::Entry;
 
 /// The Claude Code release the stream-json protocol here was checked
@@ -433,6 +433,9 @@ pub struct Read {
     /// The account's usage, when the line is a `rate_limit_event` that says
     /// any of it.
     pub usage: Option<Windows>,
+    /// The tokens the turn used, its subagents' included, when the line is a
+    /// `result` that says.
+    pub tokens: Option<Tokens>,
 }
 
 /// What a `rate_limit_event` says of the account's windows. A window whose
@@ -459,6 +462,40 @@ fn usage(v: &Value) -> Option<Windows> {
     (read.five_hour.is_some() || read.seven_day.is_some()).then_some(read)
 }
 
+/// What a `result` says its turn used. Of the three counts it carries,
+/// `usage` is the main conversation's alone; `modelUsage` is the whole
+/// conversation's so far, which a process that resumes it starts from, so it
+/// would count again what the sessions before this one used; and
+/// `model_usage_since_last_result` is this process's since its last
+/// `result`, subagents included, by model. Tokens spent after a process's last
+/// `result` -- a turn cut off, a background subagent still at work when it
+/// ended -- are in no `result` of its own and go uncounted rather than risk
+/// being counted twice. A Claude Code without the last says `usage` alone.
+fn tokens(v: &Value) -> Option<Tokens> {
+    if v["type"] != "result" {
+        return None;
+    }
+    let count = |n: &Value| n.as_u64().unwrap_or(0);
+    if let Some(models) = v["model_usage_since_last_result"].as_object() {
+        return Some(models.values().fold(Tokens::default(), |sum, m| {
+            sum.add(Tokens {
+                input_tokens: count(&m["inputTokens"]),
+                output_tokens: count(&m["outputTokens"]),
+                cache_creation_input_tokens: count(&m["cacheCreationInputTokens"]),
+                cache_read_input_tokens: count(&m["cacheReadInputTokens"]),
+            })
+        }));
+    }
+    let usage = v["usage"].as_object()?;
+    let count = |key: &str| usage.get(key).map_or(0, count);
+    Some(Tokens {
+        input_tokens: count("input_tokens"),
+        output_tokens: count("output_tokens"),
+        cache_creation_input_tokens: count("cache_creation_input_tokens"),
+        cache_read_input_tokens: count("cache_read_input_tokens"),
+    })
+}
+
 /// A line of a kind not read here says nothing, and the lines after it are
 /// read as usual.
 pub fn read(line: &str) -> Read {
@@ -467,12 +504,14 @@ pub fn read(line: &str) -> Read {
     };
     let at = v["timestamp"].as_str().map(String::from);
     let usage = usage(&v);
+    let tokens = tokens(&v);
     // A subagent's own conversation (on stdout, the lines under a tool use),
     // and lines Claude Code adds for itself.
     if v["isSidechain"] == true || v["isMeta"] == true || v["parent_tool_use_id"].is_string() {
         return Read {
             at,
             usage,
+            tokens,
             ..Read::default()
         };
     }
@@ -573,6 +612,7 @@ pub fn read(line: &str) -> Read {
         tasks,
         told,
         usage,
+        tokens,
     }
 }
 
@@ -949,6 +989,53 @@ mod tests {
                 .usage,
             None
         );
+    }
+
+    fn used(input: u64, output: u64, creation: u64, read: u64) -> Option<Tokens> {
+        Some(Tokens {
+            input_tokens: input,
+            output_tokens: output,
+            cache_creation_input_tokens: creation,
+            cache_read_input_tokens: read,
+        })
+    }
+
+    #[test]
+    fn a_result_says_what_its_turn_used_its_subagents_included() {
+        // As Claude Code 2.1.318 wrote it, cut down: two forked subagents ran
+        // in the turn, whose tokens are in `model_usage_since_last_result` and
+        // not in `usage`, and `modelUsage` is the conversation's so far.
+        let recorded = r#"{"is_error":false,"modelUsage":{"claude-opus-5-5":{"cacheCreationInputTokens":95659,"cacheReadInputTokens":3134856,"costUSD":1.8575792000000009,"inputTokens":110,"outputTokens":27074}},"model_usage_since_last_result":{"claude-opus-5-5":{"cacheCreationEphemeral1hInputTokens":2178,"cacheCreationEphemeral5mInputTokens":21575,"cacheCreationInputTokens":23753,"cacheReadInputTokens":1158832,"canonicalModel":"claude-opus-5-5","costUSD":0.5088454,"inputTokens":30,"outputTokens":7583,"thinkingTokens":1517,"webSearchRequests":0}},"num_turns":2,"result":"Still waiting","session_id":"0fe898cc-ff15-4f70-ba1c-f6be328d0a4f","subagent_stats":{"by_type":{"fork":2},"spawned":2},"subtype":"success","timestamp":"2026-11-06T08:05:59.623Z","type":"result","usage":{"cache_creation_input_tokens":2178,"cache_read_input_tokens":160523,"input_tokens":6,"output_tokens":368}}"#;
+        let read = read(recorded);
+        assert_eq!(read.tokens, used(30, 7583, 23753, 1158832));
+        assert_eq!(read.waiting, Some(true));
+
+        // An Explore subagent runs on another model.
+        let two_models = json!({"type":"result","subtype":"success",
+            "model_usage_since_last_result":{
+                "claude-haiku-5-5":{"inputTokens":40532,"outputTokens":3364,"cacheCreationInputTokens":0,"cacheReadInputTokens":0},
+                "claude-opus-5-5":{"inputTokens":20,"outputTokens":6474,"cacheCreationInputTokens":14500,"cacheReadInputTokens":637933}},
+            "usage":{"input_tokens":20,"output_tokens":6474,"cache_creation_input_tokens":14500,"cache_read_input_tokens":637933}});
+        assert_eq!(
+            super::read(&two_models.to_string()).tokens,
+            used(40552, 9838, 14500, 637933)
+        );
+
+        let usage_alone = json!({"type":"result","usage":{"input_tokens":6,"output_tokens":368,"cache_read_input_tokens":160523}});
+        assert_eq!(
+            super::read(&usage_alone.to_string()).tokens,
+            used(6, 368, 0, 160523),
+            "a Claude Code that says only the main conversation's"
+        );
+        for none in [
+            json!({"type":"result","subtype":"success","is_error":false}),
+            // A message's own usage is not counted: its output so far, as it
+            // streams, and in the `result` that ends its turn.
+            json!({"type":"assistant","message":{"id":"m","content":[],"usage":{"input_tokens":6,"output_tokens":32}},"parent_tool_use_id":null}),
+            json!({"type":"assistant","message":{"id":"m","content":[],"usage":{"input_tokens":8,"output_tokens":129}},"parent_tool_use_id":"t1"}),
+        ] {
+            assert_eq!(super::read(&none.to_string()).tokens, None, "{none}");
+        }
     }
 
     #[test]

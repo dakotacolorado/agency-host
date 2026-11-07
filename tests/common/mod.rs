@@ -92,8 +92,9 @@ impl Service {
 /// A stand-in for Claude Code, headless over stream-json as the host runs it:
 /// it begins a turn for each message and echoes it back as taken, says the
 /// account's usage, answers the first `ready` and every one after `heard`, and
-/// ends each turn. The usage is a recorded `rate_limit_event` without its
-/// time, so the host stamps it with when it read it.
+/// ends each turn, saying the same tokens for each. The usage is a recorded
+/// `rate_limit_event` without its time, so the host stamps it with when it
+/// read it.
 pub const CLAUDE: &str = r#"#!/bin/sh
 [ "$1" = -p ] || exit 64
 reply=ready
@@ -108,7 +109,7 @@ while IFS= read -r line; do
   printf '%s
 ' "{\"type\":\"assistant\",\"message\":{\"id\":\"m\",\"content\":[{\"type\":\"text\",\"text\":\"$reply\"}]},\"parent_tool_use_id\":null}"
   printf '%s
-' '{"type":"result","subtype":"success","is_error":false}'
+' '{"type":"result","subtype":"success","is_error":false,"model_usage_since_last_result":{"claude-opus-5-5":{"inputTokens":3,"outputTokens":5,"cacheCreationInputTokens":7,"cacheReadInputTokens":11}}}'
   reply=heard
 done
 "#;

@@ -1589,6 +1589,153 @@ fn a_read_carries_the_last_usage_its_lines_said_at_the_time_it_was_said() {
     assert_eq!(after.usage, None, "a reading is read once");
 }
 
+fn tokens(input: u64, output: u64, creation: u64, read: u64) -> Tokens {
+    Tokens {
+        input_tokens: input,
+        output_tokens: output,
+        cache_creation_input_tokens: creation,
+        cache_read_input_tokens: read,
+    }
+}
+
+/// A `result` as Claude Code 2.1.318 writes one, cut down to its counts:
+/// `since` is the turn's, subagents included, `whole` the conversation's.
+fn result_line(since: Tokens, main: Tokens, whole: Tokens) -> String {
+    let model = |t: Tokens| {
+        serde_json::json!({"inputTokens":t.input_tokens,"outputTokens":t.output_tokens,
+            "cacheCreationInputTokens":t.cache_creation_input_tokens,"cacheReadInputTokens":t.cache_read_input_tokens})
+    };
+    let line = serde_json::json!({"type":"result","subtype":"success","is_error":false,
+        "modelUsage":{"claude-opus-5-5":model(whole)},
+        "model_usage_since_last_result":{"claude-opus-5-5":model(since)},
+        "usage":{"input_tokens":main.input_tokens,"output_tokens":main.output_tokens,
+            "cache_creation_input_tokens":main.cache_creation_input_tokens,"cache_read_input_tokens":main.cache_read_input_tokens}});
+    format!("{line}\n")
+}
+
+/// Every line of a worker's sessions read from the start in reads of
+/// `budget`, and each session's total as the last read that changed it said.
+fn totals_read(workers: &Workers, home: &Home, budget: usize) -> BTreeMap<String, Tokens> {
+    let (mut cursor, mut totals) = (Cursor::default(), BTreeMap::new());
+    while let Some(batch) = workers.read(home, cursor, budget) {
+        totals.extend(batch.tokens);
+        cursor = batch.next;
+    }
+    totals
+}
+
+/// A turn of a session on Claude Code 2.1.318, cut down: the main
+/// conversation's message and a subagent's, each with the usage it streamed
+/// (only the start of its output), then the turn's `result`.
+const A_TURN: &str = concat!(
+    r#"{"type":"system","subtype":"init","session_id":"c"}"#,
+    "\n",
+    r#"{"type":"user","message":{"role":"user","content":"Review it."},"parent_tool_use_id":null,"uuid":"u1","isReplay":true}"#,
+    "\n",
+    r#"{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Agent","input":{}}],"usage":{"input_tokens":72,"output_tokens":1249,"cache_creation_input_tokens":67953,"cache_read_input_tokens":1825262}},"parent_tool_use_id":null}"#,
+    "\n",
+    r#"{"type":"assistant","message":{"id":"m2","content":[{"type":"text","text":"a subagent's step"}],"usage":{"input_tokens":8,"output_tokens":129,"cache_creation_input_tokens":3953,"cache_read_input_tokens":150762}},"parent_tool_use_id":"t1"}"#,
+    "\n",
+);
+
+#[test]
+fn a_sessions_tokens_are_its_results_its_subagents_included_and_each_counted_once() {
+    let host = host("tokens", FAKE_CLAUDE);
+    let path = events(&host, "s1");
+    let home = host.home("ana");
+    let turn = tokens(80, 19491, 71906, 1976024);
+    append(&path, A_TURN.as_bytes());
+    append(
+        &path,
+        result_line(turn, tokens(72, 18286, 67953, 1825262), turn).as_bytes(),
+    );
+    let batch = host
+        .workers
+        .read(&home, Cursor::default(), 1 << 16)
+        .unwrap();
+    assert_eq!(
+        batch.tokens,
+        [("s1".to_string(), turn)],
+        "the turn's, its subagent's included, and neither message's again"
+    );
+    assert_eq!(batch.next.tokens, turn);
+
+    let second = tokens(30, 7583, 23753, 1158832);
+    append(
+        &path,
+        result_line(second, tokens(6, 368, 2178, 160523), turn.add(second)).as_bytes(),
+    );
+    let after = host.workers.read(&home, batch.next, 1 << 16).unwrap();
+    assert_eq!(after.tokens, [("s1".to_string(), turn.add(second))]);
+    append(&path, b"{\"type\":\"system\",\"subtype\":\"status\"}\n");
+    let nothing = host.workers.read(&home, after.next, 1 << 16).unwrap();
+    assert_eq!(nothing.tokens, [], "only a session whose total changed");
+}
+
+#[test]
+fn a_session_resumed_in_a_new_process_carries_its_total_on_and_one_carried_on_starts_its_own() {
+    let host = host("resumed-tokens", FAKE_CLAUDE);
+    let path = events(&host, "s1");
+    let home = host.home("ana");
+    let (first, again) = (
+        tokens(156, 46675, 152123, 7851713),
+        tokens(6, 1093, 9349, 505020),
+    );
+    append(&path, A_TURN.as_bytes());
+    append(&path, result_line(first, first, first).as_bytes());
+    // The host restarted and resumed s1 in a new Claude Code, which carries
+    // the conversation's `modelUsage` on.
+    append(
+        &path,
+        format!("{}\n", claude::started("2026-11-07T06:00:00.000Z".into())).as_bytes(),
+    );
+    append(&path, A_TURN.as_bytes());
+    append(
+        &path,
+        result_line(again, again, first.add(again)).as_bytes(),
+    );
+    // s2 carries the conversation on in a session of its own.
+    let path = events(&host, "s2");
+    let third = tokens(10, 2396, 3246, 870716);
+    append(&path, A_TURN.as_bytes());
+    append(
+        &path,
+        result_line(third, third, first.add(again).add(third)).as_bytes(),
+    );
+
+    let totals = totals_read(&host.workers, &home, 1 << 16);
+    assert_eq!(
+        totals,
+        BTreeMap::from([
+            ("s1".to_string(), first.add(again)),
+            ("s2".to_string(), third)
+        ])
+    );
+}
+
+#[test]
+fn a_host_that_restarts_and_reads_a_session_again_comes_to_the_same_total() {
+    let host = host("reread-tokens", FAKE_CLAUDE);
+    let path = events(&host, "s1");
+    let home = host.home("ana");
+    let mut whole = Tokens::default();
+    for n in 1..=5 {
+        let turn = tokens(n, 100 * n, 1000 * n, 10_000 * n);
+        whole = whole.add(turn);
+        append(&path, A_TURN.as_bytes());
+        append(&path, result_line(turn, turn, whole).as_bytes());
+    }
+    let before = totals_read(&host.workers, &home, 1 << 16);
+    assert_eq!(before, BTreeMap::from([("s1".to_string(), whole)]));
+    let restarted = host.restarted();
+    assert_eq!(totals_read(&restarted, &home, 1 << 16), before);
+    assert_eq!(
+        totals_read(&restarted, &home, 1),
+        before,
+        "however many reads it takes"
+    );
+}
+
 #[test]
 fn turns_written_after_lines_that_say_nothing_are_read() {
     let host = host("bookkeeping", FAKE_CLAUDE);
@@ -1615,7 +1762,8 @@ fn turns_written_after_lines_that_say_nothing_are_read() {
             seq: 0,
             waiting: false,
             tasks: 0,
-            told: None
+            told: None,
+            tokens: Tokens::default(),
         },
         "read to the end of the last whole line, and found nothing to say"
     );
@@ -1957,6 +2105,58 @@ fn real_claude() {
     );
     restarted.stop("real").unwrap();
     eprintln!("{seen:#?}");
+
+    let (first, second) = (
+        "00000000-0000-4000-8000-000000000001",
+        "00000000-0000-4000-8000-000000000002",
+    );
+    let reported = totals_read(&restarted, &home, 1 << 16);
+    let (first_turns, first_whole) = results_said(&home, first);
+    let (second_turns, second_whole) = results_said(&home, second);
+    eprintln!(
+        "reported {reported:#?}\nfirst: turns {first_turns:?}, conversation {first_whole:?}\n\
+         second: turns {second_turns:?}, conversation {second_whole:?}"
+    );
+    assert_eq!(
+        reported,
+        BTreeMap::from([(first.into(), first_turns), (second.into(), second_turns)]),
+        "each session's total is what its results said its turns used"
+    );
+    assert_eq!(
+        first_turns, first_whole,
+        "the conversation's first session, in one process, used all it has"
+    );
+    assert_ne!(second_turns, second_whole, "not the conversation's again");
+}
+
+/// What the `result`s in a session's events said: the sum of what each said
+/// its turn used, and what the last said the whole conversation had.
+fn results_said(home: &Home, session: &str) -> (Tokens, Tokens) {
+    let summed = |models: &serde_json::Value| {
+        let count = |key: &str| -> u64 {
+            models
+                .as_object()
+                .unwrap()
+                .values()
+                .map(|m| m[key].as_u64().unwrap())
+                .sum()
+        };
+        tokens(
+            count("inputTokens"),
+            count("outputTokens"),
+            count("cacheCreationInputTokens"),
+            count("cacheReadInputTokens"),
+        )
+    };
+    let (mut turns, mut whole) = (Tokens::default(), Tokens::default());
+    for line in fs::read_to_string(home.events(session)).unwrap().lines() {
+        let v: serde_json::Value = serde_json::from_str(line).unwrap();
+        if v["type"] == "result" {
+            turns = turns.add(summed(&v["model_usage_since_last_result"]));
+            whole = summed(&v["modelUsage"]);
+        }
+    }
+    (turns, whole)
 }
 
 /// Interrupting Claude Code itself, mid-command, as the page does:

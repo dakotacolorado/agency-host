@@ -188,6 +188,48 @@ pub struct Window {
     pub resets_at: String,
 }
 
+/// Tokens a session has used, its subagents' included, as Claude Code
+/// counts them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Tokens {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_creation_input_tokens: u64,
+    pub cache_read_input_tokens: u64,
+}
+
+impl Tokens {
+    pub fn add(self, other: Tokens) -> Tokens {
+        Tokens {
+            input_tokens: self.input_tokens.saturating_add(other.input_tokens),
+            output_tokens: self.output_tokens.saturating_add(other.output_tokens),
+            cache_creation_input_tokens: self
+                .cache_creation_input_tokens
+                .saturating_add(other.cache_creation_input_tokens),
+            cache_read_input_tokens: self
+                .cache_read_input_tokens
+                .saturating_add(other.cache_read_input_tokens),
+        }
+    }
+}
+
+/// A session's running total, not what it used since the last report: the
+/// service keeps the largest of each count it is told, so a total told again
+/// -- after a reconnect, or by a host that restarted and read it again -- is
+/// kept once.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenReport {
+    pub worker_id: String,
+    pub session_id: String,
+    #[serde(flatten)]
+    pub tokens: Tokens,
+}
+
+/// The most session totals the service takes in one report.
+pub const MOST_TOKENS: usize = 256;
+
 /// The lines read for each worker, by worker id.
 pub type Lines = [(String, Vec<Line>)];
 
@@ -210,6 +252,8 @@ pub enum Up<'a> {
         command_results: &'a [CommandReport],
         #[serde(skip_serializing_if = "Option::is_none")]
         usage: Option<&'a Usage>,
+        #[serde(skip_serializing_if = "<[TokenReport]>::is_empty")]
+        tokens: &'a [TokenReport],
     },
     Ping,
 }
@@ -321,6 +365,7 @@ mod tests {
             lines: line_reports(&lines),
             command_results: &results,
             usage: None,
+            tokens: &[],
         };
         assert_eq!(
             serde_json::to_value(&up).unwrap(),
@@ -357,11 +402,35 @@ mod tests {
             lines: vec![],
             command_results: &[],
             usage: Some(&usage),
+            tokens: &[],
         };
         assert_eq!(
             serde_json::to_value(&up).unwrap()["usage"],
             json!({"readAt":"2026-11-06T08:28:17.268Z","fiveHour":{"utilization":0.48,"resetsAt":"2026-11-06T10:00:00.000Z"}}),
             "a window not read is left out"
+        );
+        assert!(serde_json::to_value(&up).unwrap().get("tokens").is_none());
+        let tokens = [TokenReport {
+            worker_id: "w1".into(),
+            session_id: "s1".into(),
+            tokens: Tokens {
+                input_tokens: 80,
+                output_tokens: 19491,
+                cache_creation_input_tokens: 71906,
+                cache_read_input_tokens: 1976024,
+            },
+        }];
+        let up = Up::Report {
+            workers: &[],
+            lines: vec![],
+            command_results: &[],
+            usage: None,
+            tokens: &tokens,
+        };
+        assert_eq!(
+            serde_json::to_value(&up).unwrap()["tokens"],
+            json!([{"workerId":"w1","sessionId":"s1","inputTokens":80,"outputTokens":19491,
+                "cacheCreationInputTokens":71906,"cacheReadInputTokens":1976024}])
         );
         assert_eq!(
             serde_json::to_value(Up::Ping).unwrap(),
