@@ -174,8 +174,8 @@ A setting only an older release read is accepted and does nothing.
 
 ## Develop
 
-The `test` skill (`.claude/skills/test/SKILL.md`) gives every command to set
-up, check, release and roll back.
+The `test` skill (`.claude/skills/test/SKILL.md`) says how to set up and run
+the checks, and which pipeline jobs release and roll back.
 
 ```sh
 cargo fmt --check
@@ -186,6 +186,6 @@ WORKER_SERVICE_URL=… WORKER_SERVICE_TOKEN=… cargo test --test worker_service
 ```
 
 The tests run stand-ins for Claude Code; `real_claude` runs Claude Code
-itself and checks it is the release the host is checked against. A reviewer runs
-`tests/worker_service.rs` against beta before a release, as the test skill
-(`.claude/skills/test/SKILL.md`) says.
+itself and checks it is the release the host is checked against. The pipeline's
+`beta-test` job runs `tests/worker_service.rs` against beta before a release, as
+the test skill (`.claude/skills/test/SKILL.md`) says.
