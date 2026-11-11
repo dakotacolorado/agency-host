@@ -20,12 +20,15 @@ worker-host is not deployed: it is a binary that each machine installs with
 
 ## The pipeline
 
-`pipeline.toml` is worker-host's release, step by step, and `jobs.toml` holds
-the command each job runs, its `run` (approval-service's `docs/PIPELINE.md`),
-each in the image `Containerfile` builds on base-rust (Rust, zig and
+worker-host's release is the routine `dakotacolorado/release-routines` at
+`dakotacolorado/worker-host/`: its `pipeline.toml` is the release, step by
+step, and its `jobs.toml` holds the command each job runs, its `run`
+(approval-service's `docs/PIPELINE.md`), changed only through the release
+service. Each job runs with this repo checked out as its working directory,
+in the image `Containerfile` builds on base-rust (Rust, zig and
 cargo-zigbuild from base-rust; the musl and macOS targets, `gh`, the AWS CLI
-and `file` added), from a clean checkout. This skill names the jobs; their
-commands are only there, so read them there.
+and `file` added), from a clean checkout. This skill names the jobs; their commands are only in
+the routine, so read them there.
 
 | Step | Jobs |
 |---|---|
@@ -71,7 +74,7 @@ exit 0. Two ways, either is enough:
   in job-service, which needs `JS_URL`/`JS_TOKEN`):
 
   ```sh
-  jobs submit dakotacolorado/worker-host <commit> <job>    # prints the job, with its id
+  jobs submit --routine dakotacolorado/release-routines "$(git ls-remote https://github.com/dakotacolorado/release-routines.git refs/heads/main | cut -f1)" dakotacolorado/worker-host dakotacolorado/worker-host <commit> <job>    # prints the job, with its id
   jobs log <id> -f    # follows its log, then exits with the job's exit code
   ```
 
@@ -79,8 +82,9 @@ exit 0. Two ways, either is enough:
   code and reason.
 
 - **By hand**, in your clone with the setup above: run each job's `run` from
-  `jobs.toml`, from the repo root, with the session's prod `*_URL`/`*_TOKEN`
-  unset:
+  the routine's `jobs.toml` (`dakotacolorado/worker-host/jobs.toml` in a clone
+  of release-routines), from this repo's root, with the session's prod
+  `*_URL`/`*_TOKEN` unset:
 
   ```sh
   env -u DS_URL -u DS_TOKEN -u WT_URL -u WT_TOKEN -u WS_URL -u WS_TOKEN -u AS_URL -u AS_TOKEN -u JS_URL -u JS_TOKEN <the job's run>
@@ -97,10 +101,10 @@ nothing about beta: `beta-test` does.
 run: in a checkout of an older release's commit, it says which releases it
 would edit.
 
-After `pipeline.toml` or `jobs.toml` changes, check them:
+After the routine's `pipeline.toml` or `jobs.toml` changes, check them:
 
 ```sh
-"$CLAUDE_CONFIG_DIR/skills/approval/bin/approval" pipeline . dakotacolorado/worker-host; echo "exit $?"
+"$CLAUDE_CONFIG_DIR/skills/approval/bin/approval" pipeline <release-routines clone>/dakotacolorado/worker-host dakotacolorado/worker-host; echo "exit $?"
 ```
 
 ### Claude Code itself (by hand, no job)

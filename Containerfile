@@ -1,4 +1,5 @@
-# The image worker-host's jobs run in (jobs.toml), built by job-runner on base-rust,
+# The image worker-host's jobs run in (the routine dakotacolorado/release-routines
+# at dakotacolorado/worker-host/, its jobs.toml), built by job-runner on base-rust,
 # which brings Rust 1.99.1, Zig 0.13.0 and cargo-zigbuild 0.24.1.
 ARG BASE=localhost/base-rust:1
 FROM ${BASE}
