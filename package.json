@@ -1,11 +1,11 @@
 {
-  "name": "agent-host",
-  "version": "0.2.0",
+  "name": "@dakotajp/agency-host",
+  "version": "0.3.0",
   "private": true,
-  "description": "Makes a machine one of agent-service's hosts: runs agents' Claude Code sessions on the Claude Agent SDK and reports them over one socket.",
+  "description": "Makes a computer one of agency's hosts: runs its agents' Claude Code sessions on the Claude Agent SDK and reports them over one socket.",
   "type": "module",
   "bin": {
-    "agent-host": "dist/cli.js"
+    "agency-host": "dist/cli.js"
   },
   "engines": {
     "node": ">=24"

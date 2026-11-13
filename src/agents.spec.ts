@@ -59,7 +59,7 @@ describe("starting a session", () => {
       sessionId: S1,
       resume: false,
       text: "Do the work.",
-      context: { key: "agent-service", version: 1, files: [{ path: "skills/page/SKILL.md", content: "page", executable: false }] },
+      context: { key: "agency", version: 1, files: [{ path: "skills/page/SKILL.md", content: "page", executable: false }] },
       documents: [{ key: "agent-roles/planner", version: 3, files: [{ path: "skills/planner/SKILL.md", content: "plan", executable: false }] }],
       env: { WT_URL: "https://wt", CLAUDE_CONFIG_DIR: "/not/this" },
       secrets: { WT_TOKEN: "s3cret" },
@@ -275,7 +275,7 @@ describe("permissions", () => {
     const permit = sdk.last.options.permit;
     expect(permit("Read")).toBe(true);
     expect(permit("mcp__github__create_pr")).toBe(true);
-    expect(permit("mcp__github__merge_pr")).toBe("mcp__github__merge_pr is not allowed on this host (agent-host's permissions)");
+    expect(permit("mcp__github__merge_pr")).toBe("mcp__github__merge_pr is not allowed on this host (agency-host's permissions)");
     expect(permit("Bash")).toMatch(/not allowed/);
   });
 });

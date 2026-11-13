@@ -7,7 +7,7 @@ describe("the lock", () => {
   it("lets one host hold an agents folder, and takes over one a host that died left", async () => {
     const dir = scratch("lock");
     const first = await hold(dir);
-    await expect(hold(dir)).rejects.toThrow(/another agent-host is already running/);
+    await expect(hold(dir)).rejects.toThrow(/another agency-host \(or agent-host\) is already running/);
     await new Promise((r) => first.close(r));
     // As a machine unplugged leaves it.
     writeFileSync(lockPath(dir), "");

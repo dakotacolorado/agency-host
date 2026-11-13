@@ -247,7 +247,7 @@ export class Agents {
       env,
       ...("resume" in begin ? { resume: begin.resume } : { sessionId: begin.fresh }),
       ...(mcpServers ? { mcpServers } : {}),
-      permit: (tool) => (allows(this.o.permissions, tool) ? true : `${tool} is not allowed on this host (agent-host's permissions)`),
+      permit: (tool) => (allows(this.o.permissions, tool) ? true : `${tool} is not allowed on this host (agency-host's permissions)`),
       stderr: (t) => {
         try {
           appendFileSync(errors, t);

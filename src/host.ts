@@ -94,7 +94,7 @@ export class Host {
       if (typeof c === "string") log(`socket: ${c}`);
       else this.commands.take(c);
     } else if (msg.type === "error") {
-      log(`agent-service: ${String(msg.error)}`);
+      log(`agency: ${String(msg.error)}`);
     }
     // Anything else is passed over, so the service can add a kind before the host reads it.
   }

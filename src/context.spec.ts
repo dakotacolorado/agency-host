@@ -5,7 +5,7 @@ import { env, expand, readCredentials, write, writeCredentials, written, type Co
 import { scratch } from "./testing.ts";
 
 const file = (path: string, content: string, executable = false) => ({ path, content, executable });
-const ctx = (version: number, files: ReturnType<typeof file>[], key = "agent-service"): Context => ({ key, version, files });
+const ctx = (version: number, files: ReturnType<typeof file>[], key = "agency"): Context => ({ key, version, files });
 
 describe("a start's files", () => {
   it("writes the context's and each document's files under skills/, scripts executable, and lists them", () => {
@@ -18,7 +18,7 @@ describe("a start's files", () => {
     expect(statSync(join(state, "skills/page/bin/page")).mode & 0o777).toBe(0o755);
     expect(statSync(join(state, "skills/page/SKILL.md")).mode & 0o777).toBe(0o644);
     expect(done).toEqual({
-      key: "agent-service",
+      key: "agency",
       version: 3,
       paths: ["skills/page/SKILL.md", "skills/page/bin/page"],
       documents: [{ key: "approval", version: 2, paths: ["skills/approval/SKILL.md"] }],

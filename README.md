@@ -1,10 +1,28 @@
-# agent-host
+# agency-host
 
-One process per machine. It keeps a socket open to `agent-service`: every
+```
+ █████╗  ██████╗ ███████╗███╗   ██╗ ██████╗██╗   ██╗      ██╗  ██╗ ██████╗ ███████╗████████╗        ▄▄██▄▄
+██╔══██╗██╔════╝ ██╔════╝████╗  ██║██╔════╝╚██╗ ██╔╝      ██║  ██║██╔═══██╗██╔════╝╚══██╔══╝    ▄▄██████████▄▄
+███████║██║  ███╗█████╗  ██╔██╗ ██║██║      ╚████╔╝ █████╗███████║██║   ██║███████╗   ██║      ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+██╔══██║██║   ██║██╔══╝  ██║╚██╗██║██║       ╚██╔╝  ╚════╝██╔══██║██║   ██║╚════██║   ██║       ██  ██  ██  ██
+██║  ██║╚██████╔╝███████╗██║ ╚████║╚██████╗   ██║         ██║  ██║╚██████╔╝███████║   ██║       ██  ██  ██  ██
+╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝ ╚═════╝   ╚═╝         ╚═╝  ╚═╝ ╚═════╝ ╚══════╝   ╚═╝     ▄████████████████▄
+v0.3.0
+
+Agents at your command, across all your computers.
+agency-host runs agency's agents on this computer, each a Claude Code session on the Claude Agent SDK.
+```
+
+**Agents at your command, across all your computers.**
+
+agency-host makes a computer one of [agency](https://github.com/dakotacolorado/agency)'s
+hosts. One process per machine. It keeps a socket open to agency: every
 command comes down it, and every report and heartbeat goes up it. It makes
 agents' folders, runs their Claude Code sessions on the Claude Agent SDK
 (`@anthropic-ai/claude-agent-sdk`, checked against 0.3.323), carries
 messages to them and what they say back.
+
+agency-host was formerly called agent-host.
 
 ## Install
 
@@ -13,9 +31,9 @@ machine's Claude subscription signed in (`claude` once, by hand): no API key
 is needed, and the SDK brings its own Claude Code.
 
 ```sh
-git clone https://github.com/dakotacolorado/agent-host && cd agent-host
+git clone https://github.com/dakotacolorado/agency-host && cd agency-host
 npm ci --omit=dev
-node src/cli.ts 2>> ~/agent-host.log &          # Node runs the TypeScript itself
+node src/cli.ts 2>> ~/agency-host.log &          # Node runs the TypeScript itself
 ```
 
 or, built: `npm ci && npm run build && npm prune --omit=dev`, then
@@ -23,17 +41,17 @@ or, built: `npm ci && npm run build && npm prune --omit=dev`, then
 live is resumed (see Restarts).
 
 On linux, a systemd user unit can keep it running,
-`~/.config/systemd/user/agent-host.service`, enabled with `systemctl --user
-enable --now agent-host`:
+`~/.config/systemd/user/agency-host.service`, enabled with `systemctl --user
+enable --now agency-host`:
 
 ```ini
 [Unit]
-Description=agent-host: this machine's place among agent-service's hosts
+Description=agency-host: this machine's place among agency's hosts
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-WorkingDirectory=%h/agent-host
+WorkingDirectory=%h/agency-host
 ExecStart=/usr/bin/env node dist/cli.js
 Restart=always
 RestartSec=5
@@ -43,13 +61,15 @@ Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 WantedBy=default.target
 ```
 
-Its config (`~/.config/agent-host/`), folders (`~/agents`), lock and log are
+Its config (`~/.config/agency-host/`), folders (`~/agents`), lock and log are
 all its own, so it can run beside other services on the same machine.
 
 ## Configure
 
-`~/.config/agent-host/config.toml` (or `--config PATH`, or
-`AGENT_HOST_CONFIG`) holds every setting:
+`~/.config/agency-host/config.toml` (or `--config PATH`, or
+`AGENCY_HOST_CONFIG`) holds every setting. Where agent-host left its config,
+`~/.config/agent-host/config.toml` is read when the new one does not exist,
+and `AGENT_HOST_CONFIG` still names it:
 
 ```toml
 service_url = "https://…"
@@ -71,8 +91,9 @@ every tool it begins. Claude Code's own rules in the agent's settings are
 checked first, and decide what it never asks about.
 
 Two hosts on one machine (beta beside prod) each need their own `agents_dir`;
-one host holds each, by a unix socket in it (`.agent-host.sock`), and a
-second is refused. `agent-host --version` prints package.json's version,
+one host holds each, by a unix socket in it (`.agent-host.sock`, the name
+agent-host gave it, so neither runs beside the other), and a second is
+refused. `agency-host --version` prints its banner and package.json's version,
 which is also the `version` its heartbeats send.
 
 ## Socket
@@ -111,7 +132,7 @@ logs/<id>.jsonl   every SDK message each session gave, as it came
 logs/<id>.log     everything each session wrote on its stderr
 ```
 
-A `start` writes its `context` (agent-service's own clients) and `documents`
+A `start` writes its `context` (agency's own clients) and `documents`
 (honed skills), files under `skills/`, into `home/.claude/`, in place of what
 the last start wrote (listed in `home/.claude/.context.json`); a start with
 neither keeps the last. The host's own rules are the agent's `CLAUDE.md`. Its
@@ -176,5 +197,5 @@ npm ci
 npm run typecheck
 npm test
 npm run build
-AGENT_HOST_REAL_CLAUDE=1 npx vitest run src/real.spec.ts   # one real session
+AGENCY_HOST_REAL_CLAUDE=1 npx vitest run src/real.spec.ts   # one real session
 ```

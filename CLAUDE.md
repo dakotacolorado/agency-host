@@ -1,11 +1,11 @@
-# agent-host
+# agency-host
 
 The process that makes a machine available to the workplace. One Node 24
 TypeScript package, run on the Claude Agent SDK.
 
 ## What it does, and nothing more
 
-Keep a socket open to agent-service, saying the host is here and what it
+Keep a socket open to agency, saying the host is here and what it
 offers. Take the commands that come down it: make an agent's folder, start or
 stop its session, carry a message to it, delete it. Report what agents do and
 say back up it. That is the whole job.
@@ -14,7 +14,7 @@ It holds no opinion about what the work is. It does not read tickets, decide
 what to run, or know what an agent is for. Anything clever here is in the
 wrong place -- it belongs to the agents, or to the service.
 
-The protocol is agent-service's; its shapes are the authority, and the host
+The protocol is agency's; its shapes are the authority, and the host
 follows them rather than the other way round.
 
 ## Writing code here

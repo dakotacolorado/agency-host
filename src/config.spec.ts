@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { allows, EVERY_TOOL, fromText, load } from "./config.ts";
+import { allows, defaultPath, EVERY_TOOL, fromText, load } from "./config.ts";
 
 const BASE = 'service_url = "https://x"\ntoken = "t"\nhost_id = "a"\n';
 const read = (text: string) => fromText(text, "/home/me");
@@ -34,7 +34,21 @@ describe("the config file", () => {
     expect(() => read('service_url = "https://x"')).toThrow(/no token/);
     expect(() => read('service = "https://x"')).toThrow(/unknown setting service/);
     expect(() => read(`${BASE}[permissions]\nmaybe = ["x"]`)).toThrow(/permissions.maybe/);
-    expect(() => load("/nonexistent/agent-host.toml")).toThrow(/\/nonexistent\/agent-host.toml/);
+    expect(() => load("/nonexistent/agency-host.toml")).toThrow(/\/nonexistent\/agency-host.toml/);
+  });
+});
+
+describe("the config file's default path", () => {
+  const env = { HOME: "/home/me" };
+  it("is agency-host/config.toml in the config folder", () => {
+    expect(defaultPath(env, () => false)).toBe("/home/me/.config/agency-host/config.toml");
+    expect(defaultPath({ XDG_CONFIG_HOME: "/xdg" }, () => false)).toBe("/xdg/agency-host/config.toml");
+  });
+
+  it("is agent-host/config.toml when only that exists, as agent-host left it", () => {
+    const only = (path: string) => (p: string) => p === path;
+    expect(defaultPath(env, only("/home/me/.config/agent-host/config.toml"))).toBe("/home/me/.config/agent-host/config.toml");
+    expect(defaultPath(env, () => true)).toBe("/home/me/.config/agency-host/config.toml");
   });
 });
 

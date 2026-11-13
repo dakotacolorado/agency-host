@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { parse } from "smol-toml";
@@ -37,9 +37,16 @@ export function allows(permissions: Permissions, tool: string): boolean {
 /** `tmux_socket` was read by an older release, and is accepted so a config that still names it is not refused. */
 const KEYS = new Set(["service_url", "token", "host_id", "capacity", "labels", "agents_dir", "permissions", "tmux_socket"]);
 
-export function defaultPath(env: NodeJS.ProcessEnv = process.env): string | null {
+/**
+ * `agency-host/config.toml` in the config folder, or, when only that exists,
+ * `agent-host/config.toml`, where agency-host's releases as agent-host kept it.
+ */
+export function defaultPath(env: NodeJS.ProcessEnv = process.env, exists: (path: string) => boolean = existsSync): string | null {
   const base = env.XDG_CONFIG_HOME || (env.HOME ? join(env.HOME, ".config") : null);
-  return base ? join(base, "agent-host", "config.toml") : null;
+  if (!base) return null;
+  const path = join(base, "agency-host", "config.toml");
+  const old = join(base, "agent-host", "config.toml");
+  return !exists(path) && exists(old) ? old : path;
 }
 
 /** Reads the file, which is the only place settings come from. */

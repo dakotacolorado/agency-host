@@ -1,11 +1,11 @@
 ---
 name: test
-description: How to run agent-host's checks (typecheck, test, build) and its opt-in real-Claude test. Use before submitting a change to agent-host, and when reviewing one.
+description: How to run agency-host's checks (typecheck, test, build) and its opt-in real-Claude test. Use before submitting a change to agency-host, and when reviewing one.
 ---
 
-# Testing agent-host
+# Testing agency-host
 
-agent-host is a Node 24 TypeScript package. Node runs `src/*.ts` directly, so
+agency-host is a Node 24 TypeScript package. Node runs `src/*.ts` directly, so
 nothing is built for development; `build` compiles `dist/` for an install.
 
 ## Setup
@@ -25,9 +25,9 @@ exit status (`echo $?`); never pipe one into `tail` or `head`, whose status
 the pipe reports instead:
 
 ```sh
-env -u CLAUDE_CONFIG_DIR -u DS_URL -u DS_TOKEN -u WT_URL -u WT_TOKEN -u WS_URL -u WS_TOKEN -u AS_URL -u AS_TOKEN -u JS_URL -u JS_TOKEN -u AG_URL -u AG_TOKEN npm run typecheck
-env -u CLAUDE_CONFIG_DIR -u DS_URL -u DS_TOKEN -u WT_URL -u WT_TOKEN -u WS_URL -u WS_TOKEN -u AS_URL -u AS_TOKEN -u JS_URL -u JS_TOKEN -u AG_URL -u AG_TOKEN npm test
-env -u CLAUDE_CONFIG_DIR -u DS_URL -u DS_TOKEN -u WT_URL -u WT_TOKEN -u WS_URL -u WS_TOKEN -u AS_URL -u AS_TOKEN -u JS_URL -u JS_TOKEN -u AG_URL -u AG_TOKEN npm run build
+env -u CLAUDE_CONFIG_DIR -u DS_URL -u DS_TOKEN -u WT_URL -u WT_TOKEN -u WS_URL -u WS_TOKEN -u AS_URL -u AS_TOKEN -u JS_URL -u JS_TOKEN -u AG_URL -u AG_TOKEN -u AGENCY_URL -u AGENCY_TOKEN npm run typecheck
+env -u CLAUDE_CONFIG_DIR -u DS_URL -u DS_TOKEN -u WT_URL -u WT_TOKEN -u WS_URL -u WS_TOKEN -u AS_URL -u AS_TOKEN -u JS_URL -u JS_TOKEN -u AG_URL -u AG_TOKEN -u AGENCY_URL -u AGENCY_TOKEN npm test
+env -u CLAUDE_CONFIG_DIR -u DS_URL -u DS_TOKEN -u WT_URL -u WT_TOKEN -u WS_URL -u WS_TOKEN -u AS_URL -u AS_TOKEN -u JS_URL -u JS_TOKEN -u AG_URL -u AG_TOKEN -u AGENCY_URL -u AGENCY_TOKEN npm run build
 ```
 
 `npm test` runs every `src/*.spec.ts` against a stand-in for the Agent SDK
@@ -45,8 +45,8 @@ release, that release is the new `CHECKED_SDK`. `CLAUDE_CONFIG_DIR` is unset
 so the session uses the user's own login:
 
 ```sh
-AGENT_HOST_REAL_CLAUDE=1 env -u CLAUDE_CONFIG_DIR -u DS_URL -u DS_TOKEN -u WT_URL -u WT_TOKEN -u WS_URL -u WS_TOKEN -u AS_URL -u AS_TOKEN -u JS_URL -u JS_TOKEN -u AG_URL -u AG_TOKEN npx vitest run src/real.spec.ts
+AGENCY_HOST_REAL_CLAUDE=1 env -u CLAUDE_CONFIG_DIR -u DS_URL -u DS_TOKEN -u WT_URL -u WT_TOKEN -u WS_URL -u WS_TOKEN -u AS_URL -u AS_TOKEN -u JS_URL -u JS_TOKEN -u AG_URL -u AG_TOKEN -u AGENCY_URL -u AGENCY_TOKEN npx vitest run src/real.spec.ts
 ```
 
-A pass: `Tests  2 passed (2)`, exit 0. Without `AGENT_HOST_REAL_CLAUDE=1` it
+A pass: `Tests  2 passed (2)`, exit 0. Without `AGENCY_HOST_REAL_CLAUDE=1` it
 says `2 skipped`, which proves nothing.

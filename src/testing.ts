@@ -90,7 +90,7 @@ export class FakeSdk {
 }
 
 export function scratch(name: string): string {
-  return realpathSync(mkdtempSync(join(tmpdir(), `agent-host-${name}-`)));
+  return realpathSync(mkdtempSync(join(tmpdir(), `agency-host-${name}-`)));
 }
 
 /** Lets every pending callback and promise run. */

@@ -116,7 +116,7 @@ function merge(path: string, change: (o: Record<string, unknown>) => void): void
     throw new Error(`${path}: ${(e as Error).message}`);
   }
   if (JSON.stringify(value) === before && existsSync(path)) return;
-  const aside = `${path}.agent-host`;
+  const aside = `${path}.agency-host`;
   writeFileSync(aside, JSON.stringify(value, null, 2), { mode: 0o600 });
   chmodSync(aside, 0o600);
   renameSync(aside, path);
@@ -234,6 +234,8 @@ export interface Read {
   /** For the host's own record of a message it sent: that message's uuid and the command it carried. */
   sent?: { uuid: string; commandId?: string };
 }
+
+// `agent_host` records are in transcripts already written, and read back from them: the type keeps its name.
 
 /** The record the host writes in a session's events before each Claude Code it runs for it: a new process has no background tasks. */
 export function started(at: string): object {

@@ -15,6 +15,11 @@ import { join } from "node:path";
 /** A unix socket's path is short on macOS (104 bytes); one too long for it goes in the temp folder, named by the folder it locks. */
 const LONGEST_PATH = 100;
 
+/**
+ * Named as agency-host's releases as agent-host named it, so an agent-host
+ * still running on a folder and an agency-host started on it hold the same
+ * lock, and the second is refused.
+ */
 export function lockPath(agentsDir: string): string {
   const beside = join(agentsDir, ".agent-host.sock");
   if (Buffer.byteLength(beside) <= LONGEST_PATH) return beside;
@@ -47,7 +52,7 @@ export async function hold(agentsDir: string): Promise<Server> {
     });
     c.once("error", () => resolve(false));
   });
-  if (answered) throw new Error(`another agent-host is already running on ${agentsDir}: stop it first`);
+  if (answered) throw new Error(`another agency-host (or agent-host) is already running on ${agentsDir}: stop it first`);
   unlinkSync(path);
   return listen();
 }
