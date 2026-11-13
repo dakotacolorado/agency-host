@@ -1,4 +1,4 @@
-//! A stand-in worker-service for the built binary: an HTTP heartbeat that
+//! A stand-in agent-service for the built binary: an HTTP heartbeat that
 //! names a socket, the socket, and a host run against them from a config
 //! file of the test's own.
 
@@ -131,7 +131,7 @@ pub fn host(dir: &Path, config: &str) -> Child {
         dir.join("bin").display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    Command::new(env!("CARGO_BIN_EXE_worker-host"))
+    Command::new(env!("CARGO_BIN_EXE_agent-host"))
         .env_clear()
         .env("PATH", path)
         .env("HOME", dir.join("home"))

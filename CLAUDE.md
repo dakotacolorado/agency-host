@@ -1,20 +1,20 @@
-# worker-host
+# agent-host
 
 The process that makes a machine available to the workplace. One crate, one
 static binary per architecture, no runtime to install.
 
 ## What it does, and nothing more
 
-Send heartbeats to worker-service saying the host is here and what it offers,
-and keep its socket open. Take the commands that come down the socket: make a
-worker's folder, start or stop its session, carry a message to it, retire it.
-Report what workers do and say back up it. That is the whole job.
+Send heartbeats to agent-service saying the host is here and what it offers,
+and keep its socket open. Take the commands that come down the socket: make an
+agent's folder, start or stop its session, carry a message to it, retire it.
+Report what agents do and say back up it. That is the whole job.
 
 It holds no opinion about what the work is. It does not read tickets, decide
-what to run, or know what a worker is for. Anything clever here is in the
-wrong place -- it belongs to the workers, or to the service.
+what to run, or know what an agent is for. Anything clever here is in the
+wrong place -- it belongs to the agents, or to the service.
 
-The protocol is worker-service's; its shapes are the authority, and the host
+The protocol is agent-service's; its shapes are the authority, and the host
 follows them rather than the other way round.
 
 ## Writing code here

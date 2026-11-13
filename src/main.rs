@@ -1,3 +1,4 @@
+mod agent;
 mod claude;
 mod commands;
 mod config;
@@ -8,30 +9,29 @@ mod protocol;
 mod session;
 mod socket;
 mod sys;
-mod worker;
 
+use agent::{Agents, Cursor, Deliveries};
 use commands::Taken;
 use config::Config;
 use heartbeat::{Client, Failure, Heartbeat};
 use protocol::{
-    line_reports, Command, CommandReport, Line, LineReport, TokenReport, Tokens, Up, Usage,
-    WorkerReport, MOST_TOKENS,
+    line_reports, AgentReport, Command, CommandReport, Line, LineReport, TokenReport, Tokens, Up,
+    Usage, MOST_TOKENS,
 };
 use socket::Socket;
 use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 use std::{env, path::PathBuf, process::ExitCode};
-use worker::{Cursor, Deliveries, Workers};
 
 /// The release this binary is, as its heartbeat and `--version` say: the tag a
-/// release build is given in `WORKER_HOST_RELEASE` (e.g. `v0.1.0-48`), or
+/// release build is given in `AGENT_HOST_RELEASE` (e.g. `v0.1.0-48`), or
 /// Cargo.toml's version for any other build.
-const VERSION: &str = match option_env!("WORKER_HOST_RELEASE") {
+const VERSION: &str = match option_env!("AGENT_HOST_RELEASE") {
     Some(release) if !release.is_empty() => release,
     _ => env!("CARGO_PKG_VERSION"),
 };
 
-/// Bytes of transcript lines in one report, for every worker together; what
+/// Bytes of transcript lines in one report, for every agent together; what
 /// does not fit goes in the next report. One transcript line may go past it,
 /// up to about `claude::LONGEST_TEXT`, so that a line longer than the budget
 /// is not held up for ever; `REPORT_LIMIT` is what holds the whole report.
@@ -41,26 +41,26 @@ const TRANSCRIPT_PER_REPORT: usize = 32 << 10;
 /// spare. Every report is held to it, whatever the budget let in; see `fit`.
 const REPORT_LIMIT: usize = 120 << 10;
 
-/// How often the host looks at what its workers are doing, so that a change
+/// How often the host looks at what its agents are doing, so that a change
 /// is on the socket within about this long.
 const TICK: Duration = Duration::from_secs(1);
 
-const USAGE: &str = "usage: worker-host [--config PATH]
+const USAGE: &str = "usage: agent-host [--config PATH]
 
-  --config PATH   config file (default $XDG_CONFIG_HOME/worker-host/config.toml,
-                  or ~/.config/worker-host/config.toml); WORKER_HOST_CONFIG also names it
+  --config PATH   config file (default $XDG_CONFIG_HOME/agent-host/config.toml,
+                  or ~/.config/agent-host/config.toml); AGENT_HOST_CONFIG also names it
 
 Every setting is in the file: service_url, token, host_id (default the hostname),
-capacity, labels, workers_dir (default ~/workers), [permissions] allow and deny
+capacity, labels, agents_dir (default ~/agents), [permissions] allow and deny
 (default every tool allowed).";
 
 fn parse(mut args: impl Iterator<Item = String>) -> Result<Option<PathBuf>, String> {
-    let mut config = env::var_os("WORKER_HOST_CONFIG").map(PathBuf::from);
+    let mut config = env::var_os("AGENT_HOST_CONFIG").map(PathBuf::from);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--config" => config = Some(args.next().ok_or("--config needs a path")?.into()),
             "--version" => {
-                println!("worker-host {VERSION}");
+                println!("agent-host {VERSION}");
                 std::process::exit(0);
             }
             "--help" | "-h" => {
@@ -84,34 +84,34 @@ fn main() -> ExitCode {
     let config = match config::load(path) {
         Ok(config) => config,
         Err(e) => {
-            log!("worker-host: {e}");
+            log!("agent-host: {e}");
             return ExitCode::from(2);
         }
     };
-    // Two hosts on one workers folder would each take every command and run it
+    // Two hosts on one agents folder would each take every command and run it
     // twice, so the second is refused while the first holds the lock.
-    let _lock = match hold(&config.workers_dir) {
+    let _lock = match hold(&config.agents_dir) {
         Ok(lock) => lock,
         Err(e) => {
-            log!("worker-host: {e}");
+            log!("agent-host: {e}");
             return ExitCode::from(3);
         }
     };
     sys::ignore_hangup();
     log!(
-        "worker-host {VERSION}: host {} sending heartbeats to {}",
+        "agent-host {VERSION}: host {} sending heartbeats to {}",
         config.host_id,
         config.service_url
     );
     match config.capacity {
         Some(n) => log!(
-            "will run sessions for {n} workers, labelled {}",
+            "will run sessions for {n} agents, labelled {}",
             config.labels.as_deref().unwrap_or_default().join(", ")
         ),
-        None => log!("no capacity set: the service will put no worker here until one is"),
+        None => log!("no capacity set: the service will put no agent here until one is"),
     }
-    log!("workers are in {}", config.workers_dir.display());
-    let claude = claude::Claude::from_env(|k| env::var(k).ok(), &config.workers_dir);
+    log!("agents are in {}", config.agents_dir.display());
+    let claude = claude::Claude::from_env(|k| env::var(k).ok(), &config.agents_dir);
     match claude.version() {
         Some(v) if v == claude::CHECKED => log!("Claude Code {v}"),
         Some(v) => log!(
@@ -123,30 +123,30 @@ fn main() -> ExitCode {
             Err(e) => log!("{e}: no session can start"),
         },
     }
-    let workers = Workers::new(
+    let agents = Agents::new(
         session::Sessions::new(config.permissions.clone()),
         claude,
-        config.workers_dir.clone(),
+        config.agents_dir.clone(),
     );
-    for (name, state) in workers.reconcile() {
+    for (name, state) in agents.reconcile() {
         let state = serde_json::to_value(state).unwrap_or_default();
-        log!("worker {name}: {}", state.as_str().unwrap_or_default());
+        log!("agent {name}: {}", state.as_str().unwrap_or_default());
     }
     let socket = Socket::spawn(&config.host_id, &config.token);
-    run(&Client::new(&config), &config, &workers, &socket)
+    run(&Client::new(&config), &config, &agents, &socket)
 }
 
-/// The workers folder's lock, held for as long as this host runs; the system
+/// The agents folder's lock, held for as long as this host runs; the system
 /// lets it go when the process ends, however it ends.
-fn hold(workers_dir: &std::path::Path) -> Result<std::fs::File, String> {
-    std::fs::create_dir_all(workers_dir).map_err(|e| format!("{}: {e}", workers_dir.display()))?;
-    let path = workers_dir.join(".worker-host.lock");
+fn hold(agents_dir: &std::path::Path) -> Result<std::fs::File, String> {
+    std::fs::create_dir_all(agents_dir).map_err(|e| format!("{}: {e}", agents_dir.display()))?;
+    let path = agents_dir.join(".agent-host.lock");
     let file = std::fs::File::create(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     match file.try_lock() {
         Ok(()) => Ok(file),
         Err(std::fs::TryLockError::WouldBlock) => Err(format!(
-            "another worker-host is already running on {}: stop it first",
-            workers_dir.display()
+            "another agent-host is already running on {}: stop it first",
+            agents_dir.display()
         )),
         Err(std::fs::TryLockError::Error(e)) => Err(format!("{}: {e}", path.display())),
     }
@@ -157,7 +157,7 @@ fn hold(workers_dir: &std::path::Path) -> Result<std::fs::File, String> {
 #[derive(Default)]
 struct Unsent(Vec<CommandReport>);
 
-/// Each session's tokens as its lines were read, by worker and session, and
+/// Each session's tokens as its lines were read, by agent and session, and
 /// what the socket was last told of them, and on which socket. A host that
 /// restarts reads every session's lines again from the start and comes to the
 /// same totals, which it tells again: the service keeps one of each.
@@ -170,16 +170,16 @@ struct Totals {
 type BySession = BTreeMap<(String, String), Tokens>;
 
 impl Totals {
-    fn read(&mut self, worker: &str, totals: Vec<(String, Tokens)>) {
+    fn read(&mut self, agent: &str, totals: Vec<(String, Tokens)>) {
         for (session, total) in totals {
-            self.read.insert((worker.into(), session), total);
+            self.read.insert((agent.into(), session), total);
         }
     }
 
-    /// Only the workers still here are kept, so a retired worker's sessions
+    /// Only the agents still here are kept, so a retired agent's sessions
     /// are not told again on every socket.
     fn keep(&mut self, here: impl Fn(&str) -> bool) {
-        self.read.retain(|(worker, _), _| here(worker));
+        self.read.retain(|(agent, _), _| here(agent));
     }
 
     /// The totals `opened` has not been told, every one on a socket not told
@@ -190,8 +190,8 @@ impl Totals {
             .iter()
             .filter(|(key, total)| told.is_none_or(|(_, was)| was.get(*key) != Some(*total)))
             .take(MOST_TOKENS)
-            .map(|((worker, session), total)| TokenReport {
-                worker_id: worker.clone(),
+            .map(|((agent, session), total)| TokenReport {
+                agent_id: agent.clone(),
                 session_id: session.clone(),
                 tokens: *total,
             })
@@ -204,14 +204,14 @@ impl Totals {
         }
         if let Some((_, told)) = &mut self.told {
             for t in sent {
-                told.insert((t.worker_id.clone(), t.session_id.clone()), t.tokens);
+                told.insert((t.agent_id.clone(), t.session_id.clone()), t.tokens);
             }
         }
     }
 }
 
-/// How far each worker's transcript has been written on a socket, and which
-/// worker's is read first in the next report.
+/// How far each agent's transcript has been written on a socket, and which
+/// agent's is read first in the next report.
 #[derive(Default)]
 struct Reads {
     sent_at: HashMap<String, Cursor>,
@@ -235,7 +235,7 @@ impl Unsent {
 fn take(
     client: &Client,
     command: &Command,
-    workers: &Workers,
+    agents: &Agents,
     deliveries: &mut Deliveries,
     taken: &mut Taken,
     unsent: &mut Unsent,
@@ -260,7 +260,7 @@ fn take(
         },
         _ => command,
     };
-    match taken.take(command, workers, deliveries) {
+    match taken.take(command, agents, deliveries) {
         Some(report) => {
             if fresh {
                 let done = if report.settled() {
@@ -283,18 +283,18 @@ fn take(
 }
 
 /// Assumes nothing survives between iterations but what is in memory, the
-/// workers' folders and their sessions: the machine may sleep for weeks between two,
+/// agents' folders and their sessions: the machine may sleep for weeks between two,
 /// and the next heartbeat is simply late. Commands come only on the socket,
 /// and reports go only on it: what has not been written on one -- command
-/// results, and transcript past each worker's cursor -- is kept until it is,
-/// and every socket opened is first sent every worker's state. A host that
+/// results, and transcript past each agent's cursor -- is kept until it is,
+/// and every socket opened is first sent every agent's state. A host that
 /// restarts sends each transcript again from its start; the `seq` on each
 /// line says it is the same.
-fn run(client: &Client, config: &Config, workers: &Workers, socket: &Socket) -> ExitCode {
+fn run(client: &Client, config: &Config, agents: &Agents, socket: &Socket) -> ExitCode {
     let mut unsent = Unsent::default();
     let mut reads = Reads::default();
-    // What the socket was last told of the workers, and on which socket.
-    let mut told: Option<(u64, Vec<WorkerReport>)> = None;
+    // What the socket was last told of the agents, and on which socket.
+    let mut told: Option<(u64, Vec<AgentReport>)> = None;
     // The newest reading of the account's usage not yet written on a socket.
     let mut usage: Option<Usage> = None;
     let mut totals = Totals::default();
@@ -309,13 +309,13 @@ fn run(client: &Client, config: &Config, workers: &Workers, socket: &Socket) -> 
             take(
                 client,
                 &command,
-                workers,
+                agents,
                 &mut deliveries,
                 &mut taken,
                 &mut unsent,
             );
         }
-        for (command, result) in deliveries.settle(workers) {
+        for (command, result) in deliveries.settle(agents) {
             log!(
                 "command {command} (message): {}",
                 result.as_ref().err().map_or("taken", String::as_str)
@@ -327,7 +327,7 @@ fn run(client: &Client, config: &Config, workers: &Workers, socket: &Socket) -> 
 
         if socket.is_up() {
             report(
-                workers,
+                agents,
                 socket,
                 &mut unsent,
                 &mut reads,
@@ -376,7 +376,7 @@ fn run(client: &Client, config: &Config, workers: &Workers, socket: &Socket) -> 
     }
 }
 
-/// Sends what the socket has not yet been told: every worker's state when it
+/// Sends what the socket has not yet been told: every agent's state when it
 /// is a socket not told before or the states have changed, transcript lines
 /// past what was written, command results not yet written, the newest
 /// reading of the account's usage, if one is, and each session's tokens it was
@@ -384,31 +384,31 @@ fn run(client: &Client, config: &Config, workers: &Workers, socket: &Socket) -> 
 ///
 /// A read takes its first line however long it is, so once the report's
 /// budget is spent no more are read: two long lines could not share one
-/// message. The workers take turns at being read first, so one with much to
+/// message. The agents take turns at being read first, so one with much to
 /// say holds none of the others up for long.
 fn report(
-    workers: &Workers,
+    agents: &Agents,
     socket: &Socket,
     unsent: &mut Unsent,
     reads: &mut Reads,
-    told: &mut Option<(u64, Vec<WorkerReport>)>,
+    told: &mut Option<(u64, Vec<AgentReport>)>,
     usage: &mut Option<Usage>,
     totals: &mut Totals,
 ) {
     let Reads { sent_at, turn } = reads;
-    let mut all = workers.all();
+    let mut all = agents.all();
     let first = *turn % all.len().max(1);
     *turn = turn.wrapping_add(1);
     all.rotate_left(first);
-    let live = workers.live();
+    let live = agents.live();
     let mut read: Vec<Read> = Vec::new();
     let mut room = TRANSCRIPT_PER_REPORT;
     for (home, record) in &all {
         let from = sent_at.get(&record.id).copied().unwrap_or_default();
-        let batch = (room > 0).then(|| workers.read(home, from, room)).flatten();
+        let batch = (room > 0).then(|| agents.read(home, from, room)).flatten();
         let (next, lines) = match batch {
             Some(batch) => {
-                // Every worker shares the account, so only the newest reading
+                // Every agent shares the account, so only the newest reading
                 // matters. A read put back by `fit` is read again later, and
                 // a reading sent twice is kept once.
                 if let Some(read) = batch.usage {
@@ -433,7 +433,7 @@ fn report(
         .rev()
         .map(|i| (i + first) % read.len())
         .collect();
-    totals.keep(|worker| all.iter().any(|(_, r)| r.id == worker));
+    totals.keep(|agent| all.iter().any(|(_, r)| r.id == agent));
     let opened = socket.opened();
     let tokens = totals.untold(opened);
     let rest = Rest {
@@ -445,7 +445,7 @@ fn report(
         all.iter()
             .zip(read)
             .map(|((home, record), (_, _, next, _))| {
-                workers.report(home, &record.id, live.contains_key(&record.id), next)
+                agents.report(home, &record.id, live.contains_key(&record.id), next)
             })
             .collect()
     });
@@ -465,7 +465,7 @@ fn report(
         .map(|(id, _, _, lines)| (id.clone(), lines.clone()))
         .collect();
     if socket.send(&Up::Report {
-        workers: &states,
+        agents: &states,
         lines: line_reports(&lines),
         command_results: &unsent.0,
         usage: usage.as_ref(),
@@ -481,33 +481,33 @@ fn report(
     }
 }
 
-/// A line's bytes in a report, where it goes with its worker's id.
-fn line_size(worker_id: &str, line: &Line) -> usize {
-    serde_json::to_string(&LineReport { worker_id, line }).map_or(0, |s| s.len())
+/// A line's bytes in a report, where it goes with its agent's id.
+fn line_size(agent_id: &str, line: &Line) -> usize {
+    serde_json::to_string(&LineReport { agent_id, line }).map_or(0, |s| s.len())
 }
 
-/// Each worker's id, where its read began and ended, and what it read.
+/// Each agent's id, where its read began and ended, and what it read.
 type Read = (String, Cursor, Cursor, Vec<Line>);
 
-/// What a report carries besides the workers' states and lines.
+/// What a report carries besides the agents' states and lines.
 struct Rest<'a> {
     unsent: &'a Unsent,
     usage: Option<&'a Usage>,
     tokens: &'a [TokenReport],
 }
 
-/// The workers' states for a report of `read`, once it is short enough to
+/// The agents' states for a report of `read`, once it is short enough to
 /// send. A report over API Gateway's limit closes the socket only once it has
 /// been written, so it would be counted sent and lost with all it held: the
 /// lines read last (`last_read`, indices into `read`) are put back, their
-/// workers' reads undone to go in a later report, until it fits. The states
+/// agents' reads undone to go in a later report, until it fits. The states
 /// are worked out again each time, since they follow what was read.
 fn fit(
     read: &mut [Read],
     last_read: &[usize],
     rest: &Rest,
-    states_of: impl Fn(&[Read]) -> Vec<WorkerReport>,
-) -> Vec<WorkerReport> {
+    states_of: impl Fn(&[Read]) -> Vec<AgentReport>,
+) -> Vec<AgentReport> {
     let mut states = states_of(read);
     for &i in last_read {
         if report_size(&states, read, rest) <= REPORT_LIMIT {
@@ -528,13 +528,13 @@ fn fit(
 }
 
 /// A report's bytes as it would be written.
-fn report_size(states: &[WorkerReport], read: &[Read], rest: &Rest) -> usize {
+fn report_size(states: &[AgentReport], read: &[Read], rest: &Rest) -> usize {
     let lines: Vec<(String, Vec<Line>)> = read
         .iter()
         .map(|(id, _, _, lines)| (id.clone(), lines.clone()))
         .collect();
     let up = Up::Report {
-        workers: states,
+        agents: states,
         lines: line_reports(&lines),
         command_results: &rest.unsent.0,
         usage: rest.usage,
@@ -585,7 +585,7 @@ mod tests {
             usage: None,
             tokens: &[],
         };
-        let states_of = |read: &[Read]| -> Vec<WorkerReport> {
+        let states_of = |read: &[Read]| -> Vec<AgentReport> {
             read.iter()
                 .map(|(id, _, next, _)| {
                     let state = if next.offset > 0 {
@@ -593,7 +593,7 @@ mod tests {
                     } else {
                         protocol::State::Idle
                     };
-                    WorkerReport::new(id.clone(), state, None)
+                    AgentReport::new(id.clone(), state, None)
                 })
                 .collect()
         };
@@ -649,7 +649,7 @@ mod tests {
             "a socket opened again is told every total"
         );
 
-        totals.keep(|worker| worker == "w2");
+        totals.keep(|agent| agent == "w2");
         assert_eq!(told(&totals.untold(3)), [("s3".into(), 3)]);
         for n in 0..MOST_TOKENS as u64 + 10 {
             totals.read("w2", vec![(format!("t{n:03}"), used(n))]);

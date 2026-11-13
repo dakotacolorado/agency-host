@@ -1,6 +1,6 @@
 //! Everything this host knows about Claude Code: how to start it, what it
-//! says on its stdout and what to write to its stdin, and where it keeps a
-//! worker's settings and transcript.
+//! says on its stdout and what to write to its stdin, and where it keeps an
+//! agent's settings and transcript.
 //!
 //! A session is `claude -p` over stream-json: each line on stdin is a message
 //! or an answer to Claude Code, each line on stdout an event from it. Its
@@ -8,10 +8,10 @@
 //! outside this module reads or writes them, and the rest of the host sees
 //! only `Entry`, `Read` and the lines made here. A transcript Claude Code
 //! writes for itself is read only for sessions an older release of this host
-//! began (see `Source` in worker.rs); its lines and stdout's
+//! began (see `Source` in agent.rs); its lines and stdout's
 //! events share their shapes, so one reader serves both.
 //!
-//! Every worker has a Claude Code of its own -- settings, history, projects,
+//! Every agent has a Claude Code of its own -- settings, history, projects,
 //! transcripts and the rules it works by, all in `CLAUDE_CONFIG_DIR` under its
 //! home -- and the host user's login. HOME stays the user's: on macOS the
 //! login is in the user's login Keychain, which a process with another HOME
@@ -27,16 +27,16 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::{env, fs, io};
 
+use crate::agent::Entry;
 use crate::config::Permissions;
 use crate::protocol::{Tokens, Window, Windows};
-use crate::worker::Entry;
 
 /// The Claude Code release the stream-json protocol here was checked
 /// against, by its own tests and `real_claude`. Another may change a shape;
 /// the host says so when it starts.
 pub const CHECKED: &str = "2.1.318";
 
-/// What a worker says or is told is carried whole up to this many bytes, as
+/// What an agent says or is told is carried whole up to this many bytes, as
 /// the JSON its line goes up in. A report is one socket message, which API
 /// Gateway takes up to 128 KB, and a report may hold one such line past its
 /// own budget (`TRANSCRIPT_PER_REPORT`), so this leaves room for both. As
@@ -44,14 +44,14 @@ pub const CHECKED: &str = "2.1.318";
 pub const LONGEST_TEXT: usize = 64 << 10;
 
 /// A tool's input is shown on one line and can be a whole file, and a
-/// transcript is for following a worker, not for recovering its work: longer
+/// transcript is for following an agent, not for recovering its work: longer
 /// than this many characters, it is cut.
 const LONGEST_INPUT: usize = 4096;
 
 /// More than the note a cut text ends with can take, at its longest numbers.
 const NOTE_ROOM: usize = 64;
 
-/// Tools a worker is not given; see `Claude::prepare`.
+/// Tools an agent is not given; see `Claude::prepare`.
 const DENIED: [&str; 3] = ["AskUserQuestion", "EnterPlanMode", "ExitPlanMode"];
 
 pub struct Claude {
@@ -79,25 +79,25 @@ impl Claude {
     }
 
     /// The host user's Claude Code, as the host's environment names it. A
-    /// `CLAUDE_CONFIG_DIR` inside `workers_dir` is a worker's own state, not
-    /// the user's -- the host was started from inside a worker's session --
+    /// `CLAUDE_CONFIG_DIR` inside `agents_dir` is an agent's own state, not
+    /// the user's -- the host was started from inside an agent's session --
     /// and a session given it as its login store is not logged in, so it is
     /// passed over for Claude Code's default.
-    pub fn from_env(var: impl Fn(&str) -> Option<String>, workers_dir: &Path) -> Self {
+    pub fn from_env(var: impl Fn(&str) -> Option<String>, agents_dir: &Path) -> Self {
         let resolved = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
         let login = var("CLAUDE_CONFIG_DIR")
             .filter(|v| !v.is_empty())
             .map(PathBuf::from)
             .filter(|dir| {
-                let workers = resolved(dir).starts_with(resolved(workers_dir));
-                if workers {
+                let agents = resolved(dir).starts_with(resolved(agents_dir));
+                if agents {
                     crate::log!(
-                        "CLAUDE_CONFIG_DIR {} is a worker's own, not this user's: sessions use \
+                        "CLAUDE_CONFIG_DIR {} is an agent's own, not this user's: sessions use \
                          Claude Code's default login",
                         dir.display()
                     );
                 }
-                !workers
+                !agents
             });
         Claude::new("claude", login)
     }
@@ -166,10 +166,10 @@ impl Claude {
         text.split_whitespace().next().map(String::from)
     }
 
-    /// What Claude Code needs in each session's environment: the worker's
+    /// What Claude Code needs in each session's environment: the agent's
     /// own state, and where the shared login is. An empty
     /// `CLAUDE_SECURESTORAGE_CONFIG_DIR` is Claude Code's default store, not
-    /// the worker's.
+    /// the agent's.
     pub fn env(&self, state: &Path) -> Vec<(String, String)> {
         vec![
             ("CLAUDE_CONFIG_DIR".into(), state.to_string_lossy().into()),
@@ -183,12 +183,12 @@ impl Claude {
         ]
     }
 
-    /// Readies a worker's own Claude Code state in `state` to start in `dir`.
+    /// Readies an agent's own Claude Code state in `state` to start in `dir`.
     /// What Claude Code asks a new user, or of a folder it has not seen, is
     /// answered beforehand, so that a person who takes the session over with
     /// `claude --resume` is not asked either. Answers already there are kept,
-    /// so what a worker changes for itself stays changed. `rules` are the
-    /// worker's standing instructions, Claude Code's user memory, which it
+    /// so what an agent changes for itself stays changed. `rules` are the
+    /// agent's standing instructions, Claude Code's user memory, which it
     /// reads at the start of every session and keeps through compaction.
     pub fn prepare(&self, state: &Path, dir: &Path, rules: &str) -> Result<(), String> {
         fs::create_dir_all(state).map_err(|e| format!("{}: {e}", state.display()))?;
@@ -220,8 +220,8 @@ impl Claude {
         })?;
         merge(&state.join("settings.json"), |settings| {
             // These tools wait on a person's answer at a terminal, which a
-            // headless session has none of. Denied, a tool is gone, so a
-            // worker asks in words and ends its turn.
+            // headless session has none of. Denied, a tool is gone, so an
+            // agent asks in words and ends its turn.
             let deny = settings
                 .entry("permissions")
                 .or_insert_with(|| Value::Object(Map::new()))
@@ -276,7 +276,7 @@ pub fn echoed(event: &Value) -> Option<&str> {
 /// events, and nothing Claude Code says tells its new process from the old
 /// one, whose background tasks died with it.
 pub fn started(at: String) -> Value {
-    json!({"type": "worker_host", "subtype": "process_started", "timestamp": at})
+    json!({"type": "agent_host", "subtype": "process_started", "timestamp": at})
 }
 
 /// The answer to `event` when it is a request of the host's: a permission
@@ -296,7 +296,7 @@ pub fn answer(event: &Value, permissions: &Permissions) -> Option<Value> {
             } else {
                 json!({
                     "behavior": "deny",
-                    "message": format!("{tool} is not allowed on this host (worker-host's \
+                    "message": format!("{tool} is not allowed on this host (agent-host's \
                                         permissions)"),
                 })
             };
@@ -305,7 +305,7 @@ pub fn answer(event: &Value, permissions: &Permissions) -> Option<Value> {
         other => json!({
             "subtype": "error",
             "request_id": request_id,
-            "error": format!("worker-host does not answer {:?} requests", other.unwrap_or("")),
+            "error": format!("agent-host does not answer {:?} requests", other.unwrap_or("")),
         }),
     };
     Some(json!({"type": "control_response", "response": response}))
@@ -342,7 +342,7 @@ fn merge(
     if *object == before && path.exists() {
         return Ok(());
     }
-    let aside = path.with_extension("json.worker-host");
+    let aside = path.with_extension("json.agent-host");
     let write = || -> io::Result<()> {
         fs::write(&aside, serde_json::to_vec_pretty(&value)?)?;
         fs::set_permissions(&aside, fs::Permissions::from_mode(0o600))?;
@@ -351,7 +351,7 @@ fn merge(
     write().map_err(|e| at(&e))
 }
 
-/// Where a session's transcript is in a worker's state, once Claude Code has
+/// Where a session's transcript is in an agent's state, once Claude Code has
 /// started writing it. Looked for by its name rather than built from the
 /// folder, since how Claude Code turns a folder into a directory name is its
 /// own business.
@@ -418,7 +418,7 @@ fn derived(id: &str, version: u64) -> String {
 pub struct Read {
     pub at: Option<String>,
     pub entries: Vec<Entry>,
-    /// Whether the worker is waiting after this line: true when it ends its
+    /// Whether the agent is waiting after this line: true when it ends its
     /// turn (a `result`, or in a transcript `stop_reason` `end_turn`), false
     /// when it shows it at work or being told something, None when it says
     /// neither.
@@ -520,7 +520,7 @@ pub fn read(line: &str) -> Read {
         (Some("system"), Some("background_tasks_changed")) => v["tasks"]
             .as_array()
             .map(|t| u32::try_from(t.len()).unwrap_or(u32::MAX)),
-        (Some("worker_host"), Some("process_started")) => Some(0),
+        (Some("agent_host"), Some("process_started")) => Some(0),
         _ => None,
     };
     // Claude Code replays its own task notifications too, marked with where
@@ -535,7 +535,7 @@ pub fn read(line: &str) -> Read {
         None
     };
     let waiting = match v["type"].as_str() {
-        // A tool's result, too, is the worker at work.
+        // A tool's result, too, is the agent at work.
         Some("user") => Some(false),
         Some("attachment") if v["attachment"]["type"] == "queued_command" => Some(false),
         // A turn begun, on stdout, which may be with nothing said: a
@@ -565,7 +565,7 @@ pub fn read(line: &str) -> Read {
                 command,
             }],
             // Tool results come back as the user's turn; they are the
-            // worker's own work, not something said to it.
+            // agent's own work, not something said to it.
             Value::Array(blocks) => blocks
                 .iter()
                 .filter(|b| b["type"] == "text")
@@ -577,7 +577,7 @@ pub fn read(line: &str) -> Read {
                 .collect(),
             _ => vec![],
         },
-        // What was typed while the worker worked, delivered at its next step.
+        // What was typed while the agent worked, delivered at its next step.
         Some("attachment") if v["attachment"]["type"] == "queued_command" => v["attachment"]
             ["prompt"]
             .as_str()
@@ -619,7 +619,7 @@ pub fn read(line: &str) -> Read {
 /// `text` as it is when its `size` is at most `longest`; otherwise as much
 /// of it as fits with a note of how much that is, so whoever reads it knows
 /// it was cut and how long it was. The note is the service's shape for a cut
-/// text (`TranscriptLine` in worker-service), and counts in characters.
+/// text (`TranscriptLine` in agent-service), and counts in characters.
 fn cut(text: &str, longest: usize, size: fn(char) -> usize) -> String {
     if text.chars().map(size).sum::<usize>() <= longest {
         return text.to_string();
@@ -673,7 +673,7 @@ mod tests {
     // The lines below are cut down from a real Claude Code 2.1 transcript.
 
     #[test]
-    fn reads_what_the_worker_was_told_and_what_it_said_and_did() {
+    fn reads_what_the_agent_was_told_and_what_it_said_and_did() {
         let entries = read_all(&[
             json!({"type":"user","message":{"role":"user","content":"Run the tests."}}),
             json!({"type":"assistant","message":{"id":"m1","content":[{"type":"thinking","thinking":""}],"stop_reason":"tool_use"}}),
@@ -739,7 +739,7 @@ mod tests {
     }
 
     #[test]
-    fn a_turn_that_ended_leaves_the_worker_waiting_until_it_is_told_something() {
+    fn a_turn_that_ended_leaves_the_agent_waiting_until_it_is_told_something() {
         let waiting = |line: Value| read(&line.to_string()).waiting;
         assert_eq!(
             waiting(
@@ -855,14 +855,14 @@ mod tests {
             uuid("8550F3B6-D6FC-4F1E-A46C-3E385A545A32"),
             "8550f3b6-d6fc-4f1e-a46c-3e385a545a32"
         );
-        let derived = uuid("worker-7");
-        assert_eq!(derived, uuid("worker-7"));
-        assert_ne!(derived, uuid("worker-8"));
+        let derived = uuid("agent-7");
+        assert_eq!(derived, uuid("agent-7"));
+        assert_ne!(derived, uuid("agent-8"));
         assert_eq!(uuid(&derived), derived, "{derived} is not a uuid");
         assert_eq!(&derived[14..15], "4");
         let made = host_uuid("s1/2026-11-06T00:00:00Z");
         assert_eq!(uuid(&made), made, "{made} is not a uuid");
-        assert!(host_made(&made) && !host_made(&uuid("worker-7")));
+        assert!(host_made(&made) && !host_made(&uuid("agent-7")));
     }
 
     #[test]
@@ -1175,16 +1175,16 @@ mod tests {
     }
 
     fn scratch(name: &str) -> PathBuf {
-        // Apart from the worker tests' folders, which run beside these and share names.
+        // Apart from the agent tests' folders, which run beside these and share names.
         let dir =
-            std::env::temp_dir().join(format!("worker-host-claude-{}-{name}", std::process::id()));
+            std::env::temp_dir().join(format!("agent-host-claude-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir.canonicalize().unwrap()
     }
 
     #[test]
-    fn a_new_worker_state_answers_every_question_before_it_is_asked() {
+    fn a_new_agent_state_answers_every_question_before_it_is_asked() {
         let root = scratch("prepare");
         let (state, work) = (root.join("home/.claude"), root.join("work"));
         fs::create_dir(&work).unwrap();
@@ -1220,7 +1220,7 @@ mod tests {
     }
 
     #[test]
-    fn preparing_again_keeps_what_the_worker_changed() {
+    fn preparing_again_keeps_what_the_agent_changed() {
         let root = scratch("again");
         let (state, work) = (root.join(".claude"), root.join("work"));
         fs::create_dir_all(&state).unwrap();
@@ -1256,7 +1256,7 @@ mod tests {
                 "EnterPlanMode",
                 "ExitPlanMode"
             ]),
-            "denied once, alongside what the worker denied itself"
+            "denied once, alongside what the agent denied itself"
         );
         assert_eq!(
             fs::read_to_string(state.join("CLAUDE.md")).unwrap(),
@@ -1285,24 +1285,21 @@ mod tests {
     }
 
     #[test]
-    fn the_users_login_is_where_their_claude_config_dir_says_unless_it_is_a_workers() {
-        let workers = scratch("login");
+    fn the_users_login_is_where_their_claude_config_dir_says_unless_it_is_an_agents() {
+        let agents = scratch("login");
         let login = |dir: &str| {
             let dir = dir.to_string();
-            Claude::from_env(
-                |k| (k == "CLAUDE_CONFIG_DIR").then(|| dir.clone()),
-                &workers,
-            )
-            .env(Path::new("/w/ana/home/.claude"))[1]
+            Claude::from_env(|k| (k == "CLAUDE_CONFIG_DIR").then(|| dir.clone()), &agents)
+                .env(Path::new("/w/ana/home/.claude"))[1]
                 .1
                 .clone()
         };
         assert_eq!(login("/u/claude"), "/u/claude", "the user's own");
-        let ana = workers.join("ana/home/.claude");
+        let ana = agents.join("ana/home/.claude");
         assert_eq!(
             login(&ana.to_string_lossy()),
             "",
-            "a host started from a worker's session: the default, not the worker's"
+            "a host started from an agent's session: the default, not the agent's"
         );
         assert_eq!(login(""), "");
     }

@@ -32,18 +32,18 @@ fn file(path: &str, content: &str) -> Value {
 /// `contextUrl`, against a service answering it with `whole`, and hands back
 /// her Claude Code folder, with the socket, kept open until it is read.
 fn started(name: &str, whole: Option<Value>) -> (Machine, PathBuf, common::Socket) {
-    let dir = std::env::temp_dir().join(format!("wh-{}-{name}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("ah-{}-{name}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(dir.join("home")).unwrap();
     common::install_claude(&dir);
     let service = Service::serving(whole);
-    let workers = dir.join("workers");
+    let agents = dir.join("agents");
     let child = common::host(
         &dir,
         &format!(
-            "service_url = \"{}\"\ntoken = \"t\"\nhost_id = \"studio\"\nworkers_dir = \"{}\"\n",
+            "service_url = \"{}\"\ntoken = \"t\"\nhost_id = \"studio\"\nagents_dir = \"{}\"\n",
             service.url,
-            workers.display()
+            agents.display()
         ),
     );
     let machine = Machine { dir, child };
@@ -51,20 +51,20 @@ fn started(name: &str, whole: Option<Value>) -> (Machine, PathBuf, common::Socke
     let quick = Duration::from_secs(10);
     push(
         &mut socket,
-        json!({"id":"c1","kind":"create","workerId":"w1","name":"ana"}),
+        json!({"id":"c1","kind":"create","agentId":"w1","name":"ana"}),
     );
     report_until(&mut socket, quick, |r| result(r, "c1").is_some());
     push(
         &mut socket,
         json!({
-            "id":"c2","kind":"start","workerId":"w1","sessionId":"5a1e2b3c-4d5e-4f60-8a7b-8c9d0e1f2a3b","resume":false,
+            "id":"c2","kind":"start","agentId":"w1","sessionId":"5a1e2b3c-4d5e-4f60-8a7b-8c9d0e1f2a3b","resume":false,
             "context":{"key":"global","version":5,"files":[file("skills/x/SKILL.md","Use x.")]},
-            "contextUrl":"/fleet/workers/w1/sessions/5a1e2b3c-4d5e-4f60-8a7b-8c9d0e1f2a3b/context",
+            "contextUrl":"/agents/w1/sessions/5a1e2b3c-4d5e-4f60-8a7b-8c9d0e1f2a3b/context",
         }),
     );
     let report = report_until(&mut socket, quick, |r| result(r, "c2").is_some());
     assert_eq!(result(&report, "c2").unwrap()["ok"], true, "{report}");
-    let claude = workers.join("ana/home/.claude");
+    let claude = agents.join("ana/home/.claude");
     (machine, claude, socket)
 }
 

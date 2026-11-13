@@ -10,7 +10,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-repo=dakotacolorado/worker-host
+repo=dakotacolorado/agent-host
 targets=(x86_64-unknown-linux-musl aarch64-unknown-linux-musl aarch64-apple-darwin x86_64-apple-darwin)
 dry=${DRY_RUN:-}
 
@@ -44,14 +44,14 @@ echo "tag: $tag"
 
 for t in "${targets[@]}"; do
   echo "building $t"
-  WORKER_HOST_RELEASE="$tag" cargo zigbuild --release --locked --target "$t"
+  AGENT_HOST_RELEASE="$tag" cargo zigbuild --release --locked --target "$t"
 done
 # zig leaves this in the working directory.
 rm -f .intentionally-empty-file.o
 
 want() { # want <target> <what file(1) must say>
   local said
-  said=$(file -b "target/$1/release/worker-host")
+  said=$(file -b "target/$1/release/agent-host")
   echo "$1: $said"
   grep -Eq "$2" <<<"$said" || { echo "release: $1 is not $2" >&2; exit 1; }
 }
@@ -59,23 +59,23 @@ want x86_64-unknown-linux-musl 'ELF 64-bit.*x86-64.*(statically linked|static-pi
 want aarch64-unknown-linux-musl 'ELF 64-bit.*(ARM aarch64|aarch64).*(statically linked|static-pie linked)'
 want aarch64-apple-darwin 'Mach-O 64-bit.*arm64'
 want x86_64-apple-darwin 'Mach-O 64-bit.*x86_64'
-said=$(target/x86_64-unknown-linux-musl/release/worker-host --version)
+said=$(target/x86_64-unknown-linux-musl/release/agent-host --version)
 echo "--version: $said"
-[ "$said" = "worker-host $tag" ] || { echo "release: the binary says '$said', not 'worker-host $tag'" >&2; exit 1; }
+[ "$said" = "agent-host $tag" ] || { echo "release: the binary says '$said', not 'agent-host $tag'" >&2; exit 1; }
 
 rm -rf target/dist && mkdir target/dist
-for t in "${targets[@]}"; do cp "target/$t/release/worker-host" "target/dist/worker-host-$t"; done
+for t in "${targets[@]}"; do cp "target/$t/release/agent-host" "target/dist/agent-host-$t"; done
 chmod +x target/dist/*
-(cd target/dist && sha256sum worker-host-* > SHA256SUMS && cat SHA256SUMS)
+(cd target/dist && sha256sum agent-host-* > SHA256SUMS && cat SHA256SUMS)
 [ -z "$(git status --porcelain)" ] || { echo "release: the build changed the tree:" >&2; git status --short >&2; exit 1; }
 
-notes="Built from $commit by scripts/release: WORKER_HOST_RELEASE=$tag cargo zigbuild --release --locked for each target. Install with scripts/install-host.sh; see the README."
+notes="Built from $commit by scripts/release: AGENT_HOST_RELEASE=$tag cargo zigbuild --release --locked for each target. Install with scripts/install-host.sh; see the README."
 if [ -n "$dry" ]; then
   echo "dry run: would publish $tag at $commit with: gh release create $tag target/dist/* --repo $repo --target $commit --latest"
   exit 0
 fi
 
-gh release create "$tag" target/dist/* --repo "$repo" --target "$commit" --latest --title "worker-host $tag" --notes "$notes"
+gh release create "$tag" target/dist/* --repo "$repo" --target "$commit" --latest --title "agent-host $tag" --notes "$notes"
 
 read -r got_tag got_commit assets < <(gh release view --repo "$repo" --json tagName,targetCommitish,assets --jq '"\(.tagName) \(.targetCommitish) \(.assets | length)"')
 if [ "$got_tag" != "$tag" ] || [ "$got_commit" != "$commit" ] || [ "$assets" != 5 ]; then

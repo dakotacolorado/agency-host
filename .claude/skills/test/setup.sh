@@ -1,5 +1,5 @@
 #!/bin/sh
-# Puts what `cargo` needs to check worker-host under TOOLS_DIR, for a machine
+# Puts what `cargo` needs to check agent-host under TOOLS_DIR, for a machine
 # without it: rustup and a stable toolchain with rustfmt and clippy, and zig as
 # the C compiler and archiver (ring, which rustls needs, has C). Run it again
 # and it skips what is there. Prints the PATH line to use after it, and only

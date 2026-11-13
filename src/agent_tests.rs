@@ -9,7 +9,7 @@ use std::{fs, thread};
 
 /// What every stand-in for Claude Code starts with: it takes its arguments as
 /// the host gives them -- headless over stream-json, a new session by id or
-/// one resumed -- and keeps its own records in the worker's state, where
+/// one resumed -- and keeps its own records in the agent's state, where
 /// Claude Code would keep its transcript. `next` reads a line from stdin
 /// into `$line`, and a message's text into `$text`, echoing the message back
 /// as taken; `said` and `ended` write a reply and a turn's end on stdout.
@@ -117,7 +117,7 @@ while next; do :; done
 "#;
 
 struct Host {
-    workers: Workers,
+    agents: Agents,
     dir: PathBuf,
 }
 
@@ -132,7 +132,7 @@ fn host(name: &str, program: &str) -> Host {
 }
 
 fn host_with(name: &str, program: &str, permissions: Permissions) -> Host {
-    let dir = std::env::temp_dir().join(format!("worker-host-{}-{name}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("agent-host-{}-{name}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     let dir = dir.canonicalize().unwrap();
@@ -140,10 +140,10 @@ fn host_with(name: &str, program: &str, permissions: Permissions) -> Host {
     fs::write(&fake, format!("{PRELUDE}{program}")).unwrap();
     fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
     Host {
-        workers: Workers::new(
+        agents: Agents::new(
             Sessions::new(permissions),
             Claude::new(fake.to_string_lossy(), None),
-            dir.join("workers"),
+            dir.join("agents"),
         ),
         dir,
     }
@@ -151,11 +151,11 @@ fn host_with(name: &str, program: &str, permissions: Permissions) -> Host {
 
 /// The host as it would be on starting again: nothing but the folders to go
 /// on.
-fn workers_at(dir: &Path, program: &str) -> Workers {
-    Workers::new(
+fn agents_at(dir: &Path, program: &str) -> Agents {
+    Agents::new(
         Sessions::new(Permissions::default()),
         Claude::new(program, None),
-        dir.join("workers"),
+        dir.join("agents"),
     )
 }
 
@@ -169,15 +169,15 @@ fn wait_for(what: &str, done: impl Fn() -> bool) {
 
 impl Host {
     fn home(&self, name: &str) -> Home {
-        Home::new(self.dir.join("workers").join(name))
+        Home::new(self.dir.join("agents").join(name))
     }
 
     fn create(&self, id: &str, name: &str) {
-        self.workers.create(id, name).unwrap();
+        self.agents.create(id, name).unwrap();
     }
 
-    fn restarted(&self) -> Workers {
-        workers_at(&self.dir, &self.dir.join("claude").to_string_lossy())
+    fn restarted(&self) -> Agents {
+        agents_at(&self.dir, &self.dir.join("claude").to_string_lossy())
     }
 
     fn fake(&self, name: &str) -> PathBuf {
@@ -222,8 +222,8 @@ impl Host {
     fn state(&self, name: &str, waiting: bool) -> (State, Option<String>) {
         let home = self.home(name);
         let id = home.record().unwrap().id;
-        let live = self.workers.live();
-        self.workers.state(&home, live.contains_key(&id), waiting)
+        let live = self.agents.live();
+        self.agents.state(&home, live.contains_key(&id), waiting)
     }
 }
 
@@ -231,10 +231,10 @@ impl Host {
 type Seen = Vec<(&'static str, String)>;
 
 /// Reads on from `cursor` until `done` holds of everything read since the
-/// worker's first session began, checking that each line follows the one
+/// agent's first session began, checking that each line follows the one
 /// before it.
 fn read_until(
-    workers: &Workers,
+    agents: &Agents,
     home: &Home,
     seen: &mut Seen,
     cursor: &mut Cursor,
@@ -243,7 +243,7 @@ fn read_until(
     let deadline = Instant::now() + Duration::from_secs(10);
     while !done(seen) {
         assert!(Instant::now() < deadline, "gave up; read {seen:?}");
-        if let Some(batch) = workers.read(home, *cursor, 1 << 16) {
+        if let Some(batch) = agents.read(home, *cursor, 1 << 16) {
             take(seen, cursor, batch);
         }
         thread::sleep(Duration::from_millis(50));
@@ -261,12 +261,12 @@ fn take(seen: &mut Seen, cursor: &mut Cursor, batch: Batch) {
 
 /// Reads on from `cursor` until a line says `text`, and hands back every
 /// line read on the way.
-fn lines_until(workers: &Workers, home: &Home, cursor: &mut Cursor, text: &str) -> Vec<Line> {
+fn lines_until(agents: &Agents, home: &Home, cursor: &mut Cursor, text: &str) -> Vec<Line> {
     let mut lines: Vec<Line> = vec![];
     let deadline = Instant::now() + Duration::from_secs(10);
     while !lines.iter().any(|l| l.text == text) {
         assert!(Instant::now() < deadline, "never said {text:?}: {lines:?}");
-        if let Some(batch) = workers.read(home, *cursor, 1 << 16) {
+        if let Some(batch) = agents.read(home, *cursor, 1 << 16) {
             *cursor = batch.next;
             lines.extend(batch.lines);
         }
@@ -288,19 +288,19 @@ fn command(json: &str) -> Command {
 }
 
 #[test]
-fn a_worker_is_spoken_to_while_it_works_and_answered_in_the_same_session() {
+fn an_agent_is_spoken_to_while_it_works_and_answered_in_the_same_session() {
     let host = host("session", FAKE_CLAUDE);
-    let workers = &host.workers;
+    let agents = &host.agents;
     host.create("w1", "ana");
-    workers
+    agents
         .start("w1", "s1", false, Some("fix the build"))
         .unwrap();
-    assert_eq!(workers.live().into_keys().collect::<Vec<_>>(), ["w1"]);
+    assert_eq!(agents.live().into_keys().collect::<Vec<_>>(), ["w1"]);
     let home = host.home("ana");
     let (mut seen, mut cursor) = (vec![], Cursor::default());
 
     // Read while it is still working, before it has said anything final.
-    read_until(workers, &home, &mut seen, &mut cursor, |s| {
+    read_until(agents, &home, &mut seen, &mut cursor, |s| {
         s.contains(&said("step one"))
     });
     assert_eq!(seen, [told("fix the build"), said("step one")]);
@@ -310,8 +310,8 @@ fn a_worker_is_spoken_to_while_it_works_and_answered_in_the_same_session() {
         (State::Working, Some("s1".into()))
     );
 
-    workers.say("w1", "use the release branch", "u1").unwrap();
-    read_until(workers, &home, &mut seen, &mut cursor, |s| {
+    agents.say("w1", "use the release branch", "u1").unwrap();
+    read_until(agents, &home, &mut seen, &mut cursor, |s| {
         s.contains(&said("which branch?"))
     });
     assert!(cursor.waiting, "its turn ended on a question");
@@ -326,31 +326,31 @@ fn a_worker_is_spoken_to_while_it_works_and_answered_in_the_same_session() {
     );
 
     // Answering continues the session: the same process, the same events.
-    workers.say("w1", "main", "u2").unwrap();
-    read_until(workers, &home, &mut seen, &mut cursor, |s| {
+    agents.say("w1", "main", "u2").unwrap();
+    read_until(agents, &home, &mut seen, &mut cursor, |s| {
         s.contains(&said("on main"))
     });
     assert_eq!(seen[4..], [told("main"), said("on main")]);
-    assert_eq!(workers.live().len(), 1);
+    assert_eq!(agents.live().len(), 1);
     assert_eq!(host.begun("ana", 1).len(), 1);
 }
 
 #[test]
-fn create_and_start_commands_run_a_worker_in_its_own_folder_and_session() {
+fn create_and_start_commands_run_an_agent_in_its_own_folder_and_session() {
     let host = host("start", FAKE_CLAUDE);
     let mut deliveries = Deliveries::default();
     for json in [
-        r#"{"id":"c1","kind":"create","workerId":"w1","name":"ana"}"#,
-        r#"{"id":"c2","kind":"start","workerId":"w1","sessionId":"s1","resume":false}"#,
+        r#"{"id":"c1","kind":"create","agentId":"w1","name":"ana"}"#,
+        r#"{"id":"c2","kind":"start","agentId":"w1","sessionId":"s1","resume":false}"#,
     ] {
-        let report = commands::take(&command(json), &host.workers, &mut deliveries).unwrap();
+        let report = commands::take(&command(json), &host.agents, &mut deliveries).unwrap();
         assert!(report.ok, "{report:?}");
     }
     assert_eq!(
-        host.workers.live(),
+        host.agents.live(),
         [("w1".to_string(), "s1".to_string())].into()
     );
-    let folder = host.dir.join("workers/ana");
+    let folder = host.dir.join("agents/ana");
     let claude = claude::uuid("s1");
     assert_eq!(
         host.fake_file("ana", &claude, "cwd"),
@@ -359,7 +359,7 @@ fn create_and_start_commands_run_a_worker_in_its_own_folder_and_session() {
     assert_eq!(host.begun("ana", 1), [format!("new {claude}")]);
     let home = host.home("ana");
     let (mut seen, mut cursor) = (vec![], Cursor::default());
-    read_until(&host.workers, &home, &mut seen, &mut cursor, |s| {
+    read_until(&host.agents, &home, &mut seen, &mut cursor, |s| {
         s.contains(&said("step one"))
     });
     assert_eq!(
@@ -368,7 +368,7 @@ fn create_and_start_commands_run_a_worker_in_its_own_folder_and_session() {
         "started with nothing to do but wait"
     );
     let rules = fs::read_to_string(home.claude().join("CLAUDE.md")).unwrap();
-    assert!(rules.contains("You are worker `ana`"), "{rules}");
+    assert!(rules.contains("You are agent `ana`"), "{rules}");
 }
 
 /// Records what it was started with: its environment, and the context's
@@ -386,7 +386,7 @@ fn a_start_writes_its_context_before_claude_code_starts_and_sets_its_variables()
     let mut deliveries = Deliveries::default();
     let start = |session: &str, version: u64, skill: &str| {
         format!(
-            r#"{{"id":"c-{session}","kind":"start","workerId":"w1","sessionId":"{session}","resume":false,
+            r#"{{"id":"c-{session}","kind":"start","agentId":"w1","sessionId":"{session}","resume":false,
             "context":{{"key":"global","version":{version},"files":[
               {{"path":"CLAUDE.md","content":"Give feedback before you finish.","executable":false}},
               {{"path":"skills/tracker/SKILL.md","content":"{skill}","executable":false}}]}},
@@ -394,11 +394,11 @@ fn a_start_writes_its_context_before_claude_code_starts_and_sets_its_variables()
         )
     };
     let take = |json: &str, deliveries: &mut Deliveries| {
-        let report = commands::take(&command(json), &host.workers, deliveries).unwrap();
+        let report = commands::take(&command(json), &host.agents, deliveries).unwrap();
         assert!(report.ok, "{report:?}");
     };
     take(
-        r#"{"id":"c1","kind":"create","workerId":"w1","name":"ana"}"#,
+        r#"{"id":"c1","kind":"create","agentId":"w1","name":"ana"}"#,
         &mut deliveries,
     );
     take(&start("s1", 1, "Use wt."), &mut deliveries);
@@ -411,11 +411,11 @@ fn a_start_writes_its_context_before_claude_code_starts_and_sets_its_variables()
     );
     let rules = fs::read_to_string(host.home("ana").claude().join("CLAUDE.md")).unwrap();
     assert!(
-        rules.starts_with("You are worker `ana`"),
+        rules.starts_with("You are agent `ana`"),
         "the host's rules come first: {rules}"
     );
 
-    host.workers.stop("w1").unwrap();
+    host.agents.stop("w1").unwrap();
     take(&start("s2", 2, "Use wt, then docs."), &mut deliveries);
     assert_eq!(
         host.fake_file("ana", &claude::uuid("s2"), "skill"),
@@ -428,17 +428,17 @@ fn a_start_writes_its_documents_after_its_context_and_their_rules_after_its_own(
     let host = host("documents", CONTEXT_CLAUDE);
     let mut deliveries = Deliveries::default();
     let take = |json: &str, deliveries: &mut Deliveries| {
-        let report = commands::take(&command(json), &host.workers, deliveries).unwrap();
+        let report = commands::take(&command(json), &host.agents, deliveries).unwrap();
         assert!(report.ok, "{report:?}");
     };
     take(
-        r#"{"id":"c1","kind":"create","workerId":"w1","name":"ana"}"#,
+        r#"{"id":"c1","kind":"create","agentId":"w1","name":"ana"}"#,
         &mut deliveries,
     );
     take(
-        r#"{"id":"c2","kind":"start","workerId":"w1","sessionId":"s1","resume":false,
+        r#"{"id":"c2","kind":"start","agentId":"w1","sessionId":"s1","resume":false,
         "context":{"key":"global","version":4,"files":[
-          {"path":"CLAUDE.md","content":"Shared by every worker.","executable":false},
+          {"path":"CLAUDE.md","content":"Shared by every agent.","executable":false},
           {"path":"skills/tracker/SKILL.md","content":"Use wt.","executable":false}]},
         "documents":[{"key":"approval","version":2,"files":[
           {"path":"CLAUDE.md","content":"Approve or reject the PR.","executable":false},
@@ -452,7 +452,7 @@ fn a_start_writes_its_documents_after_its_context_and_their_rules_after_its_own(
     let state = host.home("ana").claude();
     let rules = fs::read_to_string(state.join("CLAUDE.md")).unwrap();
     assert!(
-        rules.contains("Shared by every worker.\nApprove or reject the PR."),
+        rules.contains("Shared by every agent.\nApprove or reject the PR."),
         "{rules}"
     );
     assert_eq!(
@@ -485,15 +485,15 @@ fn a_start_gives_its_session_tokens_from_a_file_only_the_host_can_read_and_never
     let host = host("secrets", SECRET_CLAUDE);
     let mut deliveries = Deliveries::default();
     let take = |json: &str, deliveries: &mut Deliveries| {
-        let report = commands::take(&command(json), &host.workers, deliveries).unwrap();
+        let report = commands::take(&command(json), &host.agents, deliveries).unwrap();
         assert!(report.ok, "{report:?}");
     };
     take(
-        r#"{"id":"c1","kind":"create","workerId":"w1","name":"ana"}"#,
+        r#"{"id":"c1","kind":"create","agentId":"w1","name":"ana"}"#,
         &mut deliveries,
     );
     take(
-        r#"{"id":"c2","kind":"start","workerId":"w1","sessionId":"s1","resume":false,
+        r#"{"id":"c2","kind":"start","agentId":"w1","sessionId":"s1","resume":false,
         "env":{"WT_URL":"https://wt.example"},"credentials":["work-tracker"],
         "secrets":{"WT_TOKEN":"it's $ecret `x`"}}"#,
         &mut deliveries,
@@ -523,9 +523,9 @@ fn a_start_gives_its_session_tokens_from_a_file_only_the_host_can_read_and_never
         "kept for a session resumed after the host restarts"
     );
 
-    host.workers.stop("w1").unwrap();
+    host.agents.stop("w1").unwrap();
     take(
-        r#"{"id":"c3","kind":"start","workerId":"w1","sessionId":"s2","resume":true}"#,
+        r#"{"id":"c3","kind":"start","agentId":"w1","sessionId":"s2","resume":true}"#,
         &mut deliveries,
     );
     assert!(!file.exists(), "a start without tokens leaves none behind");
@@ -539,7 +539,7 @@ fn a_permission_asked_for_is_answered_by_the_hosts_rule() {
     };
     let host = host_with("asking", ASKING_CLAUDE, permissions);
     host.create("w1", "ana");
-    host.workers.start("w1", "s1", false, None).unwrap();
+    host.agents.start("w1", "s1", false, None).unwrap();
     let s1 = claude::uuid("s1");
     let answer = |r: &str| -> serde_json::Value {
         serde_json::from_str(&host.fake_file("ana", &s1, r)).unwrap()
@@ -555,16 +555,16 @@ fn a_permission_asked_for_is_answered_by_the_hosts_rule() {
     assert_eq!(denied["response"]["response"]["behavior"], "deny");
     let home = host.home("ana");
     let (mut seen, mut cursor) = (vec![], Cursor::default());
-    read_until(&host.workers, &home, &mut seen, &mut cursor, |s| {
+    read_until(&host.agents, &home, &mut seen, &mut cursor, |s| {
         s.contains(&said("asked"))
     });
     assert!(cursor.waiting);
 }
 
 #[test]
-fn a_worker_reports_idle_working_waiting_interrupted_and_idle_again() {
+fn an_agent_reports_idle_working_waiting_interrupted_and_idle_again() {
     let host = host("states", CHAT_CLAUDE);
-    let workers = &host.workers;
+    let agents = &host.agents;
     host.create("w1", "ana");
     assert_eq!(
         host.state("ana", false),
@@ -572,14 +572,14 @@ fn a_worker_reports_idle_working_waiting_interrupted_and_idle_again() {
         "a home, no session"
     );
 
-    workers.start("w1", "s1", false, Some("hello")).unwrap();
+    agents.start("w1", "s1", false, Some("hello")).unwrap();
     assert_eq!(
         host.state("ana", false),
         (State::Working, Some("s1".into()))
     );
     let home = host.home("ana");
     let (mut seen, mut cursor) = (vec![], Cursor::default());
-    read_until(workers, &home, &mut seen, &mut cursor, |s| {
+    read_until(agents, &home, &mut seen, &mut cursor, |s| {
         s.contains(&said("on hello"))
     });
     assert_eq!(
@@ -602,13 +602,10 @@ fn a_worker_reports_idle_working_waiting_interrupted_and_idle_again() {
     assert!(restarted.live().is_empty());
 
     // Stopped, it is idle, and a start of the same session is not run again.
-    workers.stop("w1").unwrap();
+    agents.stop("w1").unwrap();
     assert_eq!(host.state("ana", false), (State::Idle, None));
-    workers.start("w1", "s1", false, Some("hello")).unwrap();
-    assert!(
-        workers.live().is_empty(),
-        "started a session that had ended"
-    );
+    agents.start("w1", "s1", false, Some("hello")).unwrap();
+    assert!(agents.live().is_empty(), "started a session that had ended");
 }
 
 #[test]
@@ -616,14 +613,12 @@ fn a_host_that_restarts_resumes_each_live_session_and_does_not_start_it_again() 
     let host = host("again", CHAT_CLAUDE);
     host.create("w1", "ana");
     host.create("w2", "bo");
-    host.workers
-        .start("w1", "s1", false, Some("hello"))
-        .unwrap();
-    host.workers.start("w2", "s2", false, Some("hi")).unwrap();
+    host.agents.start("w1", "s1", false, Some("hello")).unwrap();
+    host.agents.start("w2", "s2", false, Some("hi")).unwrap();
     let home = host.home("ana");
     let mut cursor = Cursor::default();
-    lines_until(&host.workers, &home, &mut cursor, "on hello");
-    host.workers.stop("w2").unwrap();
+    lines_until(&host.agents, &home, &mut cursor, "on hello");
+    host.agents.stop("w2").unwrap();
 
     // The host goes, and its sessions with it.
     let claude = claude::uuid("s1");
@@ -672,9 +667,7 @@ fn a_host_that_restarts_resumes_each_live_session_and_does_not_start_it_again() 
 fn a_session_cut_off_before_claude_code_wrote_anything_is_begun_again() {
     let host = host("cut-off", STUCK_CLAUDE);
     host.create("w1", "ana");
-    host.workers
-        .start("w1", "s1", false, Some("hello"))
-        .unwrap();
+    host.agents.start("w1", "s1", false, Some("hello")).unwrap();
     let claude = claude::uuid("s1");
     host.kill("ana", &claude);
     let restarted = host.restarted();
@@ -700,17 +693,17 @@ fn the_line_of_a_commands_text_names_the_command_and_one_the_host_made_names_non
     let start = "00000000-0000-4000-8000-00000000000a";
     let report = commands::take(
         &command(&format!(
-            r#"{{"id":"{start}","kind":"start","workerId":"w1","sessionId":"s1","text":"hello"}}"#
+            r#"{{"id":"{start}","kind":"start","agentId":"w1","sessionId":"s1","text":"hello"}}"#
         )),
-        &host.workers,
+        &host.agents,
         &mut deliveries,
     )
     .unwrap();
     assert!(report.ok, "{report:?}");
     // Cut off before it took its first message, which it is told again.
     host.kill("ana", &claude::uuid("s1"));
-    let workers = host.restarted();
-    workers.reconcile();
+    let agents = host.restarted();
+    agents.reconcile();
     let home = host.home("ana");
     let mut cursor = Cursor::default();
     let named = |lines: Vec<Line>| -> Vec<(String, Option<String>)> {
@@ -721,24 +714,24 @@ fn the_line_of_a_commands_text_names_the_command_and_one_the_host_made_names_non
             .collect()
     };
     assert_eq!(
-        named(lines_until(&workers, &home, &mut cursor, "on hello")),
+        named(lines_until(&agents, &home, &mut cursor, "on hello")),
         [("hello".into(), Some(start.into()))]
     );
 
     let interrupt = "00000000-0000-4000-8000-00000000000b";
-    workers
+    agents
         .interrupt("w1", interrupt, Some("stop that"))
         .unwrap();
     assert_eq!(
-        named(lines_until(&workers, &home, &mut cursor, "on stop that")),
+        named(lines_until(&agents, &home, &mut cursor, "on stop that")),
         [("stop that".into(), Some(interrupt.into()))]
     );
 
-    workers.stop("w1").unwrap();
-    workers.start("w1", "s2", true, None).unwrap();
+    agents.stop("w1").unwrap();
+    agents.start("w1", "s2", true, None).unwrap();
     assert_eq!(
         named(lines_until(
-            &workers,
+            &agents,
             &home,
             &mut cursor,
             &format!("on {CARRY_ON}")
@@ -747,7 +740,7 @@ fn the_line_of_a_commands_text_names_the_command_and_one_the_host_made_names_non
     );
 }
 
-/// A worker whose session an older release began, as it left it:
+/// An agent whose session an older release began, as it left it:
 /// one session, and Claude Code's own transcript of it with one turn.
 fn left_by_an_older_release(host: &Host) -> (Home, String, u64) {
     host.create("w1", "ana");
@@ -827,16 +820,16 @@ fn a_session_an_older_release_left_is_resumed_headless_and_read_on_with_no_line_
 #[test]
 fn a_session_carried_on_writes_on_in_the_same_conversation_under_its_own_id() {
     let host = host("resume", CHAT_CLAUDE);
-    let workers = &host.workers;
+    let agents = &host.agents;
     host.create("w1", "ana");
     let home = host.home("ana");
-    workers.start("w1", "s1", false, Some("one")).unwrap();
+    agents.start("w1", "s1", false, Some("one")).unwrap();
     let mut cursor = Cursor::default();
-    lines_until(workers, &home, &mut cursor, "on one");
-    workers.stop("w1").unwrap();
+    lines_until(agents, &home, &mut cursor, "on one");
+    agents.stop("w1").unwrap();
 
-    workers.start("w1", "s2", true, Some("two")).unwrap();
-    let lines = lines_until(workers, &home, &mut cursor, "on two");
+    agents.start("w1", "s2", true, Some("two")).unwrap();
+    let lines = lines_until(agents, &home, &mut cursor, "on two");
     assert_eq!(
         lines
             .iter()
@@ -853,9 +846,9 @@ fn a_session_carried_on_writes_on_in_the_same_conversation_under_its_own_id() {
     );
 
     // A new conversation is a new Claude Code session, numbered on all the same.
-    workers.stop("w1").unwrap();
-    workers.start("w1", "s3", false, Some("three")).unwrap();
-    let lines = lines_until(workers, &home, &mut cursor, "on three");
+    agents.stop("w1").unwrap();
+    agents.start("w1", "s3", false, Some("three")).unwrap();
+    let lines = lines_until(agents, &home, &mut cursor, "on three");
     assert_eq!(
         lines
             .iter()
@@ -865,7 +858,7 @@ fn a_session_carried_on_writes_on_in_the_same_conversation_under_its_own_id() {
     );
 
     // A host that restarts reads it all again, and says the same.
-    let again = workers.read(&home, Cursor::default(), 1 << 16).unwrap();
+    let again = agents.read(&home, Cursor::default(), 1 << 16).unwrap();
     assert_eq!(
         again
             .lines
@@ -888,13 +881,13 @@ fn a_session_carried_on_writes_on_in_the_same_conversation_under_its_own_id() {
 fn a_resume_with_nothing_said_is_told_to_carry_on() {
     let host = host("carry-on", CHAT_CLAUDE);
     host.create("w1", "ana");
-    host.workers.start("w1", "s1", false, Some("one")).unwrap();
+    host.agents.start("w1", "s1", false, Some("one")).unwrap();
     host.fake_file("ana", &claude::uuid("s1"), "cwd");
-    host.workers.stop("w1").unwrap();
-    host.workers.start("w1", "s2", true, None).unwrap();
+    host.agents.stop("w1").unwrap();
+    host.agents.start("w1", "s2", true, None).unwrap();
     let home = host.home("ana");
     let (mut seen, mut cursor) = (vec![], Cursor::default());
-    read_until(&host.workers, &home, &mut seen, &mut cursor, |s| {
+    read_until(&host.agents, &home, &mut seen, &mut cursor, |s| {
         s.contains(&told(CARRY_ON))
     });
 }
@@ -902,20 +895,20 @@ fn a_resume_with_nothing_said_is_told_to_carry_on() {
 #[test]
 fn an_interrupt_stops_the_turn_and_the_session_goes_on() {
     let host = host("interrupt", BUSY_CLAUDE);
-    let workers = &host.workers;
+    let agents = &host.agents;
     host.create("w1", "ana");
-    workers.start("w1", "s1", false, None).unwrap();
+    agents.start("w1", "s1", false, None).unwrap();
     let home = host.home("ana");
     let (mut seen, mut cursor) = (vec![], Cursor::default());
-    read_until(workers, &home, &mut seen, &mut cursor, |s| {
+    read_until(agents, &home, &mut seen, &mut cursor, |s| {
         s.contains(&said("working"))
     });
     assert!(!cursor.waiting);
 
-    workers
+    agents
         .interrupt("w1", "c1", Some("try the other way"))
         .unwrap();
-    read_until(workers, &home, &mut seen, &mut cursor, |s| {
+    read_until(agents, &home, &mut seen, &mut cursor, |s| {
         s.contains(&said("on try the other way"))
     });
     assert_eq!(
@@ -929,65 +922,61 @@ fn an_interrupt_stops_the_turn_and_the_session_goes_on() {
         ]
     );
     assert!(cursor.waiting);
-    assert_eq!(
-        workers.live().len(),
-        1,
-        "the session outlives the interrupt"
-    );
+    assert_eq!(agents.live().len(), 1, "the session outlives the interrupt");
 }
 
 /// Settles `deliveries` until nothing is held, and says how each ended.
-fn settle_all(workers: &Workers, deliveries: &mut Deliveries) -> Vec<(String, Result<(), String>)> {
+fn settle_all(agents: &Agents, deliveries: &mut Deliveries) -> Vec<(String, Result<(), String>)> {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut settled = vec![];
     while !deliveries.is_empty() {
         assert!(Instant::now() < deadline, "never settled");
-        settled.extend(deliveries.settle(workers));
+        settled.extend(deliveries.settle(agents));
         thread::sleep(Duration::from_millis(50));
     }
     settled
 }
 
 #[test]
-fn a_message_taken_with_its_workers_start_is_written_at_once_and_taken_once_claude_code_takes_it() {
+fn a_message_taken_with_its_agents_start_is_written_at_once_and_taken_once_claude_code_takes_it() {
     let host = host("slow", SLOW_CLAUDE);
-    let workers = &host.workers;
+    let agents = &host.agents;
     host.create("w1", "ana");
     let mut deliveries = Deliveries::default();
     let mut taken = commands::Taken::default();
     // Two commands pushed together, taken one after the other.
-    let start = command(r#"{"id":"c1","kind":"start","workerId":"w1","sessionId":"s1"}"#);
-    let message = command(r#"{"id":"c2","kind":"message","workerId":"w1","text":"hello"}"#);
-    let started = taken.take(&start, workers, &mut deliveries).unwrap();
+    let start = command(r#"{"id":"c1","kind":"start","agentId":"w1","sessionId":"s1"}"#);
+    let message = command(r#"{"id":"c2","kind":"message","agentId":"w1","text":"hello"}"#);
+    let started = taken.take(&start, agents, &mut deliveries).unwrap();
     assert!(started.ok, "{started:?}");
     let written = CommandReport::written("c2".into());
     assert_eq!(
-        taken.take(&message, workers, &mut deliveries),
+        taken.take(&message, agents, &mut deliveries),
         Some(written.clone()),
         "reported written before Claude Code has taken it"
     );
     assert_eq!(
-        taken.take(&message, workers, &mut deliveries),
+        taken.take(&message, agents, &mut deliveries),
         Some(written),
         "sent again by the service, it is answered as written and not written twice"
     );
     assert_eq!(
-        commands::take(&message, workers, &mut deliveries),
+        commands::take(&message, agents, &mut deliveries),
         None,
         "nor while it is held"
     );
 
-    let settled = settle_all(workers, &mut deliveries);
+    let settled = settle_all(agents, &mut deliveries);
     assert_eq!(settled, [("c2".to_string(), Ok(()))]);
     taken.remember(&CommandReport::new("c2".into(), None));
     assert_eq!(
-        taken.take(&message, workers, &mut deliveries),
+        taken.take(&message, agents, &mut deliveries),
         Some(CommandReport::new("c2".into(), None)),
         "sent again once taken, it is answered as taken"
     );
     let home = host.home("ana");
     let (mut seen, mut cursor) = (vec![], Cursor::default());
-    read_until(workers, &home, &mut seen, &mut cursor, |s| {
+    read_until(agents, &home, &mut seen, &mut cursor, |s| {
         s.contains(&said("on hello"))
     });
     assert_eq!(seen.iter().filter(|e| **e == told("hello")).count(), 1);
@@ -1007,32 +996,32 @@ while next; do :; done
 #[test]
 fn a_message_is_taken_once_claude_code_echoes_it_however_late() {
     let host = host("delivered", LATE_CLAUDE);
-    let workers = &host.workers;
+    let agents = &host.agents;
     host.create("w1", "ana");
-    workers
+    agents
         .start("w1", "s1", false, Some("fix the build"))
         .unwrap();
     let home = host.home("ana");
     let (mut seen, mut cursor) = (vec![], Cursor::default());
-    read_until(workers, &home, &mut seen, &mut cursor, |s| {
+    read_until(agents, &home, &mut seen, &mut cursor, |s| {
         s.contains(&said("busy"))
     });
 
     // Written at once, but taken only at its next step, seconds from now.
     let mut deliveries = Deliveries::default();
     let id = "00000000-0000-4000-8000-0000000000c1";
-    assert_eq!(deliveries.hold(workers, id, "w1", "use main"), Ok(()));
+    assert_eq!(deliveries.hold(agents, id, "w1", "use main"), Ok(()));
     let held = Instant::now();
     while held.elapsed() < Duration::from_millis(1200) {
-        assert_eq!(deliveries.settle(workers), [], "not taken yet");
+        assert_eq!(deliveries.settle(agents), [], "not taken yet");
         thread::sleep(Duration::from_millis(100));
     }
     assert_eq!(
-        settle_all(workers, &mut deliveries),
+        settle_all(agents, &mut deliveries),
         [(id.to_string(), Ok(()))]
     );
 
-    let lines = lines_until(workers, &home, &mut cursor, "on use main");
+    let lines = lines_until(agents, &home, &mut cursor, "on use main");
     let told: Vec<_> = lines
         .iter()
         .filter(|l| l.from == "instruction")
@@ -1045,38 +1034,38 @@ fn a_message_is_taken_once_claude_code_echoes_it_however_late() {
 fn a_message_never_taken_fails_only_when_its_session_ends() {
     let away = host("away", AWAY_CLAUDE);
     away.create("w1", "ana");
-    away.workers.start("w1", "s1", false, None).unwrap();
+    away.agents.start("w1", "s1", false, None).unwrap();
     let home = away.home("ana");
     let (mut seen, mut cursor) = (vec![], Cursor::default());
-    read_until(&away.workers, &home, &mut seen, &mut cursor, |s| {
+    read_until(&away.agents, &home, &mut seen, &mut cursor, |s| {
         s.contains(&said("busy"))
     });
     let mut deliveries = Deliveries::default();
-    assert_eq!(deliveries.hold(&away.workers, "c1", "w1", "hello"), Ok(()));
+    assert_eq!(deliveries.hold(&away.agents, "c1", "w1", "hello"), Ok(()));
     thread::sleep(Duration::from_millis(500));
-    assert_eq!(deliveries.settle(&away.workers), [], "held, however long");
+    assert_eq!(deliveries.settle(&away.agents), [], "held, however long");
     // Begun again: the new session never had it.
-    away.workers.stop("w1").unwrap();
-    away.workers.start("w1", "s2", true, None).unwrap();
-    let [(_, Err(why))] = &settle_all(&away.workers, &mut deliveries)[..] else {
+    away.agents.stop("w1").unwrap();
+    away.agents.start("w1", "s2", true, None).unwrap();
+    let [(_, Err(why))] = &settle_all(&away.agents, &mut deliveries)[..] else {
         panic!("expected one failure")
     };
     assert!(why.contains("ended before it took the message"), "{why}");
 
     let leaving = host("leaving", LEAVING_CLAUDE);
     leaving.create("w1", "ana");
-    leaving.workers.start("w1", "s1", false, None).unwrap();
+    leaving.agents.start("w1", "s1", false, None).unwrap();
     let home = leaving.home("ana");
     let (mut seen, mut cursor) = (vec![], Cursor::default());
-    read_until(&leaving.workers, &home, &mut seen, &mut cursor, |s| {
+    read_until(&leaving.agents, &home, &mut seen, &mut cursor, |s| {
         s.contains(&said("bye"))
     });
     let mut deliveries = Deliveries::default();
     assert_eq!(
-        deliveries.hold(&leaving.workers, "c1", "w1", "hello"),
+        deliveries.hold(&leaving.agents, "c1", "w1", "hello"),
         Ok(())
     );
-    let [(_, Err(why))] = &settle_all(&leaving.workers, &mut deliveries)[..] else {
+    let [(_, Err(why))] = &settle_all(&leaving.agents, &mut deliveries)[..] else {
         panic!("expected one failure")
     };
     assert!(why.contains("ended before it took the message"), "{why}");
@@ -1092,12 +1081,12 @@ next
 fn a_message_taken_just_before_its_session_ends_is_taken() {
     let host = host("taken-then-gone", TAKE_AND_GO_CLAUDE);
     host.create("w1", "ana");
-    host.workers.start("w1", "s1", false, None).unwrap();
+    host.agents.start("w1", "s1", false, None).unwrap();
     let mut deliveries = Deliveries::default();
-    assert_eq!(deliveries.hold(&host.workers, "c1", "w1", "hello"), Ok(()));
-    wait_for("its session ends", || host.workers.live().is_empty());
+    assert_eq!(deliveries.hold(&host.agents, "c1", "w1", "hello"), Ok(()));
+    wait_for("its session ends", || host.agents.live().is_empty());
     assert_eq!(
-        settle_all(&host.workers, &mut deliveries),
+        settle_all(&host.agents, &mut deliveries),
         [("c1".to_string(), Ok(()))]
     );
 }
@@ -1106,39 +1095,37 @@ fn a_message_taken_just_before_its_session_ends_is_taken() {
 fn a_start_that_cannot_run_says_why_and_can_be_tried_again() {
     let host = host("missing", FAKE_CLAUDE);
     host.create("w1", "ana");
-    let workers = workers_at(&host.dir, "/nonexistent/claude");
-    let err = workers.start("w1", "s1", false, None).unwrap_err();
+    let agents = agents_at(&host.dir, "/nonexistent/claude");
+    let err = agents.start("w1", "s1", false, None).unwrap_err();
     assert!(
         err.contains("/nonexistent/claude is not installed"),
         "{err}"
     );
-    assert!(workers.live().is_empty());
+    assert!(agents.live().is_empty());
     assert_eq!(host.home("ana").sessions(), []);
-    host.workers.start("w1", "s1", false, None).unwrap();
-    assert_eq!(host.workers.live().len(), 1, "tried again, it runs");
+    host.agents.start("w1", "s1", false, None).unwrap();
+    assert_eq!(host.agents.live().len(), 1, "tried again, it runs");
 }
 
 #[test]
-fn speaking_to_a_worker_with_no_session_says_so() {
+fn speaking_to_an_agent_with_no_session_says_so() {
     let host = host("absent", FAKE_CLAUDE);
     host.create("w1", "ana");
     for err in [
-        host.workers.interrupt("w1", "c1", None).unwrap_err(),
-        host.workers.say("w1", "hello", "u1").unwrap_err(),
+        host.agents.interrupt("w1", "c1", None).unwrap_err(),
+        host.agents.say("w1", "hello", "u1").unwrap_err(),
     ] {
-        assert!(err.contains("worker w1 has no live session"), "{err}");
+        assert!(err.contains("agent w1 has no live session"), "{err}");
     }
-    let err = host.workers.start("w9", "s1", false, None).unwrap_err();
-    assert!(err.contains("no worker w9 on this host"), "{err}");
+    let err = host.agents.start("w9", "s1", false, None).unwrap_err();
+    assert!(err.contains("no agent w9 on this host"), "{err}");
 }
 
 #[test]
 fn a_session_keeps_what_it_says_on_stdout_and_stderr() {
     let host = host("logs", CHAT_CLAUDE);
     host.create("w1", "ana");
-    host.workers
-        .start("w1", "s1", false, Some("hello"))
-        .unwrap();
+    host.agents.start("w1", "s1", false, Some("hello")).unwrap();
     let home = host.home("ana");
     let (events, errors) = (home.events("s1"), home.errors("s1"));
     wait_for("nothing on stderr kept", || {
@@ -1163,7 +1150,7 @@ fn a_session_keeps_what_it_says_on_stdout_and_stderr() {
     );
 }
 
-/// A headless session begun for worker `ana`, made if need be, and where
+/// A headless session begun for agent `ana`, made if need be, and where
 /// its events are kept.
 fn events(host: &Host, session: &str) -> PathBuf {
     let home = host.home("ana");
@@ -1217,10 +1204,7 @@ fn a_transcript_carried_on_headless_is_read_up_to_where_it_was_then_its_events()
         &home.events("s1"),
         b"{\"type\":\"user\",\"message\":{\"content\":\"twice\"},\"isReplay\":true}\n",
     );
-    let batch = host
-        .workers
-        .read(&home, Cursor::default(), 1 << 16)
-        .unwrap();
+    let batch = host.agents.read(&home, Cursor::default(), 1 << 16).unwrap();
     assert_eq!(
         batch
             .lines
@@ -1251,10 +1235,10 @@ fn a_read_stops_at_its_budget_and_the_next_picks_up_there() {
     let home = host.home("ana");
 
     let (mut seen, mut cursor) = (vec![], Cursor::default());
-    let first = host.workers.read(&home, cursor, one).unwrap();
+    let first = host.agents.read(&home, cursor, one).unwrap();
     take(&mut seen, &mut cursor, first);
     assert_eq!(seen, [told("one")]);
-    let rest = host.workers.read(&home, cursor, 1 << 16).unwrap();
+    let rest = host.agents.read(&home, cursor, 1 << 16).unwrap();
     take(&mut seen, &mut cursor, rest);
     assert_eq!(seen[1..], [told("two"), told("three")]);
     assert_eq!(
@@ -1262,7 +1246,7 @@ fn a_read_stops_at_its_budget_and_the_next_picks_up_there() {
         body.rfind('\n').unwrap() + 1,
         "a line still being written is left for later"
     );
-    assert!(host.workers.read(&home, cursor, 1 << 16).is_none());
+    assert!(host.agents.read(&home, cursor, 1 << 16).is_none());
 }
 
 #[test]
@@ -1282,7 +1266,7 @@ fn a_long_reply_and_the_message_it_answers_are_read_whole() {
     }
     let home = host.home("ana");
     let (mut seen, mut cursor) = (vec![], Cursor::default());
-    while let Some(batch) = host.workers.read(&home, cursor, 32 << 10) {
+    while let Some(batch) = host.agents.read(&home, cursor, 32 << 10) {
         take(&mut seen, &mut cursor, batch);
     }
     assert_eq!(seen[..2], [told(&message), said(&reply)]);
@@ -1305,7 +1289,7 @@ fn one_line_of_many_long_texts_still_fits_one_report() {
         {"type":"text","text":block},{"type":"text","text":block},{"type":"text","text":block}]}});
     append(&path, format!("{line}\n").as_bytes());
     let batch = host
-        .workers
+        .agents
         .read(&host.home("ana"), Cursor::default(), 32 << 10)
         .unwrap();
     let size: usize = batch
@@ -1335,7 +1319,7 @@ fn a_line_an_ended_session_left_torn_is_passed_over() {
         b"{\"type\":\"user\",\"message\":{\"content\":\"two\"}}\n",
     );
     let batch = host
-        .workers
+        .agents
         .read(&host.home("ana"), Cursor::default(), 1 << 16)
         .unwrap();
     assert_eq!(
@@ -1350,7 +1334,7 @@ fn a_line_an_ended_session_left_torn_is_passed_over() {
 }
 
 #[test]
-fn a_worker_whose_turn_ended_waits_until_it_is_told_something() {
+fn an_agent_whose_turn_ended_waits_until_it_is_told_something() {
     let host = host("turns", FAKE_CLAUDE);
     let path = events(&host, "s1");
     let home = host.home("ana");
@@ -1359,12 +1343,7 @@ fn a_worker_whose_turn_ended_waits_until_it_is_told_something() {
         for line in lines {
             append(&path, format!("{line}\n").as_bytes());
         }
-        cursor.set(
-            host.workers
-                .read(&home, cursor.get(), 1 << 16)
-                .unwrap()
-                .next,
-        );
+        cursor.set(host.agents.read(&home, cursor.get(), 1 << 16).unwrap().next);
         cursor.get().waiting
     };
     assert!(
@@ -1385,7 +1364,7 @@ fn a_worker_whose_turn_ended_waits_until_it_is_told_something() {
         "its turn ended and nothing has been said since"
     );
     assert!(
-        host.workers.read(&home, cursor.get(), 1 << 16).is_none(),
+        host.agents.read(&home, cursor.get(), 1 << 16).is_none(),
         "nothing new: the report keeps what the cursor says"
     );
     assert!(
@@ -1399,7 +1378,7 @@ fn a_worker_whose_turn_ended_waits_until_it_is_told_something() {
 // began by itself, and a background subagent.
 
 #[test]
-fn a_worker_reports_its_background_tasks_and_whether_a_message_began_its_turn() {
+fn an_agent_reports_its_background_tasks_and_whether_a_message_began_its_turn() {
     let host = host("tasks", FAKE_CLAUDE);
     let path = events(&host, "s1");
     let home = host.home("ana");
@@ -1408,15 +1387,11 @@ fn a_worker_reports_its_background_tasks_and_whether_a_message_began_its_turn() 
         for line in lines {
             append(&path, format!("{line}\n").as_bytes());
         }
-        let next = host
-            .workers
-            .read(&home, cursor.get(), 1 << 16)
-            .unwrap()
-            .next;
+        let next = host.agents.read(&home, cursor.get(), 1 << 16).unwrap().next;
         cursor.set(next);
         (next.waiting, next.tasks, next.told)
     };
-    let report = |live| host.workers.report(&home, "w1", live, &cursor.get());
+    let report = |live| host.agents.report(&home, "w1", live, &cursor.get());
 
     assert_eq!(
         read(&[&claude::started("2026-11-05T18:13:01.000Z".into()).to_string()]),
@@ -1526,14 +1501,14 @@ fn a_new_session_starts_with_no_tasks_and_no_turn() {
     ).as_bytes());
     let home = host.home("ana");
     let at = host
-        .workers
+        .agents
         .read(&home, Cursor::default(), 1 << 16)
         .unwrap()
         .next;
     assert_eq!((at.file, at.tasks, at.told), (0, 1, Some(true)));
     let second = events(&host, "s2");
     append(&second, b"{\"type\":\"rate_limit_event\"}\n");
-    let at = host.workers.read(&home, at, 1 << 16).unwrap().next;
+    let at = host.agents.read(&home, at, 1 << 16).unwrap().next;
     assert_eq!((at.file, at.tasks, at.told), (1, 0, None));
 }
 
@@ -1545,9 +1520,7 @@ fn a_session_resumed_after_a_line_left_torn_marks_its_start_on_a_line_of_its_own
     let events = home.events("s1");
     fs::create_dir_all(events.parent().unwrap()).unwrap();
     fs::write(&events, r#"{"type":"assistant","message":{"#).unwrap();
-    host.workers
-        .start("w1", "s1", false, Some("hello"))
-        .unwrap();
+    host.agents.start("w1", "s1", false, Some("hello")).unwrap();
     wait_for("never answered", || {
         fs::read_to_string(&events).is_ok_and(|t| t.contains("on hello"))
     });
@@ -1566,10 +1539,7 @@ fn a_read_carries_the_last_usage_its_lines_said_at_the_time_it_was_said() {
         r#"{"type":"rate_limit_event","timestamp":"2026-11-06T08:28:32.206Z","rate_limit_info":{"unifiedWindows":{"five_hour":{"resetsAt":1793965200,"utilization":0.49}}}}"#, "\n",
         r#"{"type":"rate_limit_event","timestamp":"2026-11-06T08:28:40.000Z","rate_limit_info":{"status":"allowed"}}"#, "\n",
     ).as_bytes());
-    let batch = host
-        .workers
-        .read(&home, Cursor::default(), 1 << 16)
-        .unwrap();
+    let batch = host.agents.read(&home, Cursor::default(), 1 << 16).unwrap();
     assert_eq!(batch.lines, []);
     assert_eq!(
         batch.usage,
@@ -1585,7 +1555,7 @@ fn a_read_carries_the_last_usage_its_lines_said_at_the_time_it_was_said() {
         })
     );
     append(&path, b"{\"type\":\"result\"}\n");
-    let after = host.workers.read(&home, batch.next, 1 << 16).unwrap();
+    let after = host.agents.read(&home, batch.next, 1 << 16).unwrap();
     assert_eq!(after.usage, None, "a reading is read once");
 }
 
@@ -1613,11 +1583,11 @@ fn result_line(since: Tokens, main: Tokens, whole: Tokens) -> String {
     format!("{line}\n")
 }
 
-/// Every line of a worker's sessions read from the start in reads of
+/// Every line of an agent's sessions read from the start in reads of
 /// `budget`, and each session's total as the last read that changed it said.
-fn totals_read(workers: &Workers, home: &Home, budget: usize) -> BTreeMap<String, Tokens> {
+fn totals_read(agents: &Agents, home: &Home, budget: usize) -> BTreeMap<String, Tokens> {
     let (mut cursor, mut totals) = (Cursor::default(), BTreeMap::new());
-    while let Some(batch) = workers.read(home, cursor, budget) {
+    while let Some(batch) = agents.read(home, cursor, budget) {
         totals.extend(batch.tokens);
         cursor = batch.next;
     }
@@ -1649,10 +1619,7 @@ fn a_sessions_tokens_are_its_results_its_subagents_included_and_each_counted_onc
         &path,
         result_line(turn, tokens(72, 18286, 67953, 1825262), turn).as_bytes(),
     );
-    let batch = host
-        .workers
-        .read(&home, Cursor::default(), 1 << 16)
-        .unwrap();
+    let batch = host.agents.read(&home, Cursor::default(), 1 << 16).unwrap();
     assert_eq!(
         batch.tokens,
         [("s1".to_string(), turn)],
@@ -1665,10 +1632,10 @@ fn a_sessions_tokens_are_its_results_its_subagents_included_and_each_counted_onc
         &path,
         result_line(second, tokens(6, 368, 2178, 160523), turn.add(second)).as_bytes(),
     );
-    let after = host.workers.read(&home, batch.next, 1 << 16).unwrap();
+    let after = host.agents.read(&home, batch.next, 1 << 16).unwrap();
     assert_eq!(after.tokens, [("s1".to_string(), turn.add(second))]);
     append(&path, b"{\"type\":\"system\",\"subtype\":\"status\"}\n");
-    let nothing = host.workers.read(&home, after.next, 1 << 16).unwrap();
+    let nothing = host.agents.read(&home, after.next, 1 << 16).unwrap();
     assert_eq!(nothing.tokens, [], "only a session whose total changed");
 }
 
@@ -1703,7 +1670,7 @@ fn a_session_resumed_in_a_new_process_carries_its_total_on_and_one_carried_on_st
         result_line(third, third, first.add(again).add(third)).as_bytes(),
     );
 
-    let totals = totals_read(&host.workers, &home, 1 << 16);
+    let totals = totals_read(&host.agents, &home, 1 << 16);
     assert_eq!(
         totals,
         BTreeMap::from([
@@ -1725,7 +1692,7 @@ fn a_host_that_restarts_and_reads_a_session_again_comes_to_the_same_total() {
         append(&path, A_TURN.as_bytes());
         append(&path, result_line(turn, turn, whole).as_bytes());
     }
-    let before = totals_read(&host.workers, &home, 1 << 16);
+    let before = totals_read(&host.agents, &home, 1 << 16);
     assert_eq!(before, BTreeMap::from([("s1".to_string(), whole)]));
     let restarted = host.restarted();
     assert_eq!(totals_read(&restarted, &home, 1 << 16), before);
@@ -1752,7 +1719,7 @@ fn turns_written_after_lines_that_say_nothing_are_read() {
     append(&path, opening.as_bytes());
 
     let mut cursor = Cursor::default();
-    let nothing = host.workers.read(&home, cursor, 1 << 16).unwrap();
+    let nothing = host.agents.read(&home, cursor, 1 << 16).unwrap();
     assert_eq!(nothing.lines, []);
     assert_eq!(
         nothing.next,
@@ -1780,7 +1747,7 @@ fn turns_written_after_lines_that_say_nothing_are_read() {
         r#"{"type":"assistant","timestamp":"2026-10-27T13:34:55Z","message":{"id":"m2","content":[{"type":"tool_use","name":"Bash","input":{"command":"pwd"}}]}}"#, "\n",
     ).as_bytes());
 
-    let batch = host.workers.read(&home, cursor, 1 << 16).unwrap();
+    let batch = host.agents.read(&home, cursor, 1 << 16).unwrap();
     let read: Vec<_> = batch
         .lines
         .iter()
@@ -1829,12 +1796,12 @@ fn a_create_that_cannot_be_done_says_why() {
     let host = host("uncreated", FAKE_CLAUDE);
     host.create("w2", "bo");
     for (id, name, why) in [
-        ("w3", "../up", "not a worker name"),
-        ("w3", ".retired", "not a worker name"),
-        ("w9", "bo", "already holds worker w2"),
+        ("w3", "../up", "not an agent name"),
+        ("w3", ".retired", "not an agent name"),
+        ("w9", "bo", "already holds agent w2"),
         ("w2", "cy", "is here already, named bo"),
     ] {
-        let err = host.workers.create(id, name).unwrap_err();
+        let err = host.agents.create(id, name).unwrap_err();
         assert!(err.contains(why), "{name}: {err}");
     }
 }
@@ -1849,64 +1816,64 @@ while next; do :; done
 #[test]
 fn a_stop_ends_the_session_and_what_it_started_and_leaves_its_work_where_it_is() {
     let host = host("stop", SPAWNING_CLAUDE);
-    let workers = &host.workers;
+    let agents = &host.agents;
     host.create("w1", "ana");
-    workers.start("w1", "s1", false, None).unwrap();
+    agents.start("w1", "s1", false, None).unwrap();
     let tool = host.fake_file("ana", &claude::uuid("s1"), "tool");
     let work = host.home("ana").dir.join("WORK");
     fs::write(&work, "half-done\n").unwrap();
-    let stop = command(r#"{"id":"c1","kind":"stop","workerId":"w1"}"#);
+    let stop = command(r#"{"id":"c1","kind":"stop","agentId":"w1"}"#);
     let mut deliveries = Deliveries::default();
 
-    let report = commands::take(&stop, workers, &mut deliveries).unwrap();
+    let report = commands::take(&stop, agents, &mut deliveries).unwrap();
     assert!(report.ok, "{report:?}");
-    assert!(workers.live().is_empty(), "no session is left");
+    assert!(agents.live().is_empty(), "no session is left");
     assert!(
         !Path::new(&format!("/proc/{tool}")).exists() || cfg!(not(target_os = "linux")),
         "its tool runs on"
     );
     assert_eq!(host.state("ana", false), (State::Idle, None));
     assert_eq!(fs::read_to_string(&work).unwrap(), "half-done\n");
-    let again = commands::take(&stop, workers, &mut deliveries).unwrap();
+    let again = commands::take(&stop, agents, &mut deliveries).unwrap();
     assert!(again.ok, "stopping one not running is done: {again:?}");
 }
 
 #[test]
-fn a_retired_worker_is_kept_aside_and_its_name_can_be_given_again() {
+fn a_retired_agent_is_kept_aside_and_its_name_can_be_given_again() {
     let host = host("retire", CHAT_CLAUDE);
-    let workers = &host.workers;
+    let agents = &host.agents;
     host.create("w1", "ana");
-    workers.start("w1", "s1", false, Some("hello")).unwrap();
+    agents.start("w1", "s1", false, Some("hello")).unwrap();
     fs::write(host.home("ana").dir.join("WORK"), "kept\n").unwrap();
 
     let mut deliveries = Deliveries::default();
-    let retire = command(r#"{"id":"c1","kind":"retire","workerId":"w1"}"#);
-    let report = commands::take(&retire, workers, &mut deliveries).unwrap();
+    let retire = command(r#"{"id":"c1","kind":"retire","agentId":"w1"}"#);
+    let report = commands::take(&retire, agents, &mut deliveries).unwrap();
     assert!(report.ok, "{report:?}");
-    assert!(workers.live().is_empty(), "its session was stopped");
-    assert!(workers.all().is_empty(), "no longer reported");
-    let aside = host.dir.join("workers/.retired/ana-w1");
+    assert!(agents.live().is_empty(), "its session was stopped");
+    assert!(agents.all().is_empty(), "no longer reported");
+    let aside = host.dir.join("agents/.retired/ana-w1");
     assert_eq!(fs::read_to_string(aside.join("WORK")).unwrap(), "kept\n");
-    let again = commands::take(&retire, workers, &mut deliveries).unwrap();
+    let again = commands::take(&retire, agents, &mut deliveries).unwrap();
     assert!(again.ok, "retiring one retired is done: {again:?}");
-    let err = workers.start("w1", "s2", true, None).unwrap_err();
-    assert!(err.contains("worker w1 is retired"), "{err}");
-    let err = workers.create("w1", "ana").unwrap_err();
+    let err = agents.start("w1", "s2", true, None).unwrap_err();
+    assert!(err.contains("agent w1 is retired"), "{err}");
+    let err = agents.create("w1", "ana").unwrap_err();
     assert!(err.contains("retired here"), "{err}");
 
     host.create("w2", "ana");
     assert!(
         !host.home("ana").dir.join("WORK").exists(),
-        "a new worker, a new start"
+        "a new agent, a new start"
     );
 }
 
 #[test]
-fn a_brief_of_any_length_reaches_the_worker_whole() {
+fn a_brief_of_any_length_reaches_the_agent_whole() {
     let host = host("long", LONG_CLAUDE);
     host.create("w1", "ana");
     let long = "x".repeat(256 << 10) + "\nthe end";
-    host.workers.start("w1", "s1", false, Some(&long)).unwrap();
+    host.agents.start("w1", "s1", false, Some(&long)).unwrap();
     assert_eq!(host.fake_file("ana", &claude::uuid("s1"), "end"), "the end");
 }
 
@@ -1914,7 +1881,7 @@ fn a_brief_of_any_length_reaches_the_worker_whole() {
 fn a_session_has_its_own_state_and_the_users_login() {
     let host = host("env", ENV_CLAUDE);
     host.create("w1", "ana");
-    host.workers.start("w1", "s1", false, None).unwrap();
+    host.agents.start("w1", "s1", false, None).unwrap();
     let state = host.home("ana").claude();
     assert_eq!(
         host.fake_file("ana", &claude::uuid("s1"), "env"),
@@ -1923,18 +1890,18 @@ fn a_session_has_its_own_state_and_the_users_login() {
     );
 }
 
-/// A worker for a test against Claude Code itself, in a folder of the test's
-/// own, with this user's own login, as every worker has.
-fn real(name: &str) -> (Workers, Home, PathBuf) {
-    let dir = std::env::temp_dir().join(format!("worker-host-real-{}-{name}", std::process::id()));
+/// An agent for a test against Claude Code itself, in a folder of the test's
+/// own, with this user's own login, as every agent has.
+fn real(name: &str) -> (Agents, Home, PathBuf) {
+    let dir = std::env::temp_dir().join(format!("agent-host-real-{}-{name}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
-    let workers = real_at(&dir);
-    workers.create(name, name).unwrap();
-    (workers, Home::new(dir.join(name)), dir)
+    let agents = real_at(&dir);
+    agents.create(name, name).unwrap();
+    (agents, Home::new(dir.join(name)), dir)
 }
 
-fn real_at(dir: &Path) -> Workers {
-    Workers::new(
+fn real_at(dir: &Path) -> Agents {
+    Agents::new(
         Sessions::new(Permissions::default()),
         Claude::from_env(|k| std::env::var(k).ok(), dir),
         dir.to_path_buf(),
@@ -1943,7 +1910,7 @@ fn real_at(dir: &Path) -> Workers {
 
 /// Reads on until `done`, giving up after `within`.
 fn read_real(
-    workers: &Workers,
+    agents: &Agents,
     home: &Home,
     seen: &mut Seen,
     cursor: &mut Cursor,
@@ -1955,7 +1922,7 @@ fn read_real(
     while !done(seen, cursor) {
         assert!(Instant::now() < deadline, "gave up; read {seen:#?}");
         each(seen);
-        if let Some(batch) = workers.read(home, *cursor, 1 << 16) {
+        if let Some(batch) = agents.read(home, *cursor, 1 << 16) {
             take(seen, cursor, batch);
         }
         thread::sleep(Duration::from_millis(500));
@@ -1969,7 +1936,7 @@ fn read_real(
 #[test]
 #[ignore]
 fn real_claude() {
-    let (workers, home, dir) = real("real");
+    let (agents, home, dir) = real("real");
     assert_eq!(
         Claude::from_env(|k| std::env::var(k).ok(), Path::new("/nonexistent"))
             .version()
@@ -1977,7 +1944,7 @@ fn real_claude() {
         Some(claude::CHECKED),
         "the Claude Code this host's stream-json is checked against"
     );
-    workers
+    agents
         .start(
             "real",
             "00000000-0000-4000-8000-000000000001",
@@ -1996,7 +1963,7 @@ fn real_claude() {
             .position(|(from, text)| *from == "tool" && text.contains("third"))
     };
     read_real(
-        &workers,
+        &agents,
         &home,
         &mut seen,
         &mut cursor,
@@ -2004,14 +1971,14 @@ fn real_claude() {
         |seen| {
             if !said && seen.iter().any(|(from, _)| *from == "tool") {
                 let held = deliveries.hold(
-                    &workers,
+                    &agents,
                     "00000000-0000-4000-8000-0000000000c1",
                     "real",
                     "Correction: echo third instead of second.",
                 );
                 assert_eq!(held, Ok(()));
                 assert_eq!(
-                    deliveries.settle(&workers),
+                    deliveries.settle(&agents),
                     [],
                     "taken only at its next step"
                 );
@@ -2021,7 +1988,7 @@ fn real_claude() {
         |s, _| ran_third(s).is_some_and(|i| s[i..].iter().any(|(from, _)| *from == "agent")),
     );
     assert_eq!(
-        settle_all(&workers, &mut deliveries),
+        settle_all(&agents, &mut deliveries),
         [("00000000-0000-4000-8000-0000000000c1".to_string(), Ok(()))]
     );
     assert_eq!(
@@ -2032,7 +1999,7 @@ fn real_claude() {
         "a message taken mid-turn is one line"
     );
     read_real(
-        &workers,
+        &agents,
         &home,
         &mut seen,
         &mut cursor,
@@ -2040,9 +2007,9 @@ fn real_claude() {
         |_| {},
         |_, c| c.waiting,
     );
-    workers.stop("real").unwrap();
+    agents.stop("real").unwrap();
 
-    workers
+    agents
         .start(
             "real",
             "00000000-0000-4000-8000-000000000002",
@@ -2052,7 +2019,7 @@ fn real_claude() {
         .unwrap();
     let mark = seen.len();
     read_real(
-        &workers,
+        &agents,
         &home,
         &mut seen,
         &mut cursor,
@@ -2066,7 +2033,7 @@ fn real_claude() {
     );
 
     // The host goes, and comes back.
-    drop(workers);
+    drop(agents);
     let restarted = real_at(&dir);
     assert_eq!(
         restarted.reconcile(),
@@ -2164,8 +2131,8 @@ fn results_said(home: &Home, session: &str) -> (Tokens, Tokens) {
 #[test]
 #[ignore]
 fn real_claude_interrupted() {
-    let (workers, home, _) = real("real-i");
-    workers
+    let (agents, home, _) = real("real-i");
+    agents
         .start(
             "real-i",
             "00000000-0000-4000-8000-000000000003",
@@ -2181,7 +2148,7 @@ fn real_claude_interrupted() {
     let mut interrupted = false;
     let after = told("Never mind. Reply with one word: stopped.");
     read_real(
-        &workers,
+        &agents,
         &home,
         &mut seen,
         &mut cursor,
@@ -2191,7 +2158,7 @@ fn real_claude_interrupted() {
         |seen| {
             if !interrupted && seen.iter().any(|(from, _)| *from == "tool") {
                 thread::sleep(Duration::from_secs(3));
-                workers
+                agents
                     .interrupt(
                         "real-i",
                         "00000000-0000-4000-8000-0000000000c3",
@@ -2208,8 +2175,8 @@ fn real_claude_interrupted() {
         },
     );
     assert!(started.elapsed() < Duration::from_secs(60));
-    let live = workers.live().len();
-    workers.stop("real-i").unwrap();
+    let live = agents.live().len();
+    agents.stop("real-i").unwrap();
     eprintln!("{seen:#?}");
     assert_eq!(live, 1, "the session outlives the interrupt");
     assert!(

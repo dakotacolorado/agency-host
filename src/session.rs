@@ -1,4 +1,4 @@
-//! Workers' sessions, each a headless Claude Code run as a child of this host:
+//! Agents' sessions, each a headless Claude Code run as a child of this host:
 //! what it is told goes in on its stdin, and what it says comes out on its
 //! stdout, which a thread of its own keeps in the session's events file as it
 //! comes and answers the permission requests in it. The rest of the host reads
@@ -6,7 +6,7 @@
 //!
 //! A session does not outlive the host: its pipes end with it, and on linux it
 //! is told to stop when the host goes (`sys::die_with_parent`). The host that
-//! starts again resumes each session that was live (`Workers::reconcile`).
+//! starts again resumes each session that was live (`Agents::reconcile`).
 
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -76,10 +76,10 @@ impl Sessions {
         }
     }
 
-    /// Runs `spawn` as the session `session_id` for `worker`, appending to
+    /// Runs `spawn` as the session `session_id` for `agent`, appending to
     /// its events and errors, so a session carried on after a restart writes
     /// on where it left off.
-    pub fn start(&self, worker: &str, session_id: &str, spawn: Spawn) -> Result<(), String> {
+    pub fn start(&self, agent: &str, session_id: &str, spawn: Spawn) -> Result<(), String> {
         let append = |path: &Path| {
             if let Some(dir) = path.parent() {
                 std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -129,7 +129,7 @@ impl Sessions {
             thread::spawn(move || keep(stdout, events, &stdin, &echoed, &permissions));
         }
         lock(&self.live).insert(
-            worker.into(),
+            agent.into(),
             Live {
                 child,
                 session_id: session_id.into(),
@@ -140,54 +140,54 @@ impl Sessions {
         Ok(())
     }
 
-    /// Writes `line` to the worker's session.
-    pub fn send(&self, worker: &str, line: &Value) -> Result<(), String> {
+    /// Writes `line` to the agent's session.
+    pub fn send(&self, agent: &str, line: &Value) -> Result<(), String> {
         let live = lock(&self.live);
         let session = live
-            .get(worker)
-            .ok_or_else(|| format!("worker {worker} has no live session on this host"))?;
+            .get(agent)
+            .ok_or_else(|| format!("agent {agent} has no live session on this host"))?;
         write(&session.stdin, line)
     }
 
-    /// The worker's live session, and the echoes of what it takes.
-    pub fn echoes(&self, worker: &str) -> Option<(String, Echoes)> {
+    /// The agent's live session, and the echoes of what it takes.
+    pub fn echoes(&self, agent: &str) -> Option<(String, Echoes)> {
         lock(&self.live)
-            .get(worker)
+            .get(agent)
             .map(|s| (s.session_id.clone(), s.echoed.clone()))
     }
 
-    /// Every worker with a session running, mapped to its session id.
+    /// Every agent with a session running, mapped to its session id.
     pub fn live(&self) -> HashMap<String, String> {
         lock(&self.live)
             .iter_mut()
-            .filter_map(|(worker, s)| {
+            .filter_map(|(agent, s)| {
                 matches!(s.child.try_wait(), Ok(None))
-                    .then(|| (worker.clone(), s.session_id.clone()))
+                    .then(|| (agent.clone(), s.session_id.clone()))
             })
             .collect()
     }
 
-    /// The sessions that have ended since last asked, by worker, with their
+    /// The sessions that have ended since last asked, by agent, with their
     /// session ids and how they ended.
     pub fn reap(&self) -> Vec<(String, String, ExitStatus)> {
         let mut live = lock(&self.live);
         let ended: Vec<(String, ExitStatus)> = live
             .iter_mut()
-            .filter_map(|(worker, s)| Some((worker.clone(), s.child.try_wait().ok()??)))
+            .filter_map(|(agent, s)| Some((agent.clone(), s.child.try_wait().ok()??)))
             .collect();
         ended
             .into_iter()
-            .filter_map(|(worker, status)| {
-                let session = live.remove(&worker)?;
-                Some((worker, session.session_id, status))
+            .filter_map(|(agent, status)| {
+                let session = live.remove(&agent)?;
+                Some((agent, session.session_id, status))
             })
             .collect()
     }
 
-    /// Ends the worker's session and everything it started: its stdin is
+    /// Ends the agent's session and everything it started: its stdin is
     /// closed and its group asked to stop, then killed once `GRACE` is up.
-    pub fn stop(&self, worker: &str) -> Result<(), String> {
-        let Some(mut session) = lock(&self.live).remove(worker) else {
+    pub fn stop(&self, agent: &str) -> Result<(), String> {
+        let Some(mut session) = lock(&self.live).remove(agent) else {
             return Ok(());
         };
         lock(&session.stdin).take();
@@ -202,7 +202,7 @@ impl Sessions {
             .child
             .wait()
             .map(|_| ())
-            .map_err(|e| format!("worker {worker}'s session: {e}"))
+            .map_err(|e| format!("agent {agent}'s session: {e}"))
     }
 }
 
@@ -210,9 +210,9 @@ impl Sessions {
 /// that exits by returning from `main` would do.
 impl Drop for Sessions {
     fn drop(&mut self) {
-        let workers: Vec<String> = lock(&self.live).keys().cloned().collect();
-        for worker in workers {
-            let _ = self.stop(&worker);
+        let agents: Vec<String> = lock(&self.live).keys().cloned().collect();
+        for agent in agents {
+            let _ = self.stop(&agent);
         }
     }
 }
