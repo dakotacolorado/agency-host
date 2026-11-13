@@ -135,6 +135,11 @@ impl Home {
         self.dir.join("credentials.env")
     }
 
+    /// The MCP servers its last start named, passed to each run of its session.
+    pub fn mcp(&self) -> PathBuf {
+        self.dir.join("mcp.json")
+    }
+
     fn record_file(&self) -> PathBuf {
         self.dir.join("agent.json")
     }

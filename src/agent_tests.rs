@@ -532,6 +532,49 @@ fn a_start_gives_its_session_tokens_from_a_file_only_the_host_can_read_and_never
 }
 
 #[test]
+fn a_start_naming_mcp_servers_writes_them_beside_its_records_and_passes_them_to_each_run() {
+    let host = host("mcp", SECRET_CLAUDE);
+    let mut deliveries = Deliveries::default();
+    let take = |json: &str, deliveries: &mut Deliveries| {
+        let report = commands::take(&command(json), &host.agents, deliveries).unwrap();
+        assert!(report.ok, "{report:?}");
+    };
+    take(
+        r#"{"id":"c1","kind":"create","agentId":"w1","name":"ana"}"#,
+        &mut deliveries,
+    );
+    take(
+        r#"{"id":"c2","kind":"start","agentId":"w1","sessionId":"s1","resume":false,
+        "mcpServers":{"waypoint":{"type":"http","url":"${WAYPOINT_URL}/mcp",
+        "headers":{"Authorization":"Bearer ${WAYPOINT_TOKEN}"}}}}"#,
+        &mut deliveries,
+    );
+    let file = host.home("ana").mcp();
+    let written: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(
+        written,
+        serde_json::json!({"mcpServers":{"waypoint":{"type":"http","url":"${WAYPOINT_URL}/mcp",
+            "headers":{"Authorization":"Bearer ${WAYPOINT_TOKEN}"}}}})
+    );
+    let args = host.fake_file("ana", &claude::uuid("s1"), "args");
+    assert!(
+        args.contains(&format!("--mcp-config {}", file.display())),
+        "{args}"
+    );
+
+    host.agents.stop("w1").unwrap();
+    take(
+        r#"{"id":"c3","kind":"start","agentId":"w1","sessionId":"s2","resume":true}"#,
+        &mut deliveries,
+    );
+    assert!(
+        !file.exists(),
+        "a start naming no server leaves none behind"
+    );
+}
+
+#[test]
 fn a_permission_asked_for_is_answered_by_the_hosts_rule() {
     let permissions = Permissions {
         allow: vec!["*".into()],
