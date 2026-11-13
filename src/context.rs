@@ -1,4 +1,4 @@
-//! What a start carries for the worker beyond its first message: a context,
+//! What a start carries for the agent beyond its first message: a context,
 //! files written into its own Claude Code folder before Claude Code starts,
 //! and the environment the context's scripts need. The host knows nothing of
 //! where a context comes from; it only writes it.
@@ -18,7 +18,7 @@ use std::path::Path;
 
 /// The file a context writes after the host's rules, not as a file.
 pub const MEMORY: &str = "CLAUDE.md";
-/// Where a context's files go, under the worker's own Claude Code folder.
+/// Where a context's files go, under the agent's own Claude Code folder.
 const SKILLS: &str = "skills";
 /// What the last context wrote, so the next can take it away.
 const MANIFEST: &str = ".context.json";
@@ -80,7 +80,7 @@ pub fn written(state: &Path) -> Option<Written> {
     serde_json::from_str(&fs::read_to_string(state.join(MANIFEST)).ok()?).ok()
 }
 
-/// Writes `context`, then `documents`, into `state`, a worker's Claude Code
+/// Writes `context`, then `documents`, into `state`, an agent's Claude Code
 /// folder, in place of the last: every path is checked before anything is
 /// touched, then the last start's files are removed and these written.
 pub fn write(state: &Path, context: &Context, documents: &[Context]) -> Result<Written, String> {
@@ -273,7 +273,7 @@ mod tests {
 
     fn scratch(name: &str) -> PathBuf {
         let dir =
-            std::env::temp_dir().join(format!("worker-host-context-{}-{name}", std::process::id()));
+            std::env::temp_dir().join(format!("agent-host-context-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -337,7 +337,7 @@ mod tests {
     fn a_new_context_takes_away_what_the_last_wrote_and_nothing_else() {
         let state = scratch("replace");
         fs::create_dir_all(state.join("skills/mine")).unwrap();
-        fs::write(state.join("skills/mine/SKILL.md"), "the worker's own").unwrap();
+        fs::write(state.join("skills/mine/SKILL.md"), "the agent's own").unwrap();
         write(
             &state,
             &context(
@@ -363,7 +363,7 @@ mod tests {
         );
         assert_eq!(
             fs::read_to_string(state.join("skills/mine/SKILL.md")).unwrap(),
-            "the worker's own"
+            "the agent's own"
         );
         assert_eq!(written(&state).unwrap().version, 2);
     }

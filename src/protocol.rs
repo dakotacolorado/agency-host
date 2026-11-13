@@ -1,4 +1,4 @@
-//! What worker-service and a host say to each other on the socket: commands
+//! What agent-service and a host say to each other on the socket: commands
 //! down, reports up.
 
 use serde::{Deserialize, Serialize};
@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use crate::context::Context;
 
-/// A command for one worker. Every kind names it; the rest is each kind's
+/// A command for one agent. Every kind names it; the rest is each kind's
 /// own. Unknown fields are ignored, so the service can add one before the
 /// host reads it.
 #[derive(Debug, Clone, Deserialize)]
@@ -14,16 +14,16 @@ use crate::context::Context;
 pub struct Command {
     pub id: String,
     pub kind: String,
-    pub worker_id: Option<String>,
-    /// `create`: what the worker is called.
+    pub agent_id: Option<String>,
+    /// `create`: what the agent is called.
     pub name: Option<String>,
     /// `start`: the session the service has opened, and whether it carries
-    /// on the worker's last conversation.
+    /// on the agent's last conversation.
     pub session_id: Option<String>,
     pub resume: Option<bool>,
-    /// `start`, `message`, `interrupt`: what to say to the worker.
+    /// `start`, `message`, `interrupt`: what to say to the agent.
     pub text: Option<String>,
-    /// `start`: files to write into the worker's Claude Code folder first,
+    /// `start`: files to write into the agent's Claude Code folder first,
     /// and variables to set in its session.
     pub context: Option<Context>,
     pub documents: Option<Vec<Context>>,
@@ -65,7 +65,7 @@ pub enum State {
     Working,
     /// A live session whose turn ended with nothing said to it since. Whether
     /// that is on a question, with its work done or on its own subagents its
-    /// transcript does not tell apart, so the host does not guess: the worker
+    /// transcript does not tell apart, so the host does not guess: the agent
     /// tells the service itself.
     Waiting,
     /// Its last session ended without a stop: a crash, the machine going
@@ -75,7 +75,7 @@ pub enum State {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct WorkerReport {
+pub struct AgentReport {
     pub id: String,
     pub state: State,
     /// The live session, or for `interrupted` the session that ended.
@@ -89,10 +89,10 @@ pub struct WorkerReport {
     pub told: Option<bool>,
 }
 
-impl WorkerReport {
+impl AgentReport {
     #[cfg(test)]
     pub fn new(id: String, state: State, session_id: Option<String>) -> Self {
-        WorkerReport {
+        AgentReport {
             id,
             state,
             session_id,
@@ -102,8 +102,8 @@ impl WorkerReport {
     }
 }
 
-/// One step of a worker's conversation. `seq` counts every line before it in
-/// all the worker's sessions, so a line read again -- a report that did not
+/// One step of an agent's conversation. `seq` counts every line before it in
+/// all the agent's sessions, so a line read again -- a report that did not
 /// land, or a host that restarted -- has the same `seq` and is kept once.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -122,7 +122,7 @@ pub struct Line {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LineReport<'a> {
-    pub worker_id: &'a str,
+    pub agent_id: &'a str,
     #[serde(flatten)]
     pub line: &'a Line,
 }
@@ -221,7 +221,7 @@ impl Tokens {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenReport {
-    pub worker_id: String,
+    pub agent_id: String,
     pub session_id: String,
     #[serde(flatten)]
     pub tokens: Tokens,
@@ -230,13 +230,13 @@ pub struct TokenReport {
 /// The most session totals the service takes in one report.
 pub const MOST_TOKENS: usize = 256;
 
-/// The lines read for each worker, by worker id.
+/// The lines read for each agent, by agent id.
 pub type Lines = [(String, Vec<Line>)];
 
 pub fn line_reports(lines: &Lines) -> Vec<LineReport<'_>> {
     lines
         .iter()
-        .flat_map(|(worker_id, lines)| lines.iter().map(move |line| LineReport { worker_id, line }))
+        .flat_map(|(agent_id, lines)| lines.iter().map(move |line| LineReport { agent_id, line }))
         .collect()
 }
 
@@ -247,7 +247,7 @@ pub fn line_reports(lines: &Lines) -> Vec<LineReport<'_>> {
 pub enum Up<'a> {
     #[serde(rename_all = "camelCase")]
     Report {
-        workers: &'a [WorkerReport],
+        agents: &'a [AgentReport],
         lines: Vec<LineReport<'a>>,
         command_results: &'a [CommandReport],
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -278,13 +278,13 @@ mod tests {
     #[test]
     fn each_command_kind_is_read_with_its_fields() {
         let create: Command = serde_json::from_value(json!({
-            "id":"c1","kind":"create","workerId":"w1","name":"ana","later":"ignored"
+            "id":"c1","kind":"create","agentId":"w1","name":"ana","later":"ignored"
         }))
         .unwrap();
         assert_eq!(create.name.as_deref(), Some("ana"));
 
         let start: Command = serde_json::from_value(json!({
-            "id":"c2","kind":"start","workerId":"w1","sessionId":"s1","resume":true,"text":"go"
+            "id":"c2","kind":"start","agentId":"w1","sessionId":"s1","resume":true,"text":"go"
         }))
         .unwrap();
         assert_eq!(
@@ -298,7 +298,7 @@ mod tests {
         assert!(start.context.is_none() && start.env.is_none());
 
         let given: Command = serde_json::from_value(json!({
-            "id":"c3","kind":"start","workerId":"w1","sessionId":"s1","resume":false,
+            "id":"c3","kind":"start","agentId":"w1","sessionId":"s1","resume":false,
             "context":{"key":"global","version":4,"files":[{"path":"skills/a/SKILL.md","content":"a","executable":false}]},
             "env":{"DS_URL":"https://ds"}
         }))
@@ -310,14 +310,14 @@ mod tests {
     #[test]
     fn a_socket_message_is_a_command_or_passed_over() {
         let down: Down = serde_json::from_str(
-            r#"{"type":"command","command":{"id":"c1","kind":"stop","workerId":"w1"}}"#,
+            r#"{"type":"command","command":{"id":"c1","kind":"stop","agentId":"w1"}}"#,
         )
         .unwrap();
         let Down::Command { command } = down else {
             panic!("{down:?}")
         };
         assert_eq!((command.id.as_str(), command.kind.as_str()), ("c1", "stop"));
-        for other in [r#"{"type":"pong"}"#, r#"{"type":"worker","worker":{}}"#] {
+        for other in [r#"{"type":"pong"}"#, r#"{"type":"agent","agent":{}}"#] {
             assert!(matches!(
                 serde_json::from_str::<Down>(other).unwrap(),
                 Down::Other
@@ -327,17 +327,17 @@ mod tests {
     }
 
     #[test]
-    fn a_report_is_workers_lines_results_and_usage_under_its_type() {
-        let workers = [
-            WorkerReport {
+    fn a_report_is_agents_lines_results_and_usage_under_its_type() {
+        let agents = [
+            AgentReport {
                 tasks: 2,
                 told: Some(false),
-                ..WorkerReport::new("w1".into(), State::Working, Some("s1".into()))
+                ..AgentReport::new("w1".into(), State::Working, Some("s1".into()))
             },
-            WorkerReport::new("w2".into(), State::Idle, None),
-            WorkerReport {
+            AgentReport::new("w2".into(), State::Idle, None),
+            AgentReport {
                 told: Some(true),
-                ..WorkerReport::new("w3".into(), State::Waiting, Some("s3".into()))
+                ..AgentReport::new("w3".into(), State::Waiting, Some("s3".into()))
             },
         ];
         let line = |seq, from, text: &str, command_id: Option<&str>| Line {
@@ -361,7 +361,7 @@ mod tests {
             CommandReport::new("c3".into(), None),
         ];
         let up = Up::Report {
-            workers: &workers,
+            agents: &agents,
             lines: line_reports(&lines),
             command_results: &results,
             usage: None,
@@ -371,14 +371,14 @@ mod tests {
             serde_json::to_value(&up).unwrap(),
             json!({
                 "type":"report",
-                "workers":[
+                "agents":[
                     {"id":"w1","state":"working","sessionId":"s1","tasks":2,"told":false},
                     {"id":"w2","state":"idle","sessionId":null,"tasks":0},
                     {"id":"w3","state":"waiting","sessionId":"s3","tasks":0,"told":true}
                 ],
                 "lines":[
-                    {"workerId":"w1","seq":4,"at":"2026-10-28T00:00:00.000Z","sessionId":"s1","from":"instruction","text":"go","commandId":"c2"},
-                    {"workerId":"w1","seq":5,"at":"2026-10-28T00:00:00.000Z","sessionId":"s1","from":"agent","text":"hi"}
+                    {"agentId":"w1","seq":4,"at":"2026-10-28T00:00:00.000Z","sessionId":"s1","from":"instruction","text":"go","commandId":"c2"},
+                    {"agentId":"w1","seq":5,"at":"2026-10-28T00:00:00.000Z","sessionId":"s1","from":"agent","text":"hi"}
                 ],
                 "commandResults":[
                     {"commandId":"c1","ok":false,"error":"no"},
@@ -398,7 +398,7 @@ mod tests {
             },
         };
         let up = Up::Report {
-            workers: &[],
+            agents: &[],
             lines: vec![],
             command_results: &[],
             usage: Some(&usage),
@@ -411,7 +411,7 @@ mod tests {
         );
         assert!(serde_json::to_value(&up).unwrap().get("tokens").is_none());
         let tokens = [TokenReport {
-            worker_id: "w1".into(),
+            agent_id: "w1".into(),
             session_id: "s1".into(),
             tokens: Tokens {
                 input_tokens: 80,
@@ -421,7 +421,7 @@ mod tests {
             },
         }];
         let up = Up::Report {
-            workers: &[],
+            agents: &[],
             lines: vec![],
             command_results: &[],
             usage: None,
@@ -429,7 +429,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_value(&up).unwrap()["tokens"],
-            json!([{"workerId":"w1","sessionId":"s1","inputTokens":80,"outputTokens":19491,
+            json!([{"agentId":"w1","sessionId":"s1","inputTokens":80,"outputTokens":19491,
                 "cacheCreationInputTokens":71906,"cacheReadInputTokens":1976024}])
         );
         assert_eq!(

@@ -1,10 +1,10 @@
-//! The built binary against a deployed worker-service, through the routes a
-//! person uses: a worker created with a brief on this host is created and
+//! The built binary against a deployed agent-service, through the routes a
+//! person uses: an agent created with a brief on this host is created and
 //! started here, the account's usage its session says is kept, a message
 //! reaches it, an interrupt and a stop are taken, and it is retired -- each heard over the socket well inside one heartbeat. The
-//! worker's Claude Code is a stand-in, so this costs no session. It runs only
-//! with `WORKER_SERVICE_URL` and `WORKER_SERVICE_TOKEN` (beta's `ApiUrl` and
-//! token), and otherwise says so and passes.
+//! agent's Claude Code is a stand-in, so this costs no session. It runs only
+//! with `AGENT_SERVICE_URL` and `AGENT_SERVICE_TOKEN` (an agent-service that is
+//! not prod, and its token), and otherwise says `skipped:` and passes.
 
 mod common;
 
@@ -42,34 +42,34 @@ impl Service {
         }
     }
 
-    fn worker(&self, id: &str) -> Value {
-        let got = self.call("GET", &format!("/fleet/workers/{id}"), None);
-        got.get("worker").cloned().unwrap_or(got)
+    fn agent(&self, id: &str) -> Value {
+        let got = self.call("GET", &format!("/agents/{id}"), None);
+        got.get("agent").cloned().unwrap_or(got)
     }
 
     fn usage(&self) -> Value {
-        let got = self.call("GET", "/fleet/usage", None);
+        let got = self.call("GET", "/usage", None);
         got.get("usage").cloned().unwrap_or(got)
     }
 
-    /// Waits until `done` holds of the worker, or fails after `within`.
+    /// Waits until `done` holds of the agent, or fails after `within`.
     fn until(&self, id: &str, within: Duration, what: &str, done: impl Fn(&Value) -> bool) {
         let deadline = Instant::now() + within;
         loop {
-            let worker = self.worker(id);
-            if done(&worker) {
+            let agent = self.agent(id);
+            if done(&agent) {
                 return;
             }
             assert!(
                 Instant::now() < deadline,
-                "{what} within {within:?}: {worker}"
+                "{what} within {within:?}: {agent}"
             );
             thread::sleep(Duration::from_millis(250));
         }
     }
 
     fn command_done(&self, id: &str, command: &str) -> bool {
-        self.call("GET", &format!("/fleet/workers/{id}/commands"), None)["commands"]
+        self.call("GET", &format!("/agents/{id}/commands"), None)["commands"]
             .as_array()
             .is_some_and(|all| {
                 all.iter().any(|c| {
@@ -79,25 +79,25 @@ impl Service {
     }
 }
 
-/// The host and the worker made on it, ended however the test does.
+/// The host and the agent made on it, ended however the test does.
 struct Host<'a> {
     service: &'a Service,
     id: String,
     dir: PathBuf,
     child: Child,
-    worker: Option<String>,
+    agent: Option<String>,
 }
 
 impl Drop for Host<'_> {
     fn drop(&mut self) {
-        if let Some(worker) = &self.worker {
-            let _ = ureq::delete(&format!("{}/fleet/workers/{worker}", self.service.url))
+        if let Some(agent) = &self.agent {
+            let _ = ureq::delete(&format!("{}/agents/{agent}", self.service.url))
                 .set("Authorization", &self.service.authorization)
                 .call();
         }
         let _ = self.child.kill();
         let _ = self.child.wait();
-        let _ = ureq::delete(&format!("{}/fleet/hosts/{}", self.service.url, self.id))
+        let _ = ureq::delete(&format!("{}/hosts/{}", self.service.url, self.id))
             .set("Authorization", &self.service.authorization)
             .call();
         let _ = fs::remove_dir_all(&self.dir);
@@ -105,17 +105,15 @@ impl Drop for Host<'_> {
 }
 
 #[test]
-fn a_worker_is_created_spoken_to_stopped_and_retired_over_the_socket() {
+fn an_agent_is_created_spoken_to_stopped_and_retired_over_the_socket() {
     let (Some(url), Some(token)) = (
-        env::var("WORKER_SERVICE_URL")
-            .ok()
-            .filter(|v| !v.is_empty()),
-        env::var("WORKER_SERVICE_TOKEN")
+        env::var("AGENT_SERVICE_URL").ok().filter(|v| !v.is_empty()),
+        env::var("AGENT_SERVICE_TOKEN")
             .ok()
             .filter(|v| !v.is_empty()),
     ) else {
         eprintln!(
-            "skipped: set WORKER_SERVICE_URL and WORKER_SERVICE_TOKEN to run against a service"
+            "skipped: set AGENT_SERVICE_URL and AGENT_SERVICE_TOKEN to run against a service"
         );
         return;
     };
@@ -124,7 +122,7 @@ fn a_worker_is_created_spoken_to_stopped_and_retired_over_the_socket() {
         authorization: format!("Bearer {token}"),
     };
     let id = format!("test-{}", std::process::id());
-    let dir = env::temp_dir().join(format!("wh-{}-svc", std::process::id()));
+    let dir = env::temp_dir().join(format!("ah-{}-svc", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(dir.join("home")).unwrap();
     common::install_claude(&dir);
@@ -133,16 +131,16 @@ fn a_worker_is_created_spoken_to_stopped_and_retired_over_the_socket() {
         dir.join("bin").display(),
         env::var("PATH").unwrap_or_default()
     );
-    // No capacity, so the service places no other worker here: a worker made
+    // No capacity, so the service places no other agent here: an agent made
     // without a host (document-service's judges, on beta) once landed on this
     // one while it had room, and the test's own create then found it full.
-    // A worker named for this host is made and started here all the same.
+    // An agent named for this host is made and started here all the same.
     let config = format!(
         "service_url = {:?}\ntoken = {token:?}\nhost_id = {id:?}\n",
         service.url
     );
     fs::write(dir.join("config.toml"), config).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_worker-host"))
+    let child = Command::new(env!("CARGO_BIN_EXE_agent-host"))
         .env_clear()
         .env("PATH", path)
         .env("HOME", dir.join("home"))
@@ -156,11 +154,11 @@ fn a_worker_is_created_spoken_to_stopped_and_retired_over_the_socket() {
         id: id.clone(),
         dir,
         child,
-        worker: None,
+        agent: None,
     };
 
     let deadline = Instant::now() + Duration::from_secs(60);
-    while !service.call("GET", "/fleet/hosts", None)["hosts"]
+    while !service.call("GET", "/hosts", None)["hosts"]
         .as_array()
         .is_some_and(|hosts| hosts.iter().any(|h| h["id"] == id.as_str()))
     {
@@ -177,13 +175,13 @@ fn a_worker_is_created_spoken_to_stopped_and_retired_over_the_socket() {
     let name = format!("t{}", std::process::id());
     let created = service.call(
         "POST",
-        "/fleet/workers",
+        "/agents",
         Some(json!({"name": name, "hostId": id, "brief": "hello"})),
     );
-    let created = created.get("worker").cloned().unwrap_or(created);
-    let worker = created["id"].as_str().unwrap().to_string();
-    host.worker = Some(worker.clone());
-    service.until(&worker, PUSHED, "created and started by push", |w| {
+    let created = created.get("agent").cloned().unwrap_or(created);
+    let agent = created["id"].as_str().unwrap().to_string();
+    host.agent = Some(agent.clone());
+    service.until(&agent, PUSHED, "created and started by push", |w| {
         w["state"] == "waiting" && !w["reportedAt"].is_null()
     });
     // The stand-in's reading is stamped as the host reads it, so it is newer
@@ -207,19 +205,19 @@ fn a_worker_is_created_spoken_to_stopped_and_retired_over_the_socket() {
 
     let sent = service.call(
         "POST",
-        &format!("/fleet/workers/{worker}/messages"),
+        &format!("/agents/{agent}/messages"),
         Some(json!({"text": "are you there"})),
     );
     let command = sent["commandId"].as_str().unwrap().to_string();
     let deadline = Instant::now() + PUSHED;
-    while !service.command_done(&worker, &command) {
+    while !service.command_done(&agent, &command) {
         assert!(
             Instant::now() < deadline,
             "message {command} not done by push"
         );
         thread::sleep(Duration::from_millis(250));
     }
-    let transcript = service.call("GET", &format!("/fleet/workers/{worker}/transcript"), None);
+    let transcript = service.call("GET", &format!("/agents/{agent}/transcript"), None);
     let texts: Vec<&str> = transcript["lines"]
         .as_array()
         .unwrap()
@@ -231,22 +229,18 @@ fn a_worker_is_created_spoken_to_stopped_and_retired_over_the_socket() {
         "{transcript}"
     );
 
-    service.call(
-        "POST",
-        &format!("/fleet/workers/{worker}/stop"),
-        Some(json!({})),
-    );
-    service.until(&worker, PUSHED, "stopped by push", |w| w["state"] == "idle");
+    service.call("POST", &format!("/agents/{agent}/stop"), Some(json!({})));
+    service.until(&agent, PUSHED, "stopped by push", |w| w["state"] == "idle");
 
-    service.call("DELETE", &format!("/fleet/workers/{worker}"), None);
-    service.until(&worker, PUSHED, "retired by push", |w| {
+    service.call("DELETE", &format!("/agents/{agent}"), None);
+    service.until(&agent, PUSHED, "retired by push", |w| {
         w["state"] == "retired"
     });
     assert!(
         host.dir
-            .join(format!("home/workers/.retired/{name}-{worker}"))
+            .join(format!("home/agents/.retired/{name}-{agent}"))
             .is_dir(),
         "its folder is kept"
     );
-    host.worker = None;
+    host.agent = None;
 }

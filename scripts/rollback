@@ -10,7 +10,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-repo=dakotacolorado/worker-host
+repo=dakotacolorado/agent-host
 dry=${DRY_RUN:-}
 commit=$(git rev-parse HEAD)
 echo "commit: $commit"

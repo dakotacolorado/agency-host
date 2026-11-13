@@ -1,4 +1,4 @@
-//! The workers on this host. Each has a folder of its own (home.rs), and
+//! The agents on this host. Each has a folder of its own (home.rs), and
 //! while it has a session, a headless Claude Code (session.rs), which takes
 //! messages while it works and says what it does as it goes. The host
 //! remembers nothing about them that their folders do not hold.
@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use crate::claude::{self, Begin, Claude};
 use crate::context::{self, Context};
 use crate::home::{self, Home, Record, Session};
-use crate::protocol::{Line, State, Tokens, Usage, WorkerReport};
+use crate::protocol::{AgentReport, Line, State, Tokens, Usage};
 use crate::session::{Echoes, Sessions, Spawn};
 use crate::sys;
 
@@ -37,13 +37,13 @@ const RESUMED: &str = "The host your session runs on restarted, and this session
 /// events, most of which is Claude Code's own bookkeeping.
 const RAW_LIMIT: u64 = 8 << 20;
 
-/// The most lines the service takes for one worker in one report.
+/// The most lines the service takes for one agent in one report.
 const MOST_LINES: usize = 1000;
 
-/// The most tasks the service takes for one worker; more refuses the report.
+/// The most tasks the service takes for one agent; more refuses the report.
 const MOST_TASKS: u32 = 1000;
 
-/// One step of a worker's conversation, as its transcript says it.
+/// One step of an agent's conversation, as its transcript says it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Entry {
     /// Its opening message, or a message carried to it; `command` names the
@@ -79,10 +79,10 @@ impl Entry {
     }
 }
 
-/// How far into a worker's transcripts has been accounted for: which of them
+/// How far into an agent's transcripts has been accounted for: which of them
 /// (see `transcripts`), the byte after the last whole line read in it, the
 /// `seq` of the line that comes next, and as of that line: whether the
-/// worker's last turn has ended with nothing said to it since, how many
+/// agent's last turn has ended with nothing said to it since, how many
 /// background tasks its session has open, whether its last turn was begun
 /// by a message (None before any turn of the session), and the tokens its
 /// session has used. Each is worked out from the lines alone, so a host that
@@ -109,7 +109,7 @@ impl Cursor {
     }
 }
 
-/// The lines read from a worker's transcripts, and where the read after this
+/// The lines read from an agent's transcripts, and where the read after this
 /// one starts. A batch with no lines still moves the cursor past what it read:
 /// those bytes were read and found to say nothing.
 #[derive(Debug)]
@@ -123,7 +123,7 @@ pub struct Batch {
     pub tokens: Vec<(String, Tokens)>,
 }
 
-/// Where a worker's lines are read from, in the order they were written.
+/// Where an agent's lines are read from, in the order they were written.
 #[derive(Debug, PartialEq)]
 enum Source<'a> {
     /// Claude Code's own transcript of a session an older release began, up
@@ -134,7 +134,7 @@ enum Source<'a> {
     Events { session_id: &'a str },
 }
 
-/// A worker's sources, each once: an older release's session that carried on
+/// An agent's sources, each once: an older release's session that carried on
 /// the last conversation wrote on in the transcript before it, and a session resumed
 /// after a restart writes on in its own events.
 fn sources(sessions: &[Session]) -> Vec<Source<'_>> {
@@ -161,22 +161,22 @@ fn sources(sessions: &[Session]) -> Vec<Source<'_>> {
     found
 }
 
-pub struct Workers {
+pub struct Agents {
     sessions: Sessions,
     claude: Claude,
     dir: PathBuf,
 }
 
-impl Workers {
+impl Agents {
     pub fn new(sessions: Sessions, claude: Claude, dir: PathBuf) -> Self {
-        Workers {
+        Agents {
             sessions,
             claude,
             dir,
         }
     }
 
-    /// Every worker here that is not retired.
+    /// Every agent here that is not retired.
     pub fn all(&self) -> Vec<(Home, Record)> {
         home::all(&self.dir)
     }
@@ -187,28 +187,28 @@ impl Workers {
             .find(|(_, r)| r.id == id)
             .ok_or_else(|| {
                 if home::retired(&self.dir, id) {
-                    format!("worker {id} is retired")
+                    format!("agent {id} is retired")
                 } else {
-                    format!("no worker {id} on this host")
+                    format!("no agent {id} on this host")
                 }
             })
     }
 
-    /// Makes the worker's folder: its record and a Claude Code state of its
+    /// Makes the agent's folder: its record and a Claude Code state of its
     /// own. A create is sent again until it is reported, and one the host has
     /// done already is taken up where it stands.
     pub fn create(&self, id: &str, name: &str) -> Result<(), String> {
         if !home::valid_name(name) {
             return Err(format!(
-                "{name:?} is not a worker name: [a-z0-9][a-z0-9-]{{0,39}}"
+                "{name:?} is not an agent name: [a-z0-9][a-z0-9-]{{0,39}}"
             ));
         }
         if home::retired(&self.dir, id) {
-            return Err(format!("worker {id} was retired here"));
+            return Err(format!("agent {id} was retired here"));
         }
         if let Some((_, held)) = self.all().into_iter().find(|(_, r)| r.id == id) {
             if held.name != name {
-                return Err(format!("worker {id} is here already, named {}", held.name));
+                return Err(format!("agent {id} is here already, named {}", held.name));
             }
         }
         let home = Home::new(self.dir.join(name));
@@ -225,8 +225,8 @@ impl Workers {
         self.claude.prepare(&home.claude(), &home.dir, &rules)
     }
 
-    /// Runs a session for the worker in its folder: a new conversation, or
-    /// with `resume` the worker's last one carried on. `text` is what it is
+    /// Runs a session for the agent in its folder: a new conversation, or
+    /// with `resume` the agent's last one carried on. `text` is what it is
     /// told first.
     ///
     /// A start is sent again until it is reported, so one the host has done
@@ -244,7 +244,7 @@ impl Workers {
     }
 
     /// `start`, with what the start carries besides its message: a context
-    /// written into the worker's Claude Code folder first, and variables for
+    /// written into the agent's Claude Code folder first, and variables for
     /// its session.
     pub fn start_with(
         &self,
@@ -290,7 +290,7 @@ impl Workers {
         });
         let prompt = home.prompt();
         fs::write(&prompt, text).map_err(|e| format!("{}: {e}", prompt.display()))?;
-        // A start without a context keeps the last one the worker was given.
+        // A start without a context keeps the last one the agent was given.
         let written = match given.context {
             Some(c) => Some(context::write(
                 &home.claude(),
@@ -353,13 +353,13 @@ impl Workers {
         Ok(())
     }
 
-    /// Every live session, by the id of the worker it is for, mapped to its
+    /// Every live session, by the id of the agent it is for, mapped to its
     /// session id. A session found to have ended by itself is noted as ended,
-    /// so the worker reads as interrupted and a host that restarts leaves it.
+    /// so the agent reads as interrupted and a host that restarts leaves it.
     pub fn live(&self) -> HashMap<String, String> {
-        for (worker, session_id, status) in self.sessions.reap() {
-            crate::log!("worker {worker}: session {session_id} ended by itself ({status})");
-            if let Ok((home, _)) = self.find(&worker) {
+        for (agent, session_id, status) in self.sessions.reap() {
+            crate::log!("agent {agent}: session {session_id} ended by itself ({status})");
+            if let Ok((home, _)) = self.find(&agent) {
                 if home
                     .latest()
                     .is_some_and(|s| s.session_id == session_id && !s.stopped)
@@ -375,7 +375,7 @@ impl Workers {
         self.live()
             .contains_key(id)
             .then_some(())
-            .ok_or_else(|| format!("worker {id} has no live session on this host"))
+            .ok_or_else(|| format!("agent {id} has no live session on this host"))
     }
 
     /// Takes up every session that was live when the host last went, as a
@@ -392,7 +392,7 @@ impl Workers {
             };
             if let Err(e) = self.resume(home, record, &latest) {
                 crate::log!(
-                    "worker {}: session {} could not be resumed: {e}",
+                    "agent {}: session {} could not be resumed: {e}",
                     record.name,
                     latest.session_id
                 );
@@ -408,7 +408,7 @@ impl Workers {
             .collect()
     }
 
-    /// Resumes `latest`, the session the worker had when the host went. One
+    /// Resumes `latest`, the session the agent had when the host went. One
     /// an older release began is begun again under its own id, headless.
     fn resume(&self, home: &Home, record: &Record, latest: &Session) -> Result<(), String> {
         self.claude.installed()?;
@@ -436,7 +436,7 @@ impl Workers {
         self.run(home, &record.id, &session, begin, &text, opening)
     }
 
-    /// What the worker is doing. `live` is whether it has a session running,
+    /// What the agent is doing. `live` is whether it has a session running,
     /// and `waiting` what its session said of its last turn.
     pub fn state(&self, home: &Home, live: bool, waiting: bool) -> (State, Option<String>) {
         let latest = home.latest();
@@ -454,10 +454,10 @@ impl Workers {
         }
     }
 
-    /// What is reported of the worker, as of `at` in its transcripts.
-    pub fn report(&self, home: &Home, id: &str, live: bool, at: &Cursor) -> WorkerReport {
+    /// What is reported of the agent, as of `at` in its transcripts.
+    pub fn report(&self, home: &Home, id: &str, live: bool, at: &Cursor) -> AgentReport {
         let (state, session_id) = self.state(home, live, at.waiting);
-        WorkerReport {
+        AgentReport {
             id: id.into(),
             state,
             session_id,
@@ -467,7 +467,7 @@ impl Workers {
         }
     }
 
-    /// Writes `text` to the worker's session now, whether it is working or
+    /// Writes `text` to the agent's session now, whether it is working or
     /// waiting. Working, it takes the text at its next step rather than when
     /// it has finished; waiting on a question, the text is the answer and the
     /// same session goes on. Claude Code echoes it with `uuid` once it has
@@ -476,7 +476,7 @@ impl Workers {
         self.sessions.send(id, &claude::message(text, uuid))
     }
 
-    /// Stops the turn the worker is in, as Escape does for a person at its
+    /// Stops the turn the agent is in, as Escape does for a person at its
     /// terminal: the session and its conversation go on, waiting, and `text`
     /// is what it is told next. `command` names the interrupt.
     pub fn interrupt(&self, id: &str, command: &str, text: Option<&str>) -> Result<(), String> {
@@ -488,7 +488,7 @@ impl Workers {
         }
     }
 
-    /// Ends the worker's session, and Claude Code with it; the worker is idle.
+    /// Ends the agent's session, and Claude Code with it; the agent is idle.
     /// Its folder is left as it is. One with no
     /// session, or not here at all, is already stopped, which is what was
     /// asked; one whose session ended without a stop is idle from now on.
@@ -503,7 +503,7 @@ impl Workers {
         }
     }
 
-    /// Stops the worker and moves its folder aside, where it is kept (see
+    /// Stops the agent and moves its folder aside, where it is kept (see
     /// `Home::retire`). One not here, or retired already, is done.
     pub fn retire(&self, id: &str) -> Result<(), String> {
         let Ok((home, record)) = self.find(id) else {
@@ -513,7 +513,7 @@ impl Workers {
         home.retire(&record)
     }
 
-    /// What the worker has done since `from`, in all its sessions, as much
+    /// What the agent has done since `from`, in all its sessions, as much
     /// as fits in `budget` bytes of lines; the rest waits for the next read.
     /// None when nothing new has been written. Only whole lines are read from
     /// the source still being written, so a line in the middle of being
@@ -653,19 +653,19 @@ pub struct Given<'a> {
     pub secrets: Option<&'a BTreeMap<String, String>>,
 }
 
-/// The worker's standing rules, Claude Code's user memory.
+/// The agent's standing rules, Claude Code's user memory.
 fn rules(home: &Home, record: &Record) -> String {
     format!(
-        "You are worker `{}`, and your folder is `{}`. A person reads everything you \
+        "You are agent `{}`, and your folder is `{}`. A person reads everything you \
          write, and what to do comes to you as messages. Clone whatever you need into \
          your folder; `home/`, `logs/`, `credentials.env`, `prompt.md`, `sessions.jsonl` \
-         and `worker.json` are the host's records of you, so leave them be.\n",
+         and `agent.json` are the host's records of you, so leave them be.\n",
         record.name,
         home.dir.display()
     )
 }
 
-/// Messages written to workers' sessions and not yet taken. Each is written
+/// Messages written to agents' sessions and not yet taken. Each is written
 /// to its session's stdin at once, and is taken only once Claude Code echoes
 /// it back, which it does at its next step: after it has thought, or once the
 /// tool it is in has finished, however long that is. Until then it is only in
@@ -678,7 +678,7 @@ pub struct Deliveries {
 
 struct Delivery {
     command: String,
-    worker: String,
+    agent: String,
     session: String,
     uuid: String,
     echoes: Echoes,
@@ -697,25 +697,25 @@ impl Deliveries {
         self.held.iter().any(|d| d.command == command)
     }
 
-    /// Writes a message to its worker's session, to be held until it is
+    /// Writes a message to its agent's session, to be held until it is
     /// taken. Err when it could not be written.
     pub fn hold(
         &mut self,
-        workers: &Workers,
+        agents: &Agents,
         command: &str,
-        worker: &str,
+        agent: &str,
         text: &str,
     ) -> Result<(), String> {
-        workers.running(worker)?;
-        let (session, echoes) = workers
+        agents.running(agent)?;
+        let (session, echoes) = agents
             .sessions
-            .echoes(worker)
-            .ok_or_else(|| format!("worker {worker} has no live session on this host"))?;
+            .echoes(agent)
+            .ok_or_else(|| format!("agent {agent} has no live session on this host"))?;
         let uuid = claude::uuid(command);
-        workers.say(worker, text, &uuid)?;
+        agents.say(agent, text, &uuid)?;
         self.held.push(Delivery {
             command: command.into(),
-            worker: worker.into(),
+            agent: agent.into(),
             session,
             uuid,
             echoes,
@@ -725,16 +725,16 @@ impl Deliveries {
 
     /// Hands back, by command, the messages that have been taken or never
     /// will be: their session has ended, whether or not another has begun.
-    pub fn settle(&mut self, workers: &Workers) -> Vec<(String, Result<(), String>)> {
-        let live = workers.live();
+    pub fn settle(&mut self, agents: &Agents) -> Vec<(String, Result<(), String>)> {
+        let live = agents.live();
         let mut settled = Vec::new();
         self.held.retain(|d| {
             let result = if d.echoes.contains(&d.uuid) {
                 Ok(())
-            } else if live.get(&d.worker) != Some(&d.session) {
+            } else if live.get(&d.agent) != Some(&d.session) {
                 Err(format!(
-                    "worker {}'s session ended before it took the message",
-                    d.worker
+                    "agent {}'s session ended before it took the message",
+                    d.agent
                 ))
             } else {
                 return true;
@@ -773,5 +773,5 @@ fn instant(at: &str) -> bool {
 }
 
 #[cfg(test)]
-#[path = "worker_tests.rs"]
+#[path = "agent_tests.rs"]
 pub mod tests;

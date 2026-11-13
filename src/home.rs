@@ -1,8 +1,8 @@
-//! A worker's folder on this host, `<workers_dir>/<name>/`, and everything the
-//! host keeps about the worker there:
+//! An agent's folder on this host, `<agents_dir>/<name>/`, and everything the
+//! host keeps about the agent there:
 //!
 //! ```text
-//! worker.json       who it is: id and name, as created
+//! agent.json       who it is: id and name, as created
 //! sessions.jsonl    each session the host started for it, and each it stopped
 //! prompt.md         the opening message of its latest session
 //! home/.claude/     its own Claude Code: settings, rules, history, transcripts
@@ -18,18 +18,18 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-/// Where retired workers' folders are moved, out of the way of a new worker
-/// given the same name. Hidden, so it is never taken for a worker named so.
+/// Where retired agents' folders are moved, out of the way of a new agent
+/// given the same name. Hidden, so it is never taken for an agent named so.
 pub const RETIRED: &str = ".retired";
 
-/// Who a worker is, as its `create` said.
+/// Who an agent is, as its `create` said.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Record {
     pub id: String,
     pub name: String,
 }
 
-/// One session the host started for a worker. `claude` is the Claude Code
+/// One session the host started for an agent. `claude` is the Claude Code
 /// session it carries, and `from` how long Claude Code's own transcript of
 /// it was when it began: a session that carries on the last conversation
 /// writes on in the same transcript.
@@ -84,8 +84,8 @@ enum Event {
     },
 }
 
-/// A worker name as the service allows it, which is also all that keeps a
-/// name from reaching outside the workers folder: `[a-z0-9][a-z0-9-]{0,39}`.
+/// An agent name as the service allows it, which is also all that keeps a
+/// name from reaching outside the agents folder: `[a-z0-9][a-z0-9-]{0,39}`.
 pub fn valid_name(name: &str) -> bool {
     let mut chars = name.chars();
     chars
@@ -105,8 +105,8 @@ impl Home {
         Home { dir }
     }
 
-    /// The worker's own HOME as the layout names it. HOME itself stays the
-    /// host user's, for the reason in claude.rs; this holds the worker's own
+    /// The agent's own HOME as the layout names it. HOME itself stays the
+    /// host user's, for the reason in claude.rs; this holds the agent's own
     /// Claude Code state.
     pub fn home(&self) -> PathBuf {
         self.dir.join("home")
@@ -136,7 +136,7 @@ impl Home {
     }
 
     fn record_file(&self) -> PathBuf {
-        self.dir.join("worker.json")
+        self.dir.join("agent.json")
     }
 
     fn sessions_file(&self) -> PathBuf {
@@ -148,9 +148,9 @@ impl Home {
     }
 
     /// Makes the folder for `record`, or takes up the one a create that was
-    /// cut off, or sent again, left. One that belongs to another worker is
-    /// refused: the service keeps names unique among workers not retired, and
-    /// a retired worker's folder is moved aside, so this is a worker the
+    /// cut off, or sent again, left. One that belongs to another agent is
+    /// refused: the service keeps names unique among agents not retired, and
+    /// a retired agent's folder is moved aside, so this is an agent the
     /// service no longer knows about, and its folder is not this host's to
     /// take.
     pub fn make(&self, record: &Record) -> Result<(), String> {
@@ -158,7 +158,7 @@ impl Home {
         if let Some(held) = self.record() {
             if held.id != record.id {
                 return Err(format!(
-                    "{} already holds worker {} by that name",
+                    "{} already holds agent {} by that name",
                     self.dir.display(),
                     held.id
                 ));
@@ -172,7 +172,7 @@ impl Home {
         fs::write(&file, text + "\n").map_err(|e| at(&file, e))
     }
 
-    /// Every session the host has started for the worker, oldest first. A
+    /// Every session the host has started for the agent, oldest first. A
     /// line cut off by the machine going down mid-write is passed over.
     pub fn sessions(&self) -> Vec<Session> {
         let text = fs::read_to_string(self.sessions_file()).unwrap_or_default();
@@ -244,10 +244,10 @@ impl Home {
             .map_err(|e| format!("{}: {e}", file.display()))
     }
 
-    /// Moves the worker's folder to `<workers_dir>/.retired/<name>-<id>`,
-    /// where it is kept, so a new worker can be given its name.
+    /// Moves the agent's folder to `<agents_dir>/.retired/<name>-<id>`,
+    /// where it is kept, so a new agent can be given its name.
     pub fn retire(&self, record: &Record) -> Result<(), String> {
-        let parent = self.dir.parent().ok_or("a worker folder has no parent")?;
+        let parent = self.dir.parent().ok_or("an agent folder has no parent")?;
         let aside = parent
             .join(RETIRED)
             .join(format!("{}-{}", record.name, record.id));
@@ -257,7 +257,7 @@ impl Home {
     }
 }
 
-/// Every worker with a folder under `dir`, retired ones aside.
+/// Every agent with a folder under `dir`, retired ones aside.
 pub fn all(dir: &Path) -> Vec<(Home, Record)> {
     let Ok(entries) = fs::read_dir(dir) else {
         return vec![];
@@ -272,7 +272,7 @@ pub fn all(dir: &Path) -> Vec<(Home, Record)> {
     found
 }
 
-/// Whether a worker with this id was retired here.
+/// Whether an agent with this id was retired here.
 pub fn retired(dir: &Path, id: &str) -> bool {
     let suffix = format!("-{id}");
     fs::read_dir(dir.join(RETIRED)).is_ok_and(|entries| {
@@ -288,7 +288,7 @@ mod tests {
 
     fn scratch(name: &str) -> PathBuf {
         let dir =
-            std::env::temp_dir().join(format!("worker-host-home-{}-{name}", std::process::id()));
+            std::env::temp_dir().join(format!("agent-host-home-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -321,7 +321,7 @@ mod tests {
     }
 
     #[test]
-    fn a_worker_folder_has_the_layout_the_protocol_names() {
+    fn an_agent_folder_has_the_layout_the_protocol_names() {
         let dir = scratch("layout");
         let home = Home::new(dir.join("ana"));
         home.make(&ana()).unwrap();
@@ -341,7 +341,7 @@ mod tests {
                 ..ana()
             })
             .unwrap_err();
-        assert!(err.contains("already holds worker w1"), "{err}");
+        assert!(err.contains("already holds agent w1"), "{err}");
     }
 
     #[test]

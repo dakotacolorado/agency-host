@@ -384,7 +384,7 @@ impl Link {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{CommandReport, WorkerReport};
+    use crate::protocol::{AgentReport, CommandReport};
     use std::net::TcpListener;
     use tungstenite::handshake::server::{Request, Response};
 
@@ -442,7 +442,7 @@ mod tests {
     #[test]
     fn a_command_pushed_is_handed_down_and_a_report_goes_up() {
         let (url, service) = stand_in(
-            r#"{"type":"command","command":{"id":"c1","kind":"interrupt","workerId":"w1"}}"#,
+            r#"{"type":"command","command":{"id":"c1","kind":"interrupt","agentId":"w1"}}"#,
         );
         let socket = Socket::spawn("studio", "the-token");
         assert!(
@@ -461,14 +461,14 @@ mod tests {
         assert!(socket.is_up());
         assert_eq!(socket.opened(), 1);
 
-        let workers = [WorkerReport::new(
+        let agents = [AgentReport::new(
             "w1".into(),
             crate::protocol::State::Waiting,
             Some("s1".into()),
         )];
         let results = [CommandReport::new("c1".into(), None)];
         assert!(socket.send(&Up::Report {
-            workers: &workers,
+            agents: &agents,
             lines: vec![],
             command_results: &results,
             usage: None,
@@ -480,8 +480,8 @@ mod tests {
         let sent: serde_json::Value = serde_json::from_str(&sent).unwrap();
         assert_eq!(sent["type"], "report");
         assert_eq!(sent["commandResults"][0]["commandId"], "c1");
-        assert_eq!(sent["workers"][0]["state"], "waiting");
-        assert!(sent["workers"][0].get("turn").is_none());
+        assert_eq!(sent["agents"][0]["state"], "waiting");
+        assert!(sent["agents"][0].get("turn").is_none());
     }
 
     #[test]
@@ -507,7 +507,7 @@ mod tests {
             }],
         )];
         assert!(socket.send(&Up::Report {
-            workers: &[],
+            agents: &[],
             lines: crate::protocol::line_reports(&lines),
             command_results: &[],
             usage: None,
@@ -528,7 +528,7 @@ mod tests {
                 let (stream, _) = listener.accept().unwrap();
                 let mut socket = tungstenite::accept(stream).unwrap();
                 let text = format!(
-                    r#"{{"type":"command","command":{{"id":"c{n}","kind":"stop","workerId":"w1"}}}}"#
+                    r#"{{"type":"command","command":{{"id":"c{n}","kind":"stop","agentId":"w1"}}}}"#
                 );
                 socket.send(Message::text(text)).unwrap();
                 // Dropped without a close, as a network that goes away does.

@@ -1,4 +1,4 @@
-//! One host to a workers folder: a second, started while the first runs, is
+//! One host to an agents folder: a second, started while the first runs, is
 //! refused rather than taking every command a second time.
 
 mod common;
@@ -9,19 +9,19 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 #[test]
-fn a_second_host_on_the_same_workers_folder_is_refused() {
-    let dir = std::env::temp_dir().join(format!("wh-t-one-{}", std::process::id()));
+fn a_second_host_on_the_same_agents_folder_is_refused() {
+    let dir = std::env::temp_dir().join(format!("ah-t-one-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(dir.join("home")).unwrap();
     let service = common::Service::start();
-    let workers = dir.join("workers");
+    let agents = dir.join("agents");
     let config = format!(
-        "service_url = \"{}\"\ntoken = \"t\"\nhost_id = \"studio\"\ncapacity = 1\nworkers_dir = \"{}\"\n",
+        "service_url = \"{}\"\ntoken = \"t\"\nhost_id = \"studio\"\ncapacity = 1\nagents_dir = \"{}\"\n",
         service.url,
-        workers.display()
+        agents.display()
     );
     let mut first = common::host(&dir, &config);
-    let lock = workers.join(".worker-host.lock");
+    let lock = agents.join(".agent-host.lock");
     let deadline = Instant::now() + Duration::from_secs(10);
     while !lock.exists() {
         assert!(
@@ -33,7 +33,7 @@ fn a_second_host_on_the_same_workers_folder_is_refused() {
     // The file is made a moment before it is locked.
     thread::sleep(Duration::from_millis(300));
 
-    let second = Command::new(env!("CARGO_BIN_EXE_worker-host"))
+    let second = Command::new(env!("CARGO_BIN_EXE_agent-host"))
         .env_clear()
         .env("HOME", dir.join("home"))
         .arg("--config")
@@ -47,7 +47,7 @@ fn a_second_host_on_the_same_workers_folder_is_refused() {
 
     assert_eq!(second.status.code(), Some(3));
     assert!(
-        String::from_utf8_lossy(&second.stderr).contains("another worker-host is already running"),
+        String::from_utf8_lossy(&second.stderr).contains("another agent-host is already running"),
         "{}",
         String::from_utf8_lossy(&second.stderr)
     );

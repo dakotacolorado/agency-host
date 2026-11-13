@@ -1,5 +1,5 @@
-//! Two hosts on one machine each report only their own workers, which needs
-//! each on a workers folder of its own. A session a host finds live there is
+//! Two hosts on one machine each report only their own agents, which needs
+//! each on an agents folder of its own. A session a host finds live there is
 //! resumed, and one that was stopped is left.
 
 mod common;
@@ -16,20 +16,20 @@ struct Machine {
 
 impl Machine {
     fn new(name: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("wh-{}-{name}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("ah-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("home")).unwrap();
         common::install_claude(&dir);
         Machine { dir }
     }
 
-    /// A worker's folder as a host keeps one, with one session begun, and
+    /// An agent's folder as a host keeps one, with one session begun, and
     /// stopped if `stopped`.
-    fn worker(&self, workers: &Path, id: &str, name: &str, stopped: bool) {
-        let home = workers.join(name);
+    fn agent(&self, agents: &Path, id: &str, name: &str, stopped: bool) {
+        let home = agents.join(name);
         fs::create_dir_all(&home).unwrap();
         let record = json!({"id": id, "name": name});
-        fs::write(home.join("worker.json"), record.to_string()).unwrap();
+        fs::write(home.join("agent.json"), record.to_string()).unwrap();
         let session = format!("s-{id}");
         let mut lines = json!({"sessionId": session, "claude": "c", "from": 0, "stream": true})
             .to_string()
@@ -40,7 +40,7 @@ impl Machine {
         fs::write(home.join("sessions.jsonl"), lines).unwrap();
     }
 
-    /// The workers a host tells its socket of once it has taken up what it
+    /// The agents a host tells its socket of once it has taken up what it
     /// found, as (id, state), `live` for a session working or waiting, run
     /// with `settings` and nothing from the person's own config or folders.
     fn opening(&self, settings: &str) -> Vec<(String, String)> {
@@ -54,7 +54,7 @@ impl Machine {
         let report = report_until(&mut socket, Duration::from_secs(10), |_| true);
         let _ = child.kill();
         let _ = child.wait();
-        report["workers"]
+        report["agents"]
             .as_array()
             .unwrap()
             .iter()
@@ -82,28 +82,28 @@ fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
 }
 
 #[test]
-fn two_hosts_on_one_machine_each_report_only_their_own_workers() {
+fn two_hosts_on_one_machine_each_report_only_their_own_agents() {
     let machine = Machine::new("two");
     let (beta, prod) = (machine.dir.join("beta"), machine.dir.join("prod"));
-    machine.worker(&beta, "b1", "bea", false);
-    machine.worker(&prod, "p1", "pat", false);
-    machine.worker(&prod, "p2", "pia", true);
+    machine.agent(&beta, "b1", "bea", false);
+    machine.agent(&prod, "p1", "pat", false);
+    machine.agent(&prod, "p2", "pia", true);
     assert_eq!(
-        machine.opening(&format!("workers_dir = \"{}\"\n", prod.display())),
+        machine.opening(&format!("agents_dir = \"{}\"\n", prod.display())),
         pairs(&[("p1", "live"), ("p2", "idle")]),
         "p1 was live, and is resumed; p2 was stopped"
     );
     assert_eq!(
-        machine.opening(&format!("workers_dir = \"{}\"\n", beta.display())),
+        machine.opening(&format!("agents_dir = \"{}\"\n", beta.display())),
         pairs(&[("b1", "live")])
     );
 }
 
 #[test]
-fn a_host_with_no_workers_dir_finds_its_workers_in_home() {
+fn a_host_with_no_agents_dir_finds_its_agents_in_home() {
     let machine = Machine::new("defaults");
-    machine.worker(&machine.dir.join("home/workers"), "w1", "ana", false);
-    machine.worker(&machine.dir.join("home/workers"), "w2", "bo", true);
+    machine.agent(&machine.dir.join("home/agents"), "w1", "ana", false);
+    machine.agent(&machine.dir.join("home/agents"), "w2", "bo", true);
     assert_eq!(
         machine.opening(""),
         pairs(&[("w1", "live"), ("w2", "idle")])

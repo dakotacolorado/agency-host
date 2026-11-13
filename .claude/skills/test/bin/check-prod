@@ -6,7 +6,7 @@
 # release's commit and tag; it may be another commit than the one checked out.
 set -euo pipefail
 
-repo=dakotacolorado/worker-host
+repo=dakotacolorado/agent-host
 targets=(x86_64-unknown-linux-musl aarch64-unknown-linux-musl aarch64-apple-darwin x86_64-apple-darwin)
 
 read -r tag commit assets < <(gh release view --repo "$repo" --json tagName,targetCommitish,assets --jq '"\(.tagName) \(.targetCommitish) \(.assets | length)"')
@@ -18,17 +18,14 @@ trap 'rm -rf "$dir"' EXIT
 gh release download "$tag" --repo "$repo" --dir "$dir"
 (cd "$dir" && sha256sum --check SHA256SUMS)
 for t in "${targets[@]}"; do
-  [ -f "$dir/worker-host-$t" ] || { echo "FAIL $tag has no worker-host-$t" >&2; exit 1; }
-  echo "worker-host-$t: $(file -b "$dir/worker-host-$t")"
+  [ -f "$dir/agent-host-$t" ] || { echo "FAIL $tag has no agent-host-$t" >&2; exit 1; }
+  echo "agent-host-$t: $(file -b "$dir/agent-host-$t")"
 done
 
-bin=$dir/worker-host-x86_64-unknown-linux-musl
+bin=$dir/agent-host-x86_64-unknown-linux-musl
 chmod +x "$bin"
 said=$("$bin" --version)
 echo "--version: $said"
-# Releases up to v0.1.0-47 were built before the build was given its tag.
-n=${tag##*-}
-[ "$said" = "worker-host $tag" ] || { [ "$said" = "worker-host 0.1.0" ] && [ "$n" -le 47 ] 2>/dev/null; } ||
-  { echo "FAIL the binary says '$said', not 'worker-host $tag'" >&2; exit 1; }
+[ "$said" = "agent-host $tag" ] || { echo "FAIL the binary says '$said', not 'agent-host $tag'" >&2; exit 1; }
 echo "deployed: $commit $tag"
 echo "PASS prod"

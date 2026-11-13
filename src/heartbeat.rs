@@ -51,10 +51,7 @@ impl Client {
                 .timeout(Duration::from_secs(30))
                 .build(),
             base: config.service_url.trim_end_matches('/').to_string(),
-            url: format!(
-                "{}/fleet/hosts/{}/heartbeat",
-                config.service_url, config.host_id
-            ),
+            url: format!("{}/hosts/{}/heartbeat", config.service_url, config.host_id),
             authorization: format!("Bearer {}", config.token),
         }
     }
@@ -147,7 +144,7 @@ mod tests {
             host_id: "studio".into(),
             capacity: None,
             labels: None,
-            workers_dir: "/nonexistent".into(),
+            agents_dir: "/nonexistent".into(),
             permissions: Default::default(),
         })
     }
@@ -166,10 +163,7 @@ mod tests {
         };
         let (head, body) = server.join().unwrap();
 
-        assert!(
-            head.starts_with("POST /fleet/hosts/studio/heartbeat "),
-            "{head}"
-        );
+        assert!(head.starts_with("POST /hosts/studio/heartbeat "), "{head}");
         assert!(head.contains("Authorization: Bearer secret"), "{head}");
         let sent: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(sent, serde_json::json!({"version":"9.9.9"}));
@@ -187,11 +181,11 @@ mod tests {
             r#"{"context":{"key":"global","version":4,"files":[{"path":"CLAUDE.md","content":"x","executable":false}]},"documents":[]}"#,
         );
         let whole = client(format!("{url}/"))
-            .context("/fleet/workers/w/sessions/s/context")
+            .context("/agents/w/sessions/s/context")
             .unwrap();
         let (head, _) = server.join().unwrap();
         assert!(
-            head.starts_with("GET /fleet/workers/w/sessions/s/context "),
+            head.starts_with("GET /agents/w/sessions/s/context "),
             "{head}"
         );
         assert!(head.contains("Authorization: Bearer secret"), "{head}");

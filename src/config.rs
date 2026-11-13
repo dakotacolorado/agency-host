@@ -6,7 +6,7 @@ pub struct Config {
     pub service_url: String,
     pub token: String,
     pub host_id: String,
-    /// How many workers this host will run sessions for at once. Unset, the heartbeat leaves
+    /// How many agents this host will run sessions for at once. Unset, the heartbeat leaves
     /// it out and the service places nothing here: room is the owner's to
     /// state, not the host's to deduce from the machine.
     pub capacity: Option<u32>,
@@ -15,9 +15,9 @@ pub struct Config {
     pub labels: Option<Vec<String>>,
     /// Which tools a session may use when Claude Code asks.
     pub permissions: Permissions,
-    /// Where each worker has its folder. Two hosts on one machine need two of
-    /// these as well as two sockets, or each reports the other's workers.
-    pub workers_dir: PathBuf,
+    /// Where each agent has its folder. Two hosts on one machine need two of
+    /// these as well as two sockets, or each reports the other's agents.
+    pub agents_dir: PathBuf,
 }
 
 /// The rule a permission request is answered by: a tool named in `deny` is
@@ -71,7 +71,7 @@ struct File {
     /// it is not refused.
     #[serde(rename = "tmux_socket")]
     _older: Option<toml::Value>,
-    workers_dir: Option<PathBuf>,
+    agents_dir: Option<PathBuf>,
     permissions: Option<Permissions>,
 }
 
@@ -79,7 +79,7 @@ pub fn default_path() -> Option<PathBuf> {
     env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-        .map(|dir| dir.join("worker-host").join("config.toml"))
+        .map(|dir| dir.join("agent-host").join("config.toml"))
 }
 
 /// Reads the file, which is the only place settings come from.
@@ -101,18 +101,18 @@ fn from_file(file: File, home: Option<PathBuf>) -> Result<Config, String> {
         .or_else(crate::sys::hostname)
         .ok_or("no host_id, and no hostname to use instead")?;
     // In plain sight in the person's home rather than under a data directory:
-    // a worker's folder is where a person goes to see its work.
-    let workers_dir = match file.workers_dir {
+    // an agent's folder is where a person goes to see its work.
+    let agents_dir = match file.agents_dir {
         Some(dir) => dir,
         None => home
             .filter(|h| !h.as_os_str().is_empty())
-            .map(|home| home.join("workers"))
-            .ok_or("no workers_dir and no HOME to put ~/workers in")?,
+            .map(|home| home.join("agents"))
+            .ok_or("no agents_dir and no HOME to put ~/agents in")?,
     };
-    if !workers_dir.is_absolute() {
+    if !agents_dir.is_absolute() {
         return Err(format!(
-            "workers_dir {} is not an absolute path",
-            workers_dir.display()
+            "agents_dir {} is not an absolute path",
+            agents_dir.display()
         ));
     }
     Ok(Config {
@@ -121,7 +121,7 @@ fn from_file(file: File, home: Option<PathBuf>) -> Result<Config, String> {
         host_id,
         capacity: file.capacity,
         labels: file.labels,
-        workers_dir,
+        agents_dir,
         permissions: file.permissions.unwrap_or_default(),
     })
 }
@@ -151,7 +151,7 @@ mod tests {
                 host_id: "studio".into(),
                 capacity: Some(2),
                 labels: Some(vec!["macos".into(), "linux".into()]),
-                workers_dir: "/home/me/workers".into(),
+                agents_dir: "/home/me/agents".into(),
                 permissions: Permissions::default(),
             }
         );
@@ -196,14 +196,14 @@ mod tests {
     }
 
     #[test]
-    fn workers_live_in_home_unless_the_file_says_otherwise() {
+    fn agents_live_in_home_unless_the_file_says_otherwise() {
         assert_eq!(
-            read(BASE).unwrap().workers_dir,
-            PathBuf::from("/home/me/workers")
+            read(BASE).unwrap().agents_dir,
+            PathBuf::from("/home/me/agents")
         );
-        let config = read(&format!("{BASE}workers_dir = \"/srv/workers\"")).unwrap();
-        assert_eq!(config.workers_dir, PathBuf::from("/srv/workers"));
-        let err = read(&format!("{BASE}workers_dir = \"workers\"")).unwrap_err();
+        let config = read(&format!("{BASE}agents_dir = \"/srv/agents\"")).unwrap();
+        assert_eq!(config.agents_dir, PathBuf::from("/srv/agents"));
+        let err = read(&format!("{BASE}agents_dir = \"agents\"")).unwrap_err();
         assert!(err.contains("not an absolute path"), "{err}");
     }
 
@@ -214,7 +214,7 @@ mod tests {
 
     #[test]
     fn the_file_must_exist() {
-        let err = load(Some("/nonexistent/worker-host.toml".into())).unwrap_err();
-        assert!(err.contains("/nonexistent/worker-host.toml"), "{err}");
+        let err = load(Some("/nonexistent/agent-host.toml".into())).unwrap_err();
+        assert!(err.contains("/nonexistent/agent-host.toml"), "{err}");
     }
 }

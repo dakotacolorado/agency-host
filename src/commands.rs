@@ -5,8 +5,8 @@
 
 use std::collections::VecDeque;
 
+use crate::agent::{Agents, Deliveries, Given};
 use crate::protocol::{Command, CommandReport};
-use crate::worker::{Deliveries, Given, Workers};
 
 /// How many settled commands are remembered. A command is sent again only
 /// until its report is in, which is the next report on an open socket, so
@@ -18,7 +18,7 @@ const REMEMBERED: usize = 1000;
 /// taken is answered as written, not written again. Held in memory: a host
 /// that restarts takes again a command it had settled but not reported,
 /// which is why each kind is also safe to take again on its own (see
-/// `Workers`), except a message, which is written again.
+/// `Agents`), except a message, which is written again.
 pub struct Taken {
     settled: VecDeque<CommandReport>,
 }
@@ -50,13 +50,13 @@ impl Taken {
     pub fn take(
         &mut self,
         command: &Command,
-        workers: &Workers,
+        agents: &Agents,
         deliveries: &mut Deliveries,
     ) -> Option<CommandReport> {
         if let Some(report) = self.settled.iter().find(|r| r.command_id == command.id) {
             return Some(report.clone());
         }
-        let report = take(command, workers, deliveries)?;
+        let report = take(command, agents, deliveries)?;
         self.remember(&report);
         Some(report)
     }
@@ -64,22 +64,22 @@ impl Taken {
 
 /// A kind the host does not handle is reported by name rather than dropped,
 /// so the sender learns the command went nowhere. A message is reported
-/// written here, and again once its worker takes it, by `Deliveries::settle`.
+/// written here, and again once its agent takes it, by `Deliveries::settle`.
 pub fn take(
     command: &Command,
-    workers: &Workers,
+    agents: &Agents,
     deliveries: &mut Deliveries,
 ) -> Option<CommandReport> {
     if deliveries.holds(&command.id) {
         return None;
     }
     let text = command.text.as_deref();
-    let error = match (command.kind.as_str(), command.worker_id.as_deref()) {
-        ("create", Some(worker)) => match &command.name {
-            Some(name) => workers.create(worker, name).err(),
+    let error = match (command.kind.as_str(), command.agent_id.as_deref()) {
+        ("create", Some(agent)) => match &command.name {
+            Some(name) => agents.create(agent, name).err(),
             None => Some("a create needs a name".into()),
         },
-        ("start", Some(worker)) => match &command.session_id {
+        ("start", Some(agent)) => match &command.session_id {
             Some(session) => {
                 let given = Given {
                     command: Some(&command.id),
@@ -88,30 +88,24 @@ pub fn take(
                     env: command.env.as_ref(),
                     secrets: command.secrets.as_ref(),
                 };
-                workers
-                    .start_with(
-                        worker,
-                        session,
-                        command.resume.unwrap_or(false),
-                        text,
-                        given,
-                    )
+                agents
+                    .start_with(agent, session, command.resume.unwrap_or(false), text, given)
                     .err()
             }
             None => Some("a start needs a sessionId".into()),
         },
-        ("message", Some(worker)) => match text {
-            Some(text) => match deliveries.hold(workers, &command.id, worker, text) {
+        ("message", Some(agent)) => match text {
+            Some(text) => match deliveries.hold(agents, &command.id, agent, text) {
                 Ok(()) => return Some(CommandReport::written(command.id.clone())),
                 Err(e) => Some(e),
             },
             None => Some("a message needs text".into()),
         },
-        ("interrupt", Some(worker)) => workers.interrupt(worker, &command.id, text).err(),
-        ("stop", Some(worker)) => workers.stop(worker).err(),
-        ("retire", Some(worker)) => workers.retire(worker).err(),
+        ("interrupt", Some(agent)) => agents.interrupt(agent, &command.id, text).err(),
+        ("stop", Some(agent)) => agents.stop(agent).err(),
+        ("retire", Some(agent)) => agents.retire(agent).err(),
         (kind @ ("create" | "start" | "message" | "interrupt" | "stop" | "retire"), None) => {
-            Some(format!("{kind:?} needs a workerId"))
+            Some(format!("{kind:?} needs an agentId"))
         }
         (kind, _) => Some(format!("this host does not handle {kind:?} commands")),
     };
@@ -124,12 +118,12 @@ mod tests {
     use crate::claude::Claude;
     use crate::session::Sessions;
 
-    /// No folder holds a worker, so the host has none.
-    fn no_workers() -> Workers {
-        Workers::new(
+    /// No folder holds an agent, so the host has none.
+    fn no_agents() -> Agents {
+        Agents::new(
             Sessions::new(Default::default()),
             Claude::new("/nonexistent/claude", None),
-            "/nonexistent/workers".into(),
+            "/nonexistent/agents".into(),
         )
     }
 
@@ -138,7 +132,7 @@ mod tests {
     }
 
     fn take_now(json: &str) -> CommandReport {
-        take(&command(json), &no_workers(), &mut Deliveries::default()).unwrap()
+        take(&command(json), &no_agents(), &mut Deliveries::default()).unwrap()
     }
 
     #[test]
@@ -154,12 +148,12 @@ mod tests {
     }
 
     #[test]
-    fn a_command_for_a_worker_names_one() {
+    fn a_command_for_an_agent_names_one() {
         for kind in ["create", "start", "message", "interrupt", "stop", "retire"] {
             let report = take_now(&format!(r#"{{"id":"c1","kind":"{kind}","text":"hi"}}"#));
             assert_eq!(
                 report.error.as_deref(),
-                Some(format!("{kind:?} needs a workerId").as_str())
+                Some(format!("{kind:?} needs an agentId").as_str())
             );
         }
     }
@@ -168,15 +162,15 @@ mod tests {
     fn a_command_without_its_fields_is_refused_with_which() {
         for (json, why) in [
             (
-                r#"{"id":"c1","kind":"create","workerId":"w1"}"#,
+                r#"{"id":"c1","kind":"create","agentId":"w1"}"#,
                 "needs a name",
             ),
             (
-                r#"{"id":"c1","kind":"start","workerId":"w1"}"#,
+                r#"{"id":"c1","kind":"start","agentId":"w1"}"#,
                 "needs a sessionId",
             ),
             (
-                r#"{"id":"c1","kind":"message","workerId":"w1"}"#,
+                r#"{"id":"c1","kind":"message","agentId":"w1"}"#,
                 "needs text",
             ),
         ] {
@@ -187,46 +181,46 @@ mod tests {
     }
 
     #[test]
-    fn a_command_for_a_worker_not_here_is_reported() {
+    fn a_command_for_an_agent_not_here_is_reported() {
         for kind in ["start", "message", "interrupt"] {
             let report = take_now(&format!(
-                r#"{{"id":"c1","kind":"{kind}","workerId":"w9","sessionId":"s1","text":"hi"}}"#
+                r#"{{"id":"c1","kind":"{kind}","agentId":"w9","sessionId":"s1","text":"hi"}}"#
             ));
             assert!(!report.ok, "{kind}");
             let error = report.error.unwrap();
             assert!(
-                error.contains("no worker w9") || error.contains("w9 has no live session"),
+                error.contains("no agent w9") || error.contains("w9 has no live session"),
                 "{kind}: {error}"
             );
         }
     }
 
     #[test]
-    fn stopping_or_retiring_a_worker_not_here_is_done() {
+    fn stopping_or_retiring_an_agent_not_here_is_done() {
         for kind in ["stop", "retire"] {
-            let report = take_now(&format!(r#"{{"id":"c1","kind":"{kind}","workerId":"w9"}}"#));
+            let report = take_now(&format!(r#"{{"id":"c1","kind":"{kind}","agentId":"w9"}}"#));
             assert_eq!(report, CommandReport::new("c1".into(), None), "{kind}");
         }
     }
 
     #[test]
     fn a_create_that_cannot_be_done_says_why() {
-        let report = take_now(r#"{"id":"c1","kind":"create","workerId":"w1","name":"Ana"}"#);
+        let report = take_now(r#"{"id":"c1","kind":"create","agentId":"w1","name":"Ana"}"#);
         let error = report.error.unwrap();
-        assert!(error.contains("not a worker name"), "{error}");
+        assert!(error.contains("not an agent name"), "{error}");
     }
 
     #[test]
     fn a_command_settled_once_is_answered_again_and_not_done_again() {
-        let workers = no_workers();
+        let agents = no_agents();
         let mut deliveries = Deliveries::default();
         let mut taken = Taken::default();
-        let start = command(r#"{"id":"c1","kind":"start","workerId":"w9","sessionId":"s1"}"#);
-        let first = taken.take(&start, &workers, &mut deliveries).unwrap();
+        let start = command(r#"{"id":"c1","kind":"start","agentId":"w9","sessionId":"s1"}"#);
+        let first = taken.take(&start, &agents, &mut deliveries).unwrap();
         assert!(!first.ok);
-        // Were it taken again, a worker made since would now be started.
+        // Were it taken again, an agent made since would now be started.
         taken.settled[0].error = Some("as first reported".into());
-        let again = taken.take(&start, &workers, &mut deliveries).unwrap();
+        let again = taken.take(&start, &agents, &mut deliveries).unwrap();
         assert_eq!(again.error.as_deref(), Some("as first reported"));
     }
 }
