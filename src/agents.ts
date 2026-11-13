@@ -123,12 +123,20 @@ export interface AgentsOptions {
   changed: () => void;
 }
 
-/** The agent's standing rules, Claude Code's user memory. */
-export function rules(dir: string, name: string): string {
-  return (
+/**
+ * The agent's standing rules, Claude Code's user memory: the host's own, then
+ * `instructions`, the honed skills its last start gave it (`context.instructions`).
+ */
+export function rules(dir: string, name: string, instructions = ""): string {
+  const own =
     `You are agent \`${name}\`, and your folder is \`${dir}\`. A person reads everything you write, and what to do ` +
     "comes to you as messages. Clone whatever you need into your folder; `home/`, `logs/`, `credentials.env`, " +
-    "`mcp.json`, `prompt.md`, `sessions.jsonl` and `agent.json` are the host's records of you, so leave them be.\n"
+    "`mcp.json`, `prompt.md`, `sessions.jsonl` and `agent.json` are the host's records of you, so leave them be.\n";
+  if (!instructions) return own;
+  return (
+    `${own}\nYou work by the honed skills you were started with, below, in the order you were given them. Follow them as these ` +
+    "rules; where one was wrong or missing something your work needed, say so as feedback on it in honed.\n\n" +
+    instructions
   );
 }
 
@@ -167,7 +175,7 @@ export class Agents {
     if (held && held.record.name !== name) throw new Error(`agent ${id} is here already, named ${held.record.name}`);
     const h = new home.Home(`${this.o.dir}/${name}`);
     h.make({ id, name });
-    claude.prepare(h.claude(), h.dir, rules(h.dir, name));
+    claude.prepare(h.claude(), h.dir, rules(h.dir, name, context.instructions(h.claude())));
   }
 
   /**
@@ -200,8 +208,9 @@ export class Agents {
     writeFileSync(h.prompt(), text);
     // A start that carries neither keeps what the last one wrote.
     if (s.context !== undefined || s.documents !== undefined) context.write(h.claude(), s.context, s.documents ?? []);
-    // The rules follow the host's version, so each session is told the ones of the host it runs on.
-    claude.prepare(h.claude(), h.dir, rules(h.dir, record.name));
+    // The rules follow the host's version, so each session is told the ones of the host it runs on,
+    // with the honed skills it was last given.
+    claude.prepare(h.claude(), h.dir, rules(h.dir, record.name, context.instructions(h.claude())));
     // Its variables go with its tokens, so a session resumed after the host restarts is given them again.
     context.writeCredentials(h.credentials(), { ...context.env(s.env), ...context.env(s.secrets) });
     // A start names every server its session may call, so one that names none takes away the last start's.

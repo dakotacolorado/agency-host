@@ -86,6 +86,29 @@ export function write(state: string, context: Context | undefined, documents: Co
   return done;
 }
 
+/**
+ * The `SKILL.md` of each document the last start wrote into `state`, in its
+ * order, its frontmatter left off: the session's standing instructions, so
+ * an agent follows its role without being told to read a skill. Empty when
+ * no start has given any.
+ */
+export function instructions(state: string): string {
+  const parts: string[] = [];
+  for (const doc of written(state)?.documents ?? []) {
+    const path = (doc.paths ?? []).find((p) => allowed(p) && /^skills\/[^/]+\/SKILL\.md$/.test(p));
+    if (!path) continue;
+    let text: string;
+    try {
+      text = readFileSync(join(state, path), "utf8");
+    } catch {
+      continue;
+    }
+    const body = text.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, "").trim();
+    if (body) parts.push(`---\n\nFrom honed's \`${doc.key}\`, v${doc.version}, also at \`${dirname(path)}/\`:\n\n${body}\n`);
+  }
+  return parts.join("\n");
+}
+
 function put(state: string, context: Context): Written {
   const paths: string[] = [];
   for (const f of context.files) {

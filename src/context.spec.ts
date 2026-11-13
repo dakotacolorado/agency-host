@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { env, expand, readCredentials, write, writeCredentials, written, type Context } from "./context.ts";
+import { env, expand, instructions, readCredentials, write, writeCredentials, written, type Context } from "./context.ts";
 import { scratch } from "./testing.ts";
 
 const file = (path: string, content: string, executable = false) => ({ path, content, executable });
@@ -54,6 +54,25 @@ describe("a start's files", () => {
     );
     expect(existsSync(join(state, "skills/a/SKILL.md"))).toBe(true);
     expect(existsSync(join(state, "skills/b"))).toBe(false);
+  });
+});
+
+describe("a start's instructions", () => {
+  it("are each document's SKILL.md, in order, without its frontmatter, and none of the context's", () => {
+    const state = scratch("instructions");
+    expect(instructions(state)).toBe("");
+    write(state, ctx(1, [file("skills/page/SKILL.md", "Page.")]), [
+      ctx(4, [file("skills/implementer/SKILL.md", "---\nname: implementer\ndescription: The role.\n---\n\n# Doing one item\n\nDo it.\n"), file("skills/implementer/role.json", "{}")], "agent-roles/implementer"),
+      ctx(2, [file("skills/global/SKILL.md", "Shared rules.")], "workplace/global"),
+      ctx(1, [file("skills/empty/notes.md", "No SKILL.md.")], "team/empty"),
+    ]);
+    const text = instructions(state);
+    expect(text).toBe(
+      "---\n\nFrom honed's `agent-roles/implementer`, v4, also at `skills/implementer/`:\n\n# Doing one item\n\nDo it.\n\n" +
+        "---\n\nFrom honed's `workplace/global`, v2, also at `skills/global/`:\n\nShared rules.\n",
+    );
+    write(state, undefined, []);
+    expect(instructions(state)).toBe("");
   });
 });
 

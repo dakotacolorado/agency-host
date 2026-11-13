@@ -84,6 +84,8 @@ export const startSdkSession: StartSession = (o) => {
       // As `claude` itself loads them: the agent's own settings, rules and
       // skills from its CLAUDE_CONFIG_DIR, and those of whatever it works in.
       settingSources: ["user", "project", "local"],
+      // Without it the SDK sends an empty system prompt, not Claude Code's.
+      systemPrompt: { type: "preset", preset: "claude_code" },
       canUseTool,
       permissionMode: "default",
       // Each message the host sends comes back once Claude Code takes it,
