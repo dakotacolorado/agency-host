@@ -362,17 +362,17 @@ describe("a host that restarts", () => {
   });
 });
 
-describe("retiring", () => {
+describe("deleting", () => {
   it("stops the agent and moves its folder aside; one not here is done", async () => {
     const { dir, sdk, agents } = host();
     agents.create(AGENT, "ana");
     agents.start({ agentId: AGENT, sessionId: S1, resume: false });
-    await agents.retire(AGENT);
+    await agents.delete(AGENT);
     expect(sdk.last.closed).toBe(true);
     expect(agents.all()).toEqual([]);
-    expect(existsSync(join(dir, ".retired", `ana-${AGENT}`, "agent.json"))).toBe(true);
-    await agents.retire(AGENT);
+    expect(existsSync(join(dir, ".deleted", `ana-${AGENT}`, "agent.json"))).toBe(true);
+    await agents.delete(AGENT);
     await agents.stop(AGENT);
-    expect(() => agents.create(AGENT, "ana")).toThrow(/was retired here/);
+    expect(() => agents.create(AGENT, "ana")).toThrow(/was deleted here/);
   });
 });

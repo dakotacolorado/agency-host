@@ -21,7 +21,10 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renam
 import { dirname, join } from "node:path";
 
 /** Hidden, so it is never taken for an agent named so. */
-export const RETIRED = ".retired";
+export const DELETED = ".deleted";
+
+/** Where agents deleted before deletion had its name are kept: read, never written. */
+const RETIRED = ".retired";
 
 export interface Record {
   id: string;
@@ -182,15 +185,15 @@ export class Home {
     appendFileSync(file, line);
   }
 
-  /** Moves the folder to `<agents_dir>/.retired/<name>-<id>`, where it is kept, so a new agent can be given its name. */
-  retire(record: Record): void {
+  /** Moves the folder to `<agents_dir>/.deleted/<name>-<id>`, where it is kept, so a new agent can be given its name. */
+  delete(record: Record): void {
     const parent = dirname(this.dir);
-    mkdirSync(join(parent, RETIRED), { recursive: true });
-    renameSync(this.dir, join(parent, RETIRED, `${record.name}-${record.id}`));
+    mkdirSync(join(parent, DELETED), { recursive: true });
+    renameSync(this.dir, join(parent, DELETED, `${record.name}-${record.id}`));
   }
 }
 
-/** Every agent with a folder under `dir`, retired ones aside, by name. */
+/** Every agent with a folder under `dir`, deleted ones aside, by name. */
 export function all(dir: string): { home: Home; record: Record }[] {
   let names: string[];
   try {
@@ -208,10 +211,12 @@ export function all(dir: string): { home: Home; record: Record }[] {
     .sort((a, b) => (a.record.name < b.record.name ? -1 : a.record.name > b.record.name ? 1 : 0));
 }
 
-export function retired(dir: string, id: string): boolean {
-  try {
-    return readdirSync(join(dir, RETIRED)).some((n) => n.endsWith(`-${id}`));
-  } catch {
-    return false;
-  }
+export function deleted(dir: string, id: string): boolean {
+  return [DELETED, RETIRED].some((aside) => {
+    try {
+      return readdirSync(join(dir, aside)).some((n) => n.endsWith(`-${id}`));
+    } catch {
+      return false;
+    }
+  });
 }

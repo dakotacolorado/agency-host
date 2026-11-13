@@ -147,7 +147,7 @@ export class Agents {
   private find(id: string): { home: Home; record: AgentRecord } {
     const found = this.all().find((a) => a.record.id === id);
     if (found) return found;
-    throw new Error(home.retired(this.o.dir, id) ? `agent ${id} is retired` : `no agent ${id} on this host`);
+    throw new Error(home.deleted(this.o.dir, id) ? `agent ${id} is deleted` : `no agent ${id} on this host`);
   }
 
   /** The live session of each agent that has one, by agent id. */
@@ -162,7 +162,7 @@ export class Agents {
   /** Makes the agent's folder: its record and a Claude Code state of its own. One the host has made already is taken up where it stands. */
   create(id: string, name: string): void {
     if (!home.validName(name)) throw new Error(`${JSON.stringify(name)} is not an agent name: [a-z0-9][a-z0-9-]{0,39}`);
-    if (home.retired(this.o.dir, id)) throw new Error(`agent ${id} was retired here`);
+    if (home.deleted(this.o.dir, id)) throw new Error(`agent ${id} was deleted here`);
     const held = this.all().find((a) => a.record.id === id);
     if (held && held.record.name !== name) throw new Error(`agent ${id} is here already, named ${held.record.name}`);
     const h = new home.Home(`${this.o.dir}/${name}`);
@@ -346,8 +346,8 @@ export class Agents {
     this.o.changed();
   }
 
-  /** Stops the agent and moves its folder aside, where it is kept. One not here, or retired already, is done. */
-  async retire(id: string): Promise<void> {
+  /** Stops the agent and moves its folder aside, where it is kept. One not here, or deleted already, is done. */
+  async delete(id: string): Promise<void> {
     let found;
     try {
       found = this.find(id);
@@ -355,7 +355,7 @@ export class Agents {
       return;
     }
     await this.stop(id);
-    found.home.retire(found.record);
+    found.home.delete(found.record);
     this.o.changed();
   }
 

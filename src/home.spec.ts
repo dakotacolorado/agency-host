@@ -1,7 +1,7 @@
-import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { all, Home, retired, validName, type Session } from "./home.ts";
+import { all, Home, deleted, validName, type Session } from "./home.ts";
 import { scratch } from "./testing.ts";
 
 const ana = { id: "w1", name: "ana" };
@@ -10,7 +10,7 @@ const session = (id: string, more: Partial<Session> = {}): Session => ({ session
 describe("an agent's folder", () => {
   it("takes only a name that cannot reach outside the agents folder", () => {
     for (const good of ["ana", "a", "0", "front-end-2", "a".repeat(40)]) expect(validName(good)).toBe(true);
-    for (const bad of ["", "-ana", "Ana", "../x", "a/b", ".retired", "a b", "a".repeat(41)]) expect(validName(bad)).toBe(false);
+    for (const bad of ["", "-ana", "Ana", "../x", "a/b", ".deleted", "a b", "a".repeat(41)]) expect(validName(bad)).toBe(false);
   });
 
   it("has the layout the protocol names, and is not another agent's to take", () => {
@@ -51,13 +51,20 @@ describe("an agent's folder", () => {
     ]);
   });
 
-  it("is moved aside when retired, and no longer counted", () => {
-    const dir = scratch("retire");
+  it("is moved aside when deleted, and no longer counted", () => {
+    const dir = scratch("delete");
     const home = new Home(join(dir, "ana"));
     home.make(ana);
-    home.retire(ana);
+    home.delete(ana);
     expect(all(dir)).toEqual([]);
-    expect(retired(dir, "w1")).toBe(true);
-    expect(retired(dir, "w2")).toBe(false);
+    expect(deleted(dir, "w1")).toBe(true);
+    expect(deleted(dir, "w2")).toBe(false);
+    expect(readdirSync(join(dir, ".deleted"))).toEqual(["ana-w1"]);
+  });
+
+  it("is known deleted from a folder an older host set aside as retired", () => {
+    const dir = scratch("retired");
+    mkdirSync(join(dir, ".retired", "bo-w9"), { recursive: true });
+    expect(deleted(dir, "w9")).toBe(true);
   });
 });

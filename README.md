@@ -137,8 +137,8 @@ session has open (from the SDK's latest `background_tasks_changed`), and
 A `message` is pushed into the live session at once and reported done; to an
 agent with no live session it is refused. An `interrupt` stops the turn, as
 Escape does, then says its text if it has one. `stop` ends the session;
-`retire` stops it and moves the folder to
-`<agents_dir>/.retired/<name>-<id>/`. The `instruction` line of a message, a
+`delete` stops it and moves the folder to
+`<agents_dir>/.deleted/<name>-<id>/`. The `instruction` line of a message, a
 start's text or an interrupt's carries that command's `commandId`.
 
 To take a session over by hand, stop the agent, then in its folder:

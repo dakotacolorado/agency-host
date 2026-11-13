@@ -58,7 +58,7 @@ export class Totals {
     for (const t of totals) this.read.set(`${agentId}\n${t.sessionId}`, { agentId, sessionId: t.sessionId, ...t.tokens });
   }
 
-  /** Only the agents still here are kept, so a retired agent's sessions are not told again on every socket. */
+  /** Only the agents still here are kept, so a deleted agent's sessions are not told again on every socket. */
   keep(here: (agentId: string) => boolean): void {
     for (const [k, t] of this.read) if (!here(t.agentId)) this.read.delete(k);
   }
