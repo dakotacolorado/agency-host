@@ -68,6 +68,10 @@ describe("starting a session", () => {
     const state = join(dir, "ana/home/.claude");
     expect(readFileSync(join(state, "skills/page/SKILL.md"), "utf8")).toBe("page");
     expect(readFileSync(join(state, "skills/planner/SKILL.md"), "utf8")).toBe("plan");
+    const rules = readFileSync(join(state, "CLAUDE.md"), "utf8");
+    expect(rules).toContain(`You are agent \`ana\``);
+    expect(rules).toContain("From honed's `agent-roles/planner`, v3, also at `skills/planner/`:\n\nplan\n");
+    expect(rules).not.toContain("page");
     expect(readFileSync(join(dir, "ana/prompt.md"), "utf8")).toBe("Do the work.");
     expect(statSync(join(dir, "ana/credentials.env")).mode & 0o777).toBe(0o600);
     // No token on disk but credentials.env.
@@ -91,11 +95,14 @@ describe("starting a session", () => {
       const state = join(dir, "ana/home/.claude");
       expect(existsSync(join(state, "skills/a/SKILL.md")) && existsSync(join(state, "skills/b/SKILL.md"))).toBe(true);
       expect(existsSync(join(dir, "ana/mcp.json"))).toBe(false);
+      expect(readFileSync(join(state, "CLAUDE.md"), "utf8")).toContain("From honed's `b`, v1");
       return agents.stop(AGENT).then(() => {
         agents.start({ agentId: AGENT, sessionId: "s3", resume: true, documents: [skill("c")] });
         expect(existsSync(join(state, "skills/a"))).toBe(false);
         expect(existsSync(join(state, "skills/b"))).toBe(false);
         expect(existsSync(join(state, "skills/c/SKILL.md"))).toBe(true);
+        expect(readFileSync(join(state, "CLAUDE.md"), "utf8")).toContain("From honed's `c`, v1, also at `skills/c/`:\n\nc\n");
+        expect(readFileSync(join(state, "CLAUDE.md"), "utf8")).not.toContain("`b`");
       });
     });
   });

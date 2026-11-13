@@ -135,14 +135,17 @@ logs/<id>.log     everything each session wrote on its stderr
 A `start` writes its `context` (agency's own clients) and `documents`
 (honed skills), files under `skills/`, into `home/.claude/`, in place of what
 the last start wrote (listed in `home/.claude/.context.json`); a start with
-neither keeps the last. The host's own rules are the agent's `CLAUDE.md`. Its
+neither keeps the last. The agent's `CLAUDE.md` is the host's own rules, then
+each document's `SKILL.md`, in order and without its frontmatter, so a
+session follows its role from its first turn. Its
 `env` and `secrets` are written to `credentials.env`, mode 600, and set in
 the session's environment from there, never on a command line, so a session
 resumed after a restart has them again; its `mcpServers` go to the session
 with their `${VAR}`s filled from that environment.
 
 A session runs in the agent's folder, a new conversation under the start's
-session id or, with `resume`, the last one carried on. Each session shares
+session id or, with `resume`, the last one carried on, on Claude Code's own
+system prompt (the SDK's `claude_code` preset). Each session shares
 the host user's Claude login: HOME stays the user's, and
 `CLAUDE_SECURESTORAGE_CONFIG_DIR` points at the user's own store (see
 `src/claude.ts`). An agent's settings deny the `AskUserQuestion`,
