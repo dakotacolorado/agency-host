@@ -43,9 +43,8 @@ Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 WantedBy=default.target
 ```
 
-agent-host runs beside worker-host, the host of the older worker-service, on
-the same machine: its config (`~/.config/agent-host/`), folders (`~/agents`),
-lock and log are all its own.
+Its config (`~/.config/agent-host/`), folders (`~/agents`), lock and log are
+all its own, so it can run beside other services on the same machine.
 
 ## Configure
 
