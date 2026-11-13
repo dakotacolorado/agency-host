@@ -308,6 +308,21 @@ impl Agents {
         let mut variables: BTreeMap<String, String> = context::env(given.env).into_iter().collect();
         variables.extend(context::env(given.secrets));
         context::credentials(&home.credentials(), Some(&variables))?;
+        // A start names every server its session may call, so one that names
+        // none takes away the last start's.
+        let mcp = home.mcp();
+        match given.mcp_servers.filter(|servers| !servers.is_empty()) {
+            Some(servers) => {
+                let file = serde_json::json!({ "mcpServers": servers }).to_string();
+                fs::write(&mcp, file).map_err(|e| format!("{}: {e}", mcp.display()))?;
+            }
+            None => match fs::remove_file(&mcp) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(format!("{}: {e}", mcp.display()));
+                }
+                _ => {}
+            },
+        }
         // Written before it runs, so a machine that dies between the two
         // leaves a session it knows of, which is then resumed.
         home.begin(&session)?;
@@ -329,7 +344,12 @@ impl Agents {
         text: &str,
         opening: bool,
     ) -> Result<(), String> {
-        let argv = self.claude.argv(begin, &home.credentials());
+        let mcp = home.mcp();
+        let argv = self.claude.argv(
+            begin,
+            &home.credentials(),
+            mcp.is_file().then_some(mcp.as_path()),
+        );
         let env = self.claude.env(&home.claude());
         self.sessions.start(
             id,
@@ -651,6 +671,7 @@ pub struct Given<'a> {
     pub documents: Option<&'a [Context]>,
     pub env: Option<&'a BTreeMap<String, String>>,
     pub secrets: Option<&'a BTreeMap<String, String>>,
+    pub mcp_servers: Option<&'a serde_json::Map<String, serde_json::Value>>,
 }
 
 /// The agent's standing rules, Claude Code's user memory.
@@ -658,8 +679,8 @@ fn rules(home: &Home, record: &Record) -> String {
     format!(
         "You are agent `{}`, and your folder is `{}`. A person reads everything you \
          write, and what to do comes to you as messages. Clone whatever you need into \
-         your folder; `home/`, `logs/`, `credentials.env`, `prompt.md`, `sessions.jsonl` \
-         and `agent.json` are the host's records of you, so leave them be.\n",
+         your folder; `home/`, `logs/`, `credentials.env`, `mcp.json`, `prompt.md`, \
+         `sessions.jsonl` and `agent.json` are the host's records of you, so leave them be.\n",
         record.name,
         home.dir.display()
     )

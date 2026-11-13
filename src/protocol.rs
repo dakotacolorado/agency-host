@@ -35,6 +35,10 @@ pub struct Command {
     /// `start`: tokens for its session, which go only into a file only the
     /// host's user can read, never onto a command line.
     pub secrets: Option<BTreeMap<String, String>>,
+    /// `start`: the MCP servers its session may call, as Claude Code's
+    /// `mcpServers` takes them. Their addresses and tokens are `${VAR}`s its
+    /// session's own variables fill, so none is in the command.
+    pub mcp_servers: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 /// A start's whole context, as the service answers at its `contextUrl`.

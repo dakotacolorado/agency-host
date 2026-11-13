@@ -112,7 +112,7 @@ impl Claude {
     ///
     /// The session's tokens are read from `credentials`, when there is one,
     /// so that none is on a command line.
-    pub fn argv(&self, begin: Begin, credentials: &Path) -> Vec<String> {
+    pub fn argv(&self, begin: Begin, credentials: &Path, mcp: Option<&Path>) -> Vec<String> {
         let mut argv: Vec<String> = [
             "sh",
             "-c",
@@ -135,6 +135,9 @@ impl Claude {
         match begin {
             Begin::Fresh(session) => argv.extend(["--session-id".into(), session.into()]),
             Begin::Resume(session) => argv.extend(["--resume".into(), session.into()]),
+        }
+        if let Some(mcp) = mcp {
+            argv.extend(["--mcp-config".into(), mcp.to_string_lossy().into_owned()]);
         }
         argv
     }
@@ -1307,7 +1310,7 @@ mod tests {
     #[test]
     fn a_session_is_headless_over_stream_json_and_begins_new_or_carries_on() {
         let claude = Claude::new("claude", None);
-        let fresh = claude.argv(Begin::Fresh("s1"), Path::new("/c"));
+        let fresh = claude.argv(Begin::Fresh("s1"), Path::new("/c"), None);
         assert_eq!(fresh[4..6], ["/c", "claude"]);
         assert_eq!(
             fresh[6..],
@@ -1326,8 +1329,17 @@ mod tests {
             ]
         );
         assert!(!fresh.iter().any(|a| a.contains("dangerously")));
-        let resumed = claude.argv(Begin::Resume("s1"), Path::new("/c"));
+        let resumed = claude.argv(Begin::Resume("s1"), Path::new("/c"), None);
         assert_eq!(resumed[resumed.len() - 2..], ["--resume", "s1"]);
+        let served = claude.argv(
+            Begin::Resume("s1"),
+            Path::new("/c"),
+            Some(Path::new("/a/mcp.json")),
+        );
+        assert_eq!(
+            served[served.len() - 4..],
+            ["--resume", "s1", "--mcp-config", "/a/mcp.json"]
+        );
     }
 
     #[test]

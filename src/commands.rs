@@ -87,6 +87,7 @@ pub fn take(
                     documents: command.documents.as_deref(),
                     env: command.env.as_ref(),
                     secrets: command.secrets.as_ref(),
+                    mcp_servers: command.mcp_servers.as_ref(),
                 };
                 agents
                     .start_with(agent, session, command.resume.unwrap_or(false), text, given)
