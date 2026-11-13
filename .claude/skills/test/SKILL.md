@@ -50,9 +50,3 @@ AGENT_HOST_REAL_CLAUDE=1 env -u CLAUDE_CONFIG_DIR -u DS_URL -u DS_TOKEN -u WT_UR
 
 A pass: `Tests  2 passed (2)`, exit 0. Without `AGENT_HOST_REAL_CLAUDE=1` it
 says `2 skipped`, which proves nothing.
-
-## Releases
-
-agent-host's release steps are the routine `dakotacolorado/release-routines`
-at `dakotacolorado/agent-host/`, approval-service's to run; no author runs a
-release or a rollback.
