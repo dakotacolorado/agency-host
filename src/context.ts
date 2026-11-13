@@ -4,7 +4,7 @@
  * its session is given, and the MCP servers it may call. The host knows
  * nothing of where any of it comes from; it only writes it.
  *
- * A start's `context` (agent-service's own clients) and `documents` (honed
+ * A start's `context` (agency's own clients) and `documents` (honed
  * skills) write only files under `skills/`. What they wrote is listed in
  * `.context.json`, the context's at the top and the documents' under
  * `documents`, so the next start first removes it.

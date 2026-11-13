@@ -1,6 +1,7 @@
 /**
  * A real Agent SDK session on this machine's Claude login, with a one-word
- * prompt: skipped unless `AGENT_HOST_REAL_CLAUDE=1`, since it costs usage.
+ * prompt: skipped unless `AGENCY_HOST_REAL_CLAUDE=1` (or its old name,
+ * `AGENT_HOST_REAL_CLAUDE=1`), since it costs usage.
  * Run with `CLAUDE_CONFIG_DIR` unset, so the session uses the user's own login.
  */
 import { readFileSync } from "node:fs";
@@ -11,7 +12,7 @@ import { EVERY_TOOL } from "./config.ts";
 import { startSdkSession } from "./sdk.ts";
 import { scratch, until } from "./testing.ts";
 
-const real = process.env.AGENT_HOST_REAL_CLAUDE === "1";
+const real = process.env.AGENCY_HOST_REAL_CLAUDE === "1" || process.env.AGENT_HOST_REAL_CLAUDE === "1";
 
 describe.skipIf(!real)("a real session", () => {
   it("is the SDK the shapes were checked against", () => {

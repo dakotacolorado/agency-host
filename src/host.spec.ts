@@ -8,7 +8,7 @@ import { FakeSdk, scratch, until } from "./testing.ts";
 
 type Up = { type: string; [k: string]: unknown };
 
-/** agent-service's side, as far as a host sees it. */
+/** agency's side, as far as a host sees it. */
 class Service {
   readonly wss: WebSocketServer;
   readonly sockets: { ws: WebSocket; req: IncomingMessage; got: Up[] }[] = [];
