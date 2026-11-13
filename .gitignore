@@ -1,4 +1,7 @@
-target/
+node_modules/
+dist/
+*.tsbuildinfo
+.DS_Store
 
 # Agent harness files: written into a worktree by the rig, never part of a change.
 HANDOFF.md
