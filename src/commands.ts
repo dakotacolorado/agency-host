@@ -98,7 +98,7 @@ function contextOf(v: unknown): Context | undefined {
   return { key: c.key, version: c.version, files };
 }
 
-const KINDS = new Set(["create", "start", "message", "interrupt", "stop", "retire"]);
+const KINDS = new Set(["create", "start", "message", "interrupt", "stop", "delete"]);
 
 /** A kind the host does not handle is reported by name rather than dropped, so the sender learns the command went nowhere. */
 export async function act(c: Command, agents: Agents): Promise<CommandReport> {
@@ -147,8 +147,8 @@ export async function act(c: Command, agents: Agents): Promise<CommandReport> {
       case "stop":
         await agents.stop(agentId);
         break;
-      case "retire":
-        await agents.retire(agentId);
+      case "delete":
+        await agents.delete(agentId);
         break;
     }
     return report(c.id);

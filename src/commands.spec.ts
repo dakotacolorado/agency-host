@@ -24,7 +24,7 @@ describe("a command", () => {
   it("of a kind the host does not handle is reported, not dropped; one without its fields says which", async () => {
     const { agents } = host();
     expect(await act(c({ id: "c1", kind: "reboot" }), agents)).toEqual({ commandId: "c1", ok: false, error: 'this host does not handle "reboot" commands' });
-    for (const kind of ["create", "start", "message", "interrupt", "stop", "retire"]) {
+    for (const kind of ["create", "start", "message", "interrupt", "stop", "delete"]) {
       expect((await act(c({ id: "c1", kind, text: "hi" }), agents)).error).toBe(`"${kind}" needs an agentId`);
     }
     expect((await act(c({ id: "c1", kind: "create", agentId: "w1" }), agents)).error).toMatch(/needs a name/);
@@ -32,14 +32,14 @@ describe("a command", () => {
     expect((await act(c({ id: "c1", kind: "message", agentId: "w1" }), agents)).error).toMatch(/needs text/);
   });
 
-  it("for an agent not here is reported; a stop or retire of one is done", async () => {
+  it("for an agent not here is reported; a stop or delete of one is done", async () => {
     const { agents } = host();
     for (const kind of ["start", "message", "interrupt"]) {
       const r = await act(c({ id: "c1", kind, agentId: "w9", sessionId: "s1", text: "hi" }), agents);
       expect(r.ok).toBe(false);
       expect(r.error).toMatch(/no agent w9|w9 has no live session/);
     }
-    for (const kind of ["stop", "retire"]) expect(await act(c({ id: "c1", kind, agentId: "w9" }), agents)).toEqual({ commandId: "c1", ok: true });
+    for (const kind of ["stop", "delete"]) expect(await act(c({ id: "c1", kind, agentId: "w9" }), agents)).toEqual({ commandId: "c1", ok: true });
   });
 
   it("message is delivered at once to a live session, and refused with none", async () => {

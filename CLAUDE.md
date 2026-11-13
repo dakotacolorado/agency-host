@@ -7,7 +7,7 @@ TypeScript package, run on the Claude Agent SDK.
 
 Keep a socket open to agent-service, saying the host is here and what it
 offers. Take the commands that come down it: make an agent's folder, start or
-stop its session, carry a message to it, retire it. Report what agents do and
+stop its session, carry a message to it, delete it. Report what agents do and
 say back up it. That is the whole job.
 
 It holds no opinion about what the work is. It does not read tickets, decide
