@@ -16,37 +16,30 @@ agency-host runs agency's agents on this computer, each a Claude Code session on
 **Agents at your command, across all your computers.**
 
 agency-host makes a computer one of [agency](https://github.com/dakotacolorado/agency)'s
-hosts. One process per machine. It keeps a socket open to agency: every
-command comes down it, and every report and heartbeat goes up it. It makes
-agents' folders, runs their Claude Code sessions on the Claude Agent SDK
-(`@anthropic-ai/claude-agent-sdk`, checked against 0.3.323), carries
-messages to them and what they say back.
+hosts. It runs the agents agency places on it, each a Claude Code session on
+the Claude Agent SDK, carries messages to them, and reports what they do.
 
-agency-host was formerly called agent-host.
+## Run it
 
-## Install
-
-On a mac or linux machine with Node 24 or later, `gh` signed in, and the
-machine's Claude subscription signed in (`claude` once, by hand): no API key
-is needed, and the SDK brings its own Claude Code.
+You need macOS or Linux, Node 24 or later, `gh` signed in, and Claude signed
+in on the machine (run `claude` once by hand). No API key is needed.
 
 ```sh
 git clone https://github.com/dakotacolorado/agency-host && cd agency-host
-npm ci --omit=dev
-node src/cli.ts 2>> ~/agency-host.log &          # Node runs the TypeScript itself
+npm ci && npm run build && npm prune --omit=dev
+node dist/cli.js 2>> ~/agency-host.log &
 ```
 
-or, built: `npm ci && npm run build && npm prune --omit=dev`, then
-`node dist/cli.js`. Restart it onto a newer checkout: each session that was
-live is resumed (see Restarts).
+Start it from your own login, not from inside an agent's session. When it
+restarts, it resumes each session that was live; the turn in flight is lost.
 
-On linux, a systemd user unit can keep it running,
-`~/.config/systemd/user/agency-host.service`, enabled with `systemctl --user
-enable --now agency-host`:
+On Linux, a systemd user unit keeps it running. Save this as
+`~/.config/systemd/user/agency-host.service` and run
+`systemctl --user enable --now agency-host`:
 
 ```ini
 [Unit]
-Description=agency-host: this machine's place among agency's hosts
+Description=agency-host
 After=network-online.target
 Wants=network-online.target
 
@@ -61,144 +54,77 @@ Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 WantedBy=default.target
 ```
 
-Its config (`~/.config/agency-host/`), folders (`~/agents`), lock and log are
-all its own, so it can run beside other services on the same machine.
+## Configure it
 
-## Configure
-
-`~/.config/agency-host/config.toml` (or `--config PATH`, or
-`AGENCY_HOST_CONFIG`) holds every setting. Where agent-host left its config,
-`~/.config/agent-host/config.toml` is read when the new one does not exist,
-and `AGENT_HOST_CONFIG` still names it:
+Every setting is in `~/.config/agency-host/config.toml` (or
+`$XDG_CONFIG_HOME/agency-host/config.toml`, or the path given by `--config`
+or `AGENCY_HOST_CONFIG`):
 
 ```toml
-service_url = "https://…"
+service_url = "https://agency.example"
 token = "…"
-host_id = "studio"                 # default: the hostname
-capacity = 2                       # unset, nothing is placed here
+capacity = 2
 labels = ["macos"]
-agents_dir = "/Users/me/agents"    # default: ~/agents
 
-[permissions]                      # what a session may run when it asks
-allow = ["*"]                      # the default: every tool
+[permissions]
 deny = ["WebFetch", "mcp__github__merge*"]
 ```
 
-A session's permission requests come to the host (the SDK's `canUseTool`),
-which answers each by `[permissions]`: a tool named in `deny` is refused, then
-one named in `allow` is given, any other refused; a name ending in `*` is
-every tool it begins. Claude Code's own rules in the agent's settings are
-checked first, and decide what it never asks about.
+| Setting | Default | What it does |
+|---|---|---|
+| `service_url` | required | agency's address. |
+| `token` | required | agency's `AUTH_TOKEN`. |
+| `host_id` | the hostname | This host's id in agency. |
+| `capacity` | none | How many agents may run here at once. Unset, none are placed here. |
+| `labels` | none | Labels requests can ask a host to carry. |
+| `agents_dir` | `~/agents` | Where each agent's folder is. Two hosts on one machine need different ones. |
+| `permissions.allow` | `["*"]` | Tools a session may use. A name ending in `*` matches every tool it begins. |
+| `permissions.deny` | none | Tools a session may not use. Checked before `allow`. |
 
-Two hosts on one machine (beta beside prod) each need their own `agents_dir`;
-one host holds each, by a unix socket in it (`.agent-host.sock`, the name
-agent-host gave it, so neither runs beside the other), and a second is
-refused. `agency-host --version` prints its banner and package.json's version,
-which is also the `version` its heartbeats send.
+## Use it
 
-## Socket
-
-`<service_url, http→ws and https→wss>/socket?hostId=<host_id>`, with
-`Authorization: Bearer <token>`. On every socket opened the host sends first
-a full `report` (every agent, every line and result not yet written on a
-socket), then a `heartbeat` (`version`, `labels`, `capacity`), and a heartbeat
-every 30 s after. A report goes up whenever something changes, at most every
-250 ms, each held to 120 KB and written in frames of 31 KB; lines that do not
-fit go in the next. A socket that closes, or hears nothing for 90 s, is opened
-again after 1 s, doubling to 60 s, reset once one has stayed open a minute.
-
-Commands come down as `{type: "command", command}`, and may come more than
-once: one is done once by its `id`, and one sent again after it is done is
-answered again. They are done one at a time, in the order they came.
-
-The usage is the newest `rate_limit_event` any session's stream has said and
-no report has yet carried: its 5-hour and weekly windows, each left out when
-the event does not carry it, read at the event's time. Tokens are each
-session's running totals of its results' `model_usage_since_last_result`
-(its subagents' included), told again on each new socket.
-
-## Agents
-
-A `create` makes `<agents_dir>/<name>/`:
+You manage agents through agency, not here. On this machine, each agent has a
+folder `<agents_dir>/<name>/`:
 
 ```text
 agent.json        id and name
-sessions.jsonl    each session started, and each stopped or ended
+sessions.jsonl    each session started, stopped or ended
 prompt.md         the opening message of the latest session
-credentials.env   the latest start's variables and tokens, readable by the host's user alone
-mcp.json          the latest start's MCP servers, their ${VAR}s unfilled
-home/.claude/     its own Claude Code (CLAUDE_CONFIG_DIR): settings, CLAUDE.md, skills, transcripts
-logs/<id>.jsonl   every SDK message each session gave, as it came
-logs/<id>.log     everything each session wrote on its stderr
+credentials.env   the variables and tokens it was given, readable by you alone
+home/.claude/     its own Claude Code settings, CLAUDE.md, skills and transcripts
+logs/<id>.jsonl   every SDK message of each session
+logs/<id>.log     each session's stderr
 ```
 
-A `start` writes its `context` (agency's own clients) and `documents`
-(honed skills), files under `skills/`, into `home/.claude/`, in place of what
-the last start wrote (listed in `home/.claude/.context.json`); a start with
-neither keeps the last. The agent's `CLAUDE.md` is the host's own rules, then
-each document's `SKILL.md`, in order and without its frontmatter, so a
-session follows its role from its first turn. Its
-`env` and `secrets` are written to `credentials.env`, mode 600, and set in
-the session's environment from there, never on a command line, so a session
-resumed after a restart has them again; its `mcpServers` go to the session
-with their `${VAR}`s filled from that environment.
+A deleted agent's folder moves to `<agents_dir>/.deleted/<name>-<id>/`.
 
-A session runs in the agent's folder, a new conversation under the start's
-session id or, with `resume`, the last one carried on, on Claude Code's own
-system prompt (the SDK's `claude_code` preset). Each session shares
-the host user's Claude login: HOME stays the user's, and
-`CLAUDE_SECURESTORAGE_CONFIG_DIR` points at the user's own store (see
-`src/claude.ts`). An agent's settings deny the `AskUserQuestion`,
-`EnterPlanMode` and `ExitPlanMode` tools, which wait on a person at a
-terminal.
-
-States: `working` (a turn in flight), `waiting` (live, between turns), `idle`
-(no session), `interrupted` (its session ended without a stop; can be
-resumed). With each go `tasks`, the background tasks and subagents its live
-session has open (from the SDK's latest `background_tasks_changed`), and
-`told`, whether its turn or its last began with a message the host delivered.
-A `message` is pushed into the live session at once and reported done; to an
-agent with no live session it is refused. An `interrupt` stops the turn, as
-Escape does, then says its text if it has one. `stop` ends the session;
-`delete` stops it and moves the folder to
-`<agents_dir>/.deleted/<name>-<id>/`. The `instruction` line of a message, a
-start's text or an interrupt's carries that command's `commandId`.
-
-To take a session over by hand, stop the agent, then in its folder:
+To take a session over by hand, stop the agent in agency, then in its folder:
 
 ```sh
 CLAUDE_CONFIG_DIR=<agents_dir>/<name>/home/.claude claude --resume <id>
 ```
 
-where `<id>` is the `claude` of its last line in `sessions.jsonl`. A `start`
-with `resume` hands it back to the host.
+where `<id>` is the `claude` field of the last line of `sessions.jsonl`.
+Starting the agent from agency hands it back.
 
-## Restarts
+## How it works
 
-A session does not outlive its host: it is the host's child, and ends when the
-host goes. A host that starts again resumes each session that was live when it
-went and tells it the host restarted; one cut off before Claude Code wrote
-anything is begun again as it was first; one that cannot be begun is reported
-`interrupted`. What costs is the turn in flight, which is cut off. A session
-that was stopped, or that ended by itself while the host ran, is left as it
-was. Every line is read again from the agent's logs, so a restarted host
-numbers its lines on, and the service keeps each `seq` once.
+An agent's state is `working` (a turn in flight), `waiting` (live, between
+turns), `idle` (no session) or `interrupted` (its session ended without a
+stop; it can be resumed). A message goes into the live session at once; with
+no live session it is refused. Sessions cannot use `AskUserQuestion` or plan
+mode, which wait on a person at a terminal.
 
-Start the host from your own login, not from inside an agent's session: the
-host takes its own `CLAUDE_CONFIG_DIR` to be where your Claude login is, and
-ignores one inside `agents_dir`.
-
-The folders, logs and records are the Rust host's shapes, so a folder either
-wrote is read by the other.
-
-## Develop
-
-The `test` skill (`.claude/skills/test/SKILL.md`) says how to run the checks:
+## Develop it
 
 ```sh
 npm ci
 npm run typecheck
 npm test
 npm run build
-AGENCY_HOST_REAL_CLAUDE=1 npx vitest run src/real.spec.ts   # one real session
+AGENCY_HOST_REAL_CLAUDE=1 npx vitest run src/real.spec.ts   # one real session; uses a little usage
 ```
+
+## License
+
+MIT. See [LICENSE](./LICENSE).

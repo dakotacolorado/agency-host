@@ -14,9 +14,7 @@ export const VERSION: string = (JSON.parse(readFileSync(new URL("../package.json
 const USAGE = `usage: agency-host [--config PATH]
 
   --config PATH   config file (default $XDG_CONFIG_HOME/agency-host/config.toml,
-                  or ~/.config/agency-host/config.toml, or agent-host/config.toml
-                  there when only that exists); AGENCY_HOST_CONFIG also names it
-                  (AGENT_HOST_CONFIG, its old name, is still read)
+                  or ~/.config/agency-host/config.toml); AGENCY_HOST_CONFIG also names it
 
 Every setting is in the file: service_url, token, host_id (default the hostname),
 capacity, labels, agents_dir (default ~/agents), [permissions] allow and deny
