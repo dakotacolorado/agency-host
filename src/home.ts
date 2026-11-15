@@ -27,11 +27,8 @@ export const DELETED = ".deleted";
 /** Where agents deleted before deletion had its name were set aside: pruned as `.deleted` is. */
 const RETIRED = ".retired";
 
-/** A deleted agent's folder is kept this long after it was deleted, at most. */
-export const KEPT_MS = 2 * 24 * 60 * 60 * 1000;
-
-/** At most this many deleted agents' folders are kept, the newest. */
-export const KEPT_MOST = 20;
+/** The newest this many deleted agents' folders are kept, however old; the rest are removed. */
+export const KEPT_MOST = 100;
 
 /** What a deleted agent's folder keeps of what a session was given: nothing. */
 const GIVEN = ["credentials.env", "mcp.json"];
@@ -254,13 +251,13 @@ export function deleted(dir: string, id: string): boolean {
 }
 
 /**
- * Removes the folders of deleted agents deleted longer than `keptMs` ago, or
- * past the newest `keptMost`, from `.deleted` and `.retired`; and takes the
+ * Removes the folders of deleted agents past the newest `keptMost`, from
+ * `.deleted` and `.retired`; and takes the
  * credentials and MCP servers from those kept. Each folder removed leaves an
  * empty file by its name, so its agent is still known deleted. A folder that
  * will not go is left, and named in what this returns, to be tried again.
  */
-export async function prune(dir: string, at = Date.now(), keptMs = KEPT_MS, keptMost = KEPT_MOST): Promise<{ removed: string[]; failed: string[] }> {
+export async function prune(dir: string, keptMost = KEPT_MOST): Promise<{ removed: string[]; failed: string[] }> {
   const folders: { path: string; at: number }[] = [];
   for (const aside of [DELETED, RETIRED]) {
     let names: string[];
@@ -283,7 +280,7 @@ export async function prune(dir: string, at = Date.now(), keptMs = KEPT_MS, kept
   const removed: string[] = [];
   const failed: string[] = [];
   for (const [i, f] of folders.entries()) {
-    if (i < keptMost && at - f.at <= keptMs) {
+    if (i < keptMost) {
       for (const g of GIVEN) await rm(join(f.path, g), { force: true }).catch(() => {});
       continue;
     }

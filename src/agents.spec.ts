@@ -510,17 +510,18 @@ describe("deleting", () => {
     expect(() => agents.create(AGENT, "ana")).toThrow(/was deleted here/);
   });
 
-  it("takes the credentials, and removes a deleted folder past the time kept", async () => {
+  it("takes the credentials, and keeps an old deleted folder", async () => {
     const { dir, agents } = host();
     const old = join(dir, ".deleted", "bo-old");
     mkdirSync(old, { recursive: true });
-    const t = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+    const t = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
     utimesSync(old, t, t);
     agents.create(AGENT, "ana");
     agents.start({ agentId: AGENT, sessionId: S1, resume: false, env: { A: "1" } });
     await agents.delete(AGENT);
     await agents.prune();
     expect(existsSync(join(dir, ".deleted", `ana-${AGENT}`, "credentials.env"))).toBe(false);
-    expect(statSync(old).isFile()).toBe(true);
+    expect(statSync(old).isDirectory()).toBe(true);
   });
+
 });
