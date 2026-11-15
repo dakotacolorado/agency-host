@@ -143,6 +143,7 @@ export function rules(dir: string, name: string, instructions = ""): string {
 export class Agents {
   private readonly o: AgentsOptions;
   private readonly live = new Map<string, Live>();
+  private pruning: Promise<void> | null = null;
 
   constructor(options: AgentsOptions) {
     this.o = options;
@@ -355,7 +356,7 @@ export class Agents {
     this.o.changed();
   }
 
-  /** Stops the agent and moves its folder aside, where it is kept. One not here, or deleted already, is done. */
+  /** Stops the agent and moves its folder aside, without its credentials, until a prune removes it. One not here, or deleted already, is done. */
   async delete(id: string): Promise<void> {
     let found;
     try {
@@ -366,6 +367,22 @@ export class Agents {
     await this.stop(id);
     found.home.delete(found.record);
     this.o.changed();
+    void this.prune();
+  }
+
+  /** Removes deleted agents' folders past what is kept (`home.prune`); one prune at a time, which a call during it shares. */
+  prune(): Promise<void> {
+    this.pruning ??= home
+      .prune(this.o.dir)
+      .then(({ removed, failed }) => {
+        if (removed.length) log(`removed ${removed.length} deleted agents' folders`);
+        for (const f of failed) log(`${f}: not removed, tried again at the next prune`);
+      })
+      .catch((e) => log(`pruning deleted agents: ${errorText(e)}`))
+      .finally(() => {
+        this.pruning = null;
+      });
+    return this.pruning;
   }
 
   /** Stops every session, as the host goes. */

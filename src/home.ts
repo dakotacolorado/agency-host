@@ -17,14 +17,24 @@
  * that dies at any point leaves a folder the next run can read. The shapes
  * are the Rust host's, so either can read what the other wrote.
  */
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { chmod, lstat, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 /** Hidden, so it is never taken for an agent named so. */
 export const DELETED = ".deleted";
 
-/** Where agents deleted before deletion had its name are kept: read, never written. */
+/** Where agents deleted before deletion had its name were set aside: pruned as `.deleted` is. */
 const RETIRED = ".retired";
+
+/** A deleted agent's folder is kept this long after it was deleted, at most. */
+export const KEPT_MS = 2 * 24 * 60 * 60 * 1000;
+
+/** At most this many deleted agents' folders are kept, the newest. */
+export const KEPT_MOST = 20;
+
+/** What a deleted agent's folder keeps of what a session was given: nothing. */
+const GIVEN = ["credentials.env", "mcp.json"];
 
 export interface Record {
   id: string;
@@ -185,11 +195,20 @@ export class Home {
     appendFileSync(file, line);
   }
 
-  /** Moves the folder to `<agents_dir>/.deleted/<name>-<id>`, where it is kept, so a new agent can be given its name. */
+  /**
+   * Takes away its credentials and MCP servers, then moves the folder to
+   * `<agents_dir>/.deleted/<name>-<id>`, so a new agent can be given its
+   * name. It is kept there for a while, until `prune` removes it.
+   */
   delete(record: Record): void {
+    for (const f of GIVEN) rmSync(join(this.dir, f), { force: true });
     const parent = dirname(this.dir);
     mkdirSync(join(parent, DELETED), { recursive: true });
-    renameSync(this.dir, join(parent, DELETED, `${record.name}-${record.id}`));
+    const aside = join(parent, DELETED, `${record.name}-${record.id}`);
+    renameSync(this.dir, aside);
+    // Dated by its deletion, not its last write, so it is kept for its full time.
+    const t = new Date();
+    utimesSync(aside, t, t);
   }
 }
 
@@ -219,4 +238,65 @@ export function deleted(dir: string, id: string): boolean {
       return false;
     }
   });
+}
+
+/**
+ * Removes the folders of deleted agents deleted longer than `keptMs` ago, or
+ * past the newest `keptMost`, from `.deleted` and `.retired`; and takes the
+ * credentials and MCP servers from those kept. Each folder removed leaves an
+ * empty file by its name, so its agent is still known deleted. A folder that
+ * will not go is left, and named in what this returns, to be tried again.
+ */
+export async function prune(dir: string, at = Date.now(), keptMs = KEPT_MS, keptMost = KEPT_MOST): Promise<{ removed: string[]; failed: string[] }> {
+  const folders: { path: string; at: number }[] = [];
+  for (const aside of [DELETED, RETIRED]) {
+    let names: string[];
+    try {
+      names = await readdir(join(dir, aside));
+    } catch {
+      continue;
+    }
+    for (const n of names) {
+      const path = join(dir, aside, n);
+      try {
+        const s = await lstat(path);
+        if (s.isDirectory()) folders.push({ path, at: s.mtimeMs });
+      } catch {
+        // Gone already.
+      }
+    }
+  }
+  folders.sort((a, b) => b.at - a.at);
+  const removed: string[] = [];
+  const failed: string[] = [];
+  for (const [i, f] of folders.entries()) {
+    if (i < keptMost && at - f.at <= keptMs) {
+      for (const g of GIVEN) await rm(join(f.path, g), { force: true }).catch(() => {});
+      continue;
+    }
+    try {
+      await removeAll(f.path);
+      await writeFile(f.path, "");
+      removed.push(f.path);
+    } catch {
+      failed.push(f.path);
+    }
+  }
+  return { removed, failed };
+}
+
+/** Removes `path` and all it holds, opening up any folder an install left read-only first if it must. */
+async function removeAll(path: string): Promise<void> {
+  try {
+    await rm(path, { recursive: true, force: true });
+  } catch {
+    await writable(path);
+    await rm(path, { recursive: true, force: true });
+  }
+}
+
+async function writable(path: string): Promise<void> {
+  if (!(await lstat(path).catch(() => null))?.isDirectory()) return;
+  await chmod(path, 0o700).catch(() => {});
+  for (const n of await readdir(path).catch(() => [] as string[])) await writable(join(path, n));
 }

@@ -96,7 +96,10 @@ logs/<id>.jsonl   every SDK message of each session
 logs/<id>.log     each session's stderr
 ```
 
-A deleted agent's folder moves to `<agents_dir>/.deleted/<name>-<id>/`.
+A deleted agent's folder moves to `<agents_dir>/.deleted/<name>-<id>/`,
+without its `credentials.env` and `mcp.json`. It is kept for two days, and
+only the newest 20 are kept; the host removes the rest when it starts, after
+each delete, and hourly, leaving an empty file by the folder's name.
 
 To take a session over by hand, stop the agent in agency, then in its folder:
 
