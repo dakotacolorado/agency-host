@@ -1,7 +1,7 @@
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { all, Home, deleted, KEPT_MS, prune, validName, type Session } from "./home.ts";
+import { all, Home, deleted, KEPT_MOST, prune, validName, type Session } from "./home.ts";
 import { scratch } from "./testing.ts";
 
 const ana = { id: "w1", name: "ana" };
@@ -91,13 +91,28 @@ describe("pruning deleted agents", () => {
     return path;
   };
 
-  it("removes those past the time kept, leaving each known deleted, and takes the credentials of those kept", async () => {
+  it("keeps the newest 100 however old, and takes the credentials of those kept", async () => {
     const dir = scratch("prune-age");
+    const now = Date.now();
+    expect(KEPT_MOST).toBe(100);
+    const kept = aside(dir, ".deleted", "ana-w1", 365 * DAY, now);
+    const retired = aside(dir, ".retired", "cy-w3", 400 * DAY, now);
+    const { removed, failed } = await prune(dir);
+    expect(removed).toEqual([]);
+    expect(failed).toEqual([]);
+    expect(existsSync(join(kept, "logs", "s.jsonl"))).toBe(true);
+    expect(existsSync(join(retired, "logs", "s.jsonl"))).toBe(true);
+    expect(existsSync(join(kept, "credentials.env"))).toBe(false);
+    expect(existsSync(join(retired, "credentials.env"))).toBe(false);
+  });
+
+  it("removes those past the newest kept, from .deleted and .retired, leaving each known deleted", async () => {
+    const dir = scratch("prune-most");
     const now = Date.now();
     const kept = aside(dir, ".deleted", "ana-w1", DAY, now);
     const old = aside(dir, ".deleted", "bo-w2", 3 * DAY, now);
     const retired = aside(dir, ".retired", "cy-w3", 30 * DAY, now);
-    const { removed, failed } = await prune(dir, now);
+    const { removed, failed } = await prune(dir, 1);
     expect(removed.sort()).toEqual([old, retired].sort());
     expect(failed).toEqual([]);
     expect(statSync(old).isFile()).toBe(true);
@@ -105,15 +120,14 @@ describe("pruning deleted agents", () => {
     expect(deleted(dir, "w2")).toBe(true);
     expect(deleted(dir, "w3")).toBe(true);
     expect(existsSync(join(kept, "logs", "s.jsonl"))).toBe(true);
-    expect(existsSync(join(kept, "credentials.env"))).toBe(false);
-    expect((await prune(dir, now)).removed).toEqual([]);
+    expect((await prune(dir, 1)).removed).toEqual([]);
   });
 
   it("keeps only the newest past the most kept", async () => {
     const dir = scratch("prune-count");
     const now = Date.now();
     for (let i = 0; i < 5; i++) aside(dir, ".deleted", `a${i}-w${i}`, i * 60_000, now);
-    const { removed } = await prune(dir, now, KEPT_MS, 3);
+    const { removed } = await prune(dir, 3);
     expect(removed.map((p) => p.split("/").at(-1)).sort()).toEqual(["a3-w3", "a4-w4"]);
     expect(readdirSync(join(dir, ".deleted")).filter((n) => statSync(join(dir, ".deleted", n)).isDirectory()).sort()).toEqual(["a0-w0", "a1-w1", "a2-w2"]);
   });
@@ -128,7 +142,7 @@ describe("pruning deleted agents", () => {
     chmodSync(join(path, "cache"), 0o500);
     const t = new Date(now - 3 * DAY);
     utimesSync(path, t, t);
-    expect((await prune(dir, now)).removed).toEqual([path]);
+    expect((await prune(dir, 0)).removed).toEqual([path]);
     expect(statSync(path).isFile()).toBe(true);
   });
 
