@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { Agents } from "./agents.ts";
 import { EVERY_TOOL } from "./config.ts";
 import { MOST_TOKENS, REPORT_LIMIT, Reporter, Totals } from "./report.ts";
-import { FakeSdk, scratch, settle } from "./testing.ts";
+import { FakeSdk, LIMIT_STOP, scratch, settle } from "./testing.ts";
 
 function host() {
   const sdk = new FakeSdk();
@@ -18,7 +18,7 @@ describe("a report", () => {
     agents.create("w1", "ana");
     agents.create("w2", "bob");
     const first = reporter.next(1)!;
-    expect(parsed(first.text)).toEqual({ type: "report", agents: [{ id: "w1", state: "idle", sessionId: null, tasks: 0 }, { id: "w2", state: "idle", sessionId: null, tasks: 0 }], lines: [], commandResults: [] });
+    expect(parsed(first.text)).toEqual({ type: "report", agents: [{ id: "w1", state: "idle", sessionId: null, tasks: 0, limitedUntil: null }, { id: "w2", state: "idle", sessionId: null, tasks: 0, limitedUntil: null }], lines: [], commandResults: [] });
     first.sent();
     expect(reporter.next(1)).toBeNull();
     // A new socket is told everything again.
@@ -83,6 +83,23 @@ describe("a report", () => {
     const second = parsed(reporter.next(1)!.text);
     expect(second.lines.map((l) => l.agentId)).toEqual(["w3"]);
     expect(second.agents.map((a) => a.state)).toEqual(["waiting", "waiting", "waiting"]);
+  });
+
+  it("tells when the limit that ended an agent's turn resets, and null once its next turn begins", async () => {
+    const { sdk, agents, reporter } = host();
+    agents.create("w1", "ana");
+    agents.start({ commandId: "c1", agentId: "w1", sessionId: "s1", resume: false, text: "go" });
+    await settle();
+    reporter.next(1)!.sent();
+    sdk.last.onSend = () => {};
+    for (const m of LIMIT_STOP) sdk.last.emit(m);
+    await settle();
+    const limited = reporter.next(1)!;
+    expect(JSON.parse(limited.text).agents).toEqual([{ id: "w1", state: "waiting", sessionId: "s1", tasks: 0, told: true, limitedUntil: "2026-11-15T08:50:00.000Z" }]);
+    limited.sent();
+    agents.message("w1", "c2", "Carry on.");
+    const resumed = reporter.next(1)!;
+    expect(JSON.parse(resumed.text).agents[0].limitedUntil).toBeNull();
   });
 
   it("carries a result once, the newest for its command", () => {

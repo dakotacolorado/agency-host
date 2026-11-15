@@ -1,5 +1,5 @@
 /** A stand-in for the SDK, for tests: sessions that say what a test scripts. */
-import { mkdtempSync, realpathSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Inbox, type Message, type SessionHandle, type SessionOptions, type StartSession } from "./sdk.ts";
@@ -105,3 +105,9 @@ export async function until(check: () => boolean, ms = 3000): Promise<void> {
     await settle(10);
   }
 }
+
+/** A turn a usage limit ended, as a session logged it: the refusing `rate_limit_event`, Claude Code's notice, and the `result`. Its limit resets at 2026-11-15T08:50:00Z. */
+export const LIMIT_STOP: Message[] = readFileSync(new URL("./fixtures/limit-stop.jsonl", import.meta.url), "utf8")
+  .split("\n")
+  .filter(Boolean)
+  .map((l) => JSON.parse(l) as Message);

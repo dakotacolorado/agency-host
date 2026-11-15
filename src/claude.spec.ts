@@ -1,8 +1,8 @@
 import { readFileSync, statSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { claudeEnv, cut, hostMade, hostUuid, jsonLen, loginDir, LONGEST_INPUT, LONGEST_TEXT, NOTE_ROOM, prepare, read, started, transcript, uuid, type Entry } from "./claude.ts";
-import { scratch } from "./testing.ts";
+import { claudeEnv, cut, hostMade, hostUuid, jsonLen, loginDir, LONGEST_INPUT, LONGEST_TEXT, NOTE_ROOM, prepare, read, sent, started, transcript, uuid, type Entry } from "./claude.ts";
+import { LIMIT_STOP, scratch } from "./testing.ts";
 
 const entries = (lines: object[]): Entry[] => lines.flatMap((l) => read(JSON.stringify(l)).entries);
 const told = (text: string): Entry => ({ from: "instruction", text });
@@ -77,6 +77,27 @@ describe("reading what a session says", () => {
     expect(tasks({ type: "system", subtype: "background_tasks_changed", tasks: [] })).toBe(0);
     expect(tasks({ type: "system", subtype: "task_started", task_id: "a" })).toBeUndefined();
     expect(tasks(started("2026-11-13T00:00:00.000Z"))).toBe(0);
+  });
+
+  it("reads when a refused rate_limit_event's limit resets, and where a turn begins, goes on and ends", () => {
+    const [event, notice, result] = LIMIT_STOP.map((m) => read(JSON.stringify(m)));
+    expect(event!.rejected).toBe("2026-11-15T08:50:00.000Z");
+    // Claude Code's own notice of the limit is not the agent working on.
+    expect(notice!.turn).toBeUndefined();
+    expect(result!.turn).toBe("ends");
+    const limit = (info: object) => read(JSON.stringify({ type: "rate_limit_event", rate_limit_info: info })).rejected;
+    expect(limit({ status: "rejected", unifiedWindows: { five_hour: { status: "rejected", resetsAt: 1794732600 }, seven_day: { status: "rejected", resetsAt: 1795273200 }, other: { status: "allowed", resetsAt: 1795999999 } } })).toBe(
+      "2026-11-21T15:00:00.000Z",
+    );
+    for (const allowed of [{ status: "allowed", resetsAt: 1794732600 }, { status: "allowed_warning", resetsAt: 1794732600 }, { status: "rejected" }, {}]) expect(limit(allowed)).toBeUndefined();
+    const turn = (m: object) => read(JSON.stringify(m)).turn;
+    expect(turn({ type: "system", subtype: "init" })).toBe("begins");
+    expect(turn(sent("2026-11-15T08:00:00.000Z", "u", "c1"))).toBe("begins");
+    // The host's own message to a session it resumed leaves the limit: the turn it begins ends on it again.
+    expect(turn(sent("2026-11-15T08:00:00.000Z", "u", undefined))).toBeUndefined();
+    expect(turn({ type: "assistant", message: { model: "claude-opus-5-5", content: [] } })).toBe("continues");
+    expect(turn({ type: "user", message: { content: [{ type: "tool_result", content: "ok" }] } })).toBe("continues");
+    expect(turn({ type: "rate_limit_event", rate_limit_info: { status: "rejected" } })).toBeUndefined();
   });
 
   it("reads a rate_limit_event's windows, each it carries and no other", () => {

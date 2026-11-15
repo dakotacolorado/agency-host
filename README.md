@@ -128,6 +128,9 @@ stop; it can be resumed). A message goes into the live session at once; with
 no live session it is refused. Sessions cannot use `AskUserQuestion` or plan
 mode, which wait on a person at a terminal.
 
+An agent whose last turn a usage limit ended is reported with `limitedUntil`,
+when that limit resets, until its next turn begins.
+
 ## Develop it
 
 ```sh
