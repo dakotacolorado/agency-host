@@ -13,8 +13,16 @@ describe("the config file", () => {
       capacity: 2,
       labels: ["macos", "linux"],
       agentsDir: "/home/me/agents",
+      drainSeconds: 1800,
       permissions: EVERY_TOOL,
     });
+  });
+
+  it("waits drain_seconds for a drain, 1800 unless it says otherwise", () => {
+    expect(read(BASE).drainSeconds).toBe(1800);
+    expect(read(`${BASE}drain_seconds = 60`).drainSeconds).toBe(60);
+    expect(() => read(`${BASE}drain_seconds = -1`)).toThrow(/drain_seconds is not a whole number/);
+    expect(() => read(`${BASE}drain_seconds = "60"`)).toThrow(/drain_seconds/);
   });
 
   it("leaves capacity and labels unset rather than guessed, and accepts a setting an older release read", () => {

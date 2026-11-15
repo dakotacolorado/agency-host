@@ -43,6 +43,9 @@ export class Host {
   private flushing: Promise<void> = Promise.resolve();
   /** The socket the first report has gone up on, so a heartbeat never goes before it. */
   private reportedOn = 0;
+  private draining: Promise<void> | null = null;
+  private deadline: NodeJS.Timeout | null = null;
+  private stopping: Promise<void> | null = null;
 
   constructor(o: HostOptions) {
     this.o = o;
@@ -81,12 +84,36 @@ export class Host {
     this.prunes.unref();
   }
 
-  async stop(): Promise<void> {
-    if (this.heartbeats) clearInterval(this.heartbeats);
-    if (this.prunes) clearInterval(this.prunes);
-    if (this.timer) clearTimeout(this.timer);
-    this.socket.close();
-    await this.agents.closeAll();
+  /** Once; a stop while one is under way is the same. */
+  stop(): Promise<void> {
+    this.stopping ??= (async () => {
+      if (this.heartbeats) clearInterval(this.heartbeats);
+      if (this.prunes) clearInterval(this.prunes);
+      if (this.timer) clearTimeout(this.timer);
+      if (this.deadline) clearTimeout(this.deadline);
+      this.socket.close();
+      await this.agents.closeAll();
+    })();
+    return this.stopping;
+  }
+
+  /**
+   * Stops once each session has ended its turn and been closed (`Agents.drain`),
+   * or at `drain_seconds`, when what is still live is closed as `stop` closes
+   * it. Until then the host stays on its socket and takes commands as ever.
+   * Called again, the same.
+   */
+  drain(): Promise<void> {
+    this.draining ??= (async () => {
+      const late = new Promise<boolean>((r) => {
+        this.deadline = setTimeout(() => r(true), this.o.config.drainSeconds * 1000);
+      });
+      if (await Promise.race([this.agents.drain().then(() => false), late])) {
+        log(`drain: ${this.agents.sessions().size} sessions still in a turn at ${this.o.config.drainSeconds}s; closing them, to be resumed as after a restart`);
+      }
+      await this.stop();
+    })();
+    return this.draining;
   }
 
   private settled(r: CommandReport, fresh: boolean, kind: string): void {

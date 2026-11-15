@@ -14,6 +14,8 @@ export interface Config {
   permissions: Permissions;
   /** Two hosts on one machine need two of these, or each reports the other's agents. */
   agentsDir: string;
+  /** How long a drain waits for sessions to finish their turns before it closes the rest as a stop of the host does. */
+  drainSeconds: number;
 }
 
 /**
@@ -26,6 +28,8 @@ export interface Permissions {
   deny: string[];
 }
 
+export const DRAIN_SECONDS = 1800;
+
 export const EVERY_TOOL: Permissions = { allow: ["*"], deny: [] };
 
 export function allows(permissions: Permissions, tool: string): boolean {
@@ -35,7 +39,7 @@ export function allows(permissions: Permissions, tool: string): boolean {
 }
 
 /** `tmux_socket` was read by an older release, and is accepted so a config that still names it is not refused. */
-const KEYS = new Set(["service_url", "token", "host_id", "capacity", "labels", "agents_dir", "permissions", "tmux_socket"]);
+const KEYS = new Set(["service_url", "token", "host_id", "capacity", "labels", "agents_dir", "drain_seconds", "permissions", "tmux_socket"]);
 
 /**
  * `agency-host/config.toml` in the config folder, or, when only that exists,
@@ -99,6 +103,10 @@ export function fromText(text: string, home: string | null): Config {
     agentsDir = join(home, "agents");
   }
   if (!isAbsolute(agentsDir)) throw new Error(`agents_dir ${agentsDir} is not an absolute path`);
+  const drainSeconds = file.drain_seconds ?? DRAIN_SECONDS;
+  if (!(typeof drainSeconds === "number" && Number.isInteger(drainSeconds) && drainSeconds >= 0)) {
+    throw new Error("drain_seconds is not a whole number");
+  }
   let permissions = EVERY_TOOL;
   if (file.permissions !== undefined) {
     const p = file.permissions as Record<string, unknown>;
@@ -116,6 +124,7 @@ export function fromText(text: string, home: string | null): Config {
     ...(capacity !== undefined ? { capacity: Number(capacity) } : {}),
     ...(file.labels !== undefined ? { labels: strings(file.labels, "labels") } : {}),
     agentsDir,
+    drainSeconds,
     permissions,
   };
 }

@@ -18,7 +18,11 @@ const USAGE = `usage: agency-host [--config PATH]
 
 Every setting is in the file: service_url, token, host_id (default the hostname),
 capacity, labels, agents_dir (default ~/agents), [permissions] allow and deny
-(default every tool allowed).`;
+(default every tool allowed), drain_seconds (default 1800).
+
+SIGTERM or SIGINT stops it now: its sessions are resumed when it starts again,
+the turn each was in cut off. SIGUSR2 drains it: each session is closed once its
+turn is over, and it exits once none is live, or at drain_seconds.`;
 
 /** Read by agency-host and by its releases as agent-host, and never given to a session. */
 const CONFIG_VARS = ["AGENCY_HOST_CONFIG", "AGENT_HOST_CONFIG"];
@@ -83,19 +87,28 @@ async function main(): Promise<number | null> {
     login: loginDir(process.env.CLAUDE_CONFIG_DIR, config.agentsDir, log),
     baseEnv: baseEnv(),
   });
-  host.start();
-  let going = false;
+  let stopping = false;
+  let draining = false;
+  const exit = () => {
+    lock.close();
+    process.exit(0);
+  };
   const go = (signal: string) => {
-    if (going) return;
-    going = true;
+    if (stopping) return;
+    stopping = true;
     log(`agency-host: ${signal}; its sessions are resumed when it starts again`);
-    void host.stop().finally(() => {
-      lock.close();
-      process.exit(0);
-    });
+    void host.stop().finally(exit);
   };
   process.on("SIGTERM", () => go("SIGTERM"));
   process.on("SIGINT", () => go("SIGINT"));
+  // Installed at the start, as a release's deploy reads the signals caught to know a host can drain. Not SIGUSR1, which is Node's inspector's.
+  process.on("SIGUSR2", () => {
+    if (stopping || draining) return;
+    draining = true;
+    log(`agency-host: SIGUSR2; draining: each session is closed as its turn ends, and the host exits once none is live, or in ${config.drainSeconds}s`);
+    void host.drain().finally(exit);
+  });
+  host.start();
   return null;
 }
 

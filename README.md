@@ -33,6 +33,15 @@ node dist/cli.js 2>> ~/agency-host.log &
 Start it from your own login, not from inside an agent's session. When it
 restarts, it resumes each session that was live; the turn in flight is lost.
 
+To restart it without losing a turn, as a release does, drain it: send it
+`SIGUSR2` (under systemd, `systemctl --user kill -s USR2 --kill-whom=main agency-host`).
+It closes each session that is between turns at once, and each other as soon
+as its turn ends, then exits; the next start resumes each one, told nothing
+was cut off. Until then it stays connected and takes commands as ever, and a
+session started or told something meanwhile is closed as that turn ends. At
+`drain_seconds` it closes whatever is still live as a stop does, those turns
+lost, and exits. `SIGTERM` or `SIGINT`, drained or not, stops it at once.
+
 On Linux, a systemd user unit keeps it running. Save this as
 `~/.config/systemd/user/agency-host.service` and run
 `systemctl --user enable --now agency-host`:
@@ -78,6 +87,7 @@ deny = ["WebFetch", "mcp__github__merge*"]
 | `capacity` | none | How many agents may run here at once. Unset, none are placed here. |
 | `labels` | none | Labels requests can ask a host to carry. |
 | `agents_dir` | `~/agents` | Where each agent's folder is. Two hosts on one machine need different ones. |
+| `drain_seconds` | `1800` | How long a drain (`SIGUSR2`) waits for sessions to finish their turns before it closes the rest. |
 | `permissions.allow` | `["*"]` | Tools a session may use. A name ending in `*` matches every tool it begins. |
 | `permissions.deny` | none | Tools a session may not use. Checked before `allow`. |
 
@@ -88,7 +98,7 @@ folder `<agents_dir>/<name>/`:
 
 ```text
 agent.json        id and name
-sessions.jsonl    each session started, stopped or ended
+sessions.jsonl    each session started, stopped, ended or drained
 prompt.md         the opening message of the latest session
 credentials.env   the variables and tokens it was given, readable by you alone
 home/.claude/     its own Claude Code settings, CLAUDE.md, skills and transcripts
