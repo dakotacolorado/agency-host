@@ -229,6 +229,14 @@ export interface Read {
   told?: boolean;
   /** The account's usage, when it is a `rate_limit_event` that says any. */
   usage?: Windows;
+  /** When the limit resets, when it is a `rate_limit_event` that refuses the account. */
+  rejected?: string;
+  /**
+   * What it says of the turn, for a limit: `begins` for a turn begun or a
+   * command's message delivered, `continues` for the agent's own work going
+   * on, `ends` for a `result`.
+   */
+  turn?: "begins" | "continues" | "ends";
   /** What its turn used, subagents included, when it is a `result` that says. */
   tokens?: Tokens;
   /** For the host's own record of a message it sent: that message's uuid and the command it carried. */
@@ -267,6 +275,19 @@ function usage(v: Json): Windows | undefined {
   if (fiveHour) read.fiveHour = fiveHour;
   if (sevenDay) read.sevenDay = sevenDay;
   return fiveHour || sevenDay ? read : undefined;
+}
+
+/** A `rate_limit_event` whose limit is reached: when it resets, or failing that the latest reset of the windows reached. */
+function rejected(v: Json): string | undefined {
+  if (v.type !== "rate_limit_event") return undefined;
+  const info = obj(v.rate_limit_info);
+  if (info.status !== "rejected") return undefined;
+  if (typeof info.resetsAt === "number") return epoch(info.resetsAt) ?? undefined;
+  const resets = Object.values(obj(info.unifiedWindows))
+    .map(obj)
+    .filter((w) => w.status === "rejected" && typeof w.resetsAt === "number")
+    .map((w) => w.resetsAt as number);
+  return resets.length ? (epoch(Math.max(...resets)) ?? undefined) : undefined;
 }
 
 /**
@@ -322,13 +343,21 @@ export function read(line: string): Read {
   if (u) out.usage = u;
   const t = tokens(v);
   if (t) out.tokens = t;
+  const limit = rejected(v);
+  if (limit) out.rejected = limit;
+  if (v.type === "result") out.turn = "ends";
   if (v.type === "agent_host" && v.subtype === "sent" && typeof v.uuid === "string") {
     out.sent = { uuid: v.uuid, ...(typeof v.commandId === "string" ? { commandId: v.commandId } : {}) };
+    // The host's own message to a session it resumed is not one: a limit that still holds ends the turn it begins again.
+    if (out.sent.commandId) out.turn = "begins";
     return out;
   }
   // A subagent's own conversation, and lines Claude Code adds for itself.
   if (v.isSidechain === true || v.isMeta === true || typeof v.parent_tool_use_id === "string") return out;
   const message = obj(v.message);
+  if (v.type === "system" && v.subtype === "init") out.turn = "begins";
+  // The limit's own notice is an assistant message Claude Code makes up, not the agent working on.
+  else if (v.type === "user" || (v.type === "assistant" && message.model !== "<synthetic>")) out.turn = "continues";
   if (v.type === "system" && v.subtype === "background_tasks_changed" && Array.isArray(v.tasks)) out.tasks = v.tasks.length;
   // A new process has no background tasks, and is in no turn until it is told something.
   if (v.type === "agent_host" && v.subtype === "process_started") {

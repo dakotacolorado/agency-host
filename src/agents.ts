@@ -50,6 +50,8 @@ export interface AgentReport {
   sessionId: string | null;
   tasks: number;
   told?: boolean;
+  /** When the usage limit that ended its last turn resets; null once a turn has begun since, or when none did. */
+  limitedUntil: string | null;
 }
 
 export interface Line {
@@ -70,7 +72,9 @@ export interface Usage extends claude.Windows {
  * file, the byte after the last whole line read in it, the `seq` of the line
  * that comes next, and as of that line: whether its turn has ended, how many
  * background tasks are open, whether its turn was begun by a message, the
- * tokens its session has used, and the messages sent and not yet echoed.
+ * tokens its session has used, the messages sent and not yet echoed, when
+ * the limit that ended its last turn resets, and when a limit reached in the
+ * turn under way does.
  * Never changed in place, so a read can be put back.
  */
 export interface Cursor {
@@ -82,6 +86,8 @@ export interface Cursor {
   told?: boolean;
   tokens: claude.Tokens;
   pending: { [uuid: string]: string | null };
+  limitedUntil?: string;
+  rejected?: string;
 }
 
 export const START: Cursor = { file: 0, offset: 0, seq: 0, waiting: false, tasks: 0, tokens: claude.NO_TOKENS, pending: {} };
@@ -515,6 +521,7 @@ export class Agents {
   /** What is reported of the agent, as of `at` in its events. */
   report(h: Home, id: string, at: Cursor): AgentReport {
     const live = this.live.get(id);
+    const limitedUntil = at.limitedUntil ?? null;
     if (live) {
       return {
         id,
@@ -522,12 +529,13 @@ export class Agents {
         sessionId: live.sessionId,
         tasks: Math.min(at.tasks, MOST_TASKS),
         ...(at.told !== undefined ? { told: at.told } : {}),
+        limitedUntil,
       };
     }
     const latest = h.latest();
     // Closed by a drain between turns: it waits, for the next host to resume it.
     if (latest?.drained && !latest.stopped && !latest.ended) {
-      return { id, state: "waiting", sessionId: latest.sessionId, tasks: 0, ...(at.told !== undefined ? { told: at.told } : {}) };
+      return { id, state: "waiting", sessionId: latest.sessionId, tasks: 0, ...(at.told !== undefined ? { told: at.told } : {}), limitedUntil };
     }
     const interrupted = latest && !latest.stopped;
     return {
@@ -537,6 +545,8 @@ export class Agents {
       // A session not running has no tasks, whatever it last said.
       tasks: 0,
       ...(at.told !== undefined ? { told: at.told } : {}),
+      // A stopped agent is not to be resumed when its limit resets.
+      limitedUntil: interrupted ? limitedUntil : null,
     };
   }
 
@@ -556,7 +566,7 @@ export class Agents {
     let size = 0;
     let usage: Usage | undefined;
     const tokens: Batch["tokens"] = [];
-    const onTo = (c: Cursor): Cursor => ({ ...c, file: c.file + 1, offset: 0, tasks: 0, told: undefined, tokens: claude.NO_TOKENS, pending: {} });
+    const onTo = (c: Cursor): Cursor => ({ ...c, file: c.file + 1, offset: 0, tasks: 0, told: undefined, tokens: claude.NO_TOKENS, pending: {}, limitedUntil: undefined, rejected: undefined });
     files: while (next.file < sources.length) {
       const sessionId = sources[next.file]!;
       const last = next.file + 1 === sources.length;
@@ -604,6 +614,7 @@ export class Agents {
           tasks: r.tasks ?? next.tasks,
           told: r.told ?? next.told,
           pending,
+          ...limitAfter(next, r),
         };
         if (r.tokens) {
           next = { ...next, tokens: claude.addTokens(next.tokens, r.tokens) };
@@ -650,6 +661,22 @@ function* linesOf(path: string, offset: number, limit: number): Generator<{ byte
   } finally {
     closeSync(fd);
   }
+}
+
+/**
+ * The limit as of `r`: one reached in a turn counts once that turn ends on
+ * it, not if the agent works on after it, and a turn begun clears it.
+ */
+function limitAfter(c: Cursor, r: claude.Read): Pick<Cursor, "limitedUntil" | "rejected"> {
+  let { limitedUntil, rejected } = c;
+  if (r.turn === "begins") limitedUntil = rejected = undefined;
+  if (r.rejected) rejected = r.rejected;
+  if (r.turn === "continues") rejected = undefined;
+  if (r.turn === "ends") {
+    limitedUntil = rejected;
+    rejected = undefined;
+  }
+  return { limitedUntil, rejected };
 }
 
 /** Keeps `live`'s turn, tasks and messages not yet taken as of `m`, as a read of its events would. */

@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { Agents, CARRY_ON, DRAINED, NOTHING_YET, RESUMED, START, type Cursor, type Line } from "./agents.ts";
 import { EVERY_TOOL, type Permissions } from "./config.ts";
-import { FakeSdk, scratch, settle, type FakeSession } from "./testing.ts";
+import { FakeSdk, LIMIT_STOP, scratch, settle, type FakeSession } from "./testing.ts";
 
 const AGENT = "3b0f6c1e-9a52-4c1d-8f43-2a6e1c7d9b10";
 const S1 = "9d6a1f0e-4b7c-4e21-a3f8-0c5d2e7b4a19";
@@ -43,7 +43,7 @@ describe("creating an agent", () => {
     agents.create(AGENT, "ana");
     expect(JSON.parse(readFileSync(join(dir, "ana/agent.json"), "utf8"))).toEqual({ id: AGENT, name: "ana" });
     expect(readFileSync(join(dir, "ana/home/.claude/CLAUDE.md"), "utf8")).toContain(`You are agent \`ana\`, and your folder is \`${join(dir, "ana")}\``);
-    expect(readAll(agents).report).toEqual({ id: AGENT, state: "idle", sessionId: null, tasks: 0 });
+    expect(readAll(agents).report).toEqual({ id: AGENT, state: "idle", sessionId: null, tasks: 0, limitedUntil: null });
     expect(() => agents.create(AGENT, "bob")).toThrow(/here already, named ana/);
     expect(() => agents.create("w2", "Ana")).toThrow(/not an agent name/);
   });
@@ -211,15 +211,15 @@ describe("an agent's state", () => {
     s.onSend = () => {};
     expect(readAll(agents).report).toMatchObject({ state: "working", sessionId: S1 });
     await settle();
-    expect(readAll(agents).report).toEqual({ id: AGENT, state: "waiting", sessionId: S1, tasks: 0, told: true });
+    expect(readAll(agents).report).toEqual({ id: AGENT, state: "waiting", sessionId: S1, tasks: 0, told: true, limitedUntil: null });
     // A turn a background task's end begins is not told.
     s.emit({ type: "system", subtype: "init" });
     await settle();
-    expect(readAll(agents).report).toEqual({ id: AGENT, state: "working", sessionId: S1, tasks: 0, told: false });
+    expect(readAll(agents).report).toEqual({ id: AGENT, state: "working", sessionId: S1, tasks: 0, told: false, limitedUntil: null });
     s.emit({ type: "system", subtype: "background_tasks_changed", tasks: [{ task_id: "a" }, { task_id: "b" }] });
     s.emit({ type: "result", subtype: "success" });
     await settle();
-    expect(readAll(agents).report).toEqual({ id: AGENT, state: "waiting", sessionId: S1, tasks: 2, told: false });
+    expect(readAll(agents).report).toEqual({ id: AGENT, state: "waiting", sessionId: S1, tasks: 2, told: false, limitedUntil: null });
     await agents.stop(AGENT);
     expect(s.closed).toBe(true);
     expect(readAll(agents).report).toMatchObject({ state: "idle", sessionId: null, tasks: 0 });
@@ -271,6 +271,74 @@ describe("tokens and usage", () => {
     expect(tokens.at(-2)).toEqual({ sessionId: S1, tokens: total(2) });
     expect(tokens.at(-1)).toEqual({ sessionId: S2, tokens: total(1) });
     expect(usage).toEqual({ readAt: "2026-11-13T08:01:00.000Z", sevenDay: { utilization: 0.8, resetsAt: "2026-11-14T15:00:00.000Z" } });
+  });
+});
+
+const RESETS = "2026-11-15T08:50:00.000Z";
+
+describe("a usage limit", () => {
+  it("that ended a turn is reported until the next turn begins, by a message delivered or by itself", async () => {
+    const { sdk, agents } = host();
+    agents.create(AGENT, "ana");
+    agents.start({ commandId: C1, agentId: AGENT, sessionId: S1, resume: false, text: "go" });
+    await settle();
+    expect(readAll(agents).report.limitedUntil).toBeNull();
+    const s = sdk.last;
+    s.onSend = () => {};
+    for (const m of LIMIT_STOP) s.emit(m);
+    await settle();
+    expect(readAll(agents).report).toMatchObject({ state: "waiting", limitedUntil: RESETS });
+    agents.message(AGENT, C2, "Carry on.");
+    expect(readAll(agents).report.limitedUntil).toBeNull();
+    for (const m of LIMIT_STOP) s.emit(m);
+    await settle();
+    expect(readAll(agents).report.limitedUntil).toBe(RESETS);
+    s.emit({ type: "system", subtype: "init" });
+    await settle();
+    expect(readAll(agents).report.limitedUntil).toBeNull();
+  });
+
+  it("is not reported for a turn with only allowed readings, or one that went on after a refusal", async () => {
+    const { sdk, agents } = host();
+    agents.create(AGENT, "ana");
+    agents.start({ agentId: AGENT, sessionId: S1, resume: false, text: "go" });
+    await settle();
+    const s = sdk.last;
+    const [refused] = LIMIT_STOP;
+    s.emit({ type: "system", subtype: "init" });
+    for (const status of ["allowed", "allowed_warning"]) {
+      s.emit({ type: "rate_limit_event", rate_limit_info: { status, resetsAt: 1794732600, unifiedWindows: { five_hour: { utilization: 0.9, resetsAt: 1794732600, status } } } });
+    }
+    s.emit({ type: "result", subtype: "success" });
+    await settle();
+    expect(readAll(agents).report).toMatchObject({ state: "waiting", limitedUntil: null });
+    s.emit({ type: "system", subtype: "init" });
+    s.emit(refused!);
+    s.emit({ type: "assistant", message: { model: "claude-opus-5-5", content: [{ type: "text", text: "on I go" }], stop_reason: "end_turn" } });
+    s.emit({ type: "result", subtype: "success" });
+    await settle();
+    expect(readAll(agents).report).toMatchObject({ state: "waiting", limitedUntil: null });
+  });
+
+  it("is reported again by a host restarted while it holds, and is gone with a stop", async () => {
+    const first = host();
+    first.agents.create(AGENT, "ana");
+    first.agents.start({ commandId: C1, agentId: AGENT, sessionId: S1, resume: false, text: "go" });
+    await settle();
+    for (const m of LIMIT_STOP) first.sdk.last.emit(m);
+    await settle();
+    const state = join(first.dir, "ana/home/.claude");
+    mkdirSync(join(state, "projects/-x"), { recursive: true });
+    writeFileSync(join(state, "projects/-x", `${S1}.jsonl`), "{}\n");
+
+    const again = host(first.dir);
+    expect(readAll(again.agents).report).toMatchObject({ sessionId: S1, limitedUntil: RESETS });
+    // Told it restarted, its session is resumed into a turn of its own, which a limit that still holds ends again.
+    again.agents.reconcile();
+    expect(again.sdk.last.sent[0]!.text).toBe(RESUMED);
+    expect(readAll(again.agents).report).toMatchObject({ state: "working", sessionId: S1, limitedUntil: RESETS });
+    await again.agents.stop(AGENT);
+    expect(readAll(again.agents).report).toMatchObject({ state: "idle", limitedUntil: null });
   });
 });
 
