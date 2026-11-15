@@ -13,6 +13,9 @@ import { Socket, socketUrl } from "./socket.ts";
 import { log } from "./sys.ts";
 
 export const HEARTBEAT_MS = 30_000;
+
+/** How often deleted agents' folders past what is kept are removed, besides at start and on each delete. */
+export const PRUNE_MS = 60 * 60 * 1000;
 /** A change is on the socket within about this long, and reports are no closer together. */
 export const BATCH_MS = 250;
 
@@ -35,6 +38,7 @@ export class Host {
   private readonly o: HostOptions;
   private timer: NodeJS.Timeout | null = null;
   private heartbeats: NodeJS.Timeout | null = null;
+  private prunes: NodeJS.Timeout | null = null;
   private lastFlush = 0;
   private flushing: Promise<void> = Promise.resolve();
   /** The socket the first report has gone up on, so a heartbeat never goes before it. */
@@ -72,10 +76,14 @@ export class Host {
     this.heartbeats = setInterval(() => {
       if (this.reportedOn === this.socket.opened) void this.heartbeat();
     }, this.o.heartbeatMs ?? HEARTBEAT_MS);
+    void this.agents.prune();
+    this.prunes = setInterval(() => void this.agents.prune(), PRUNE_MS);
+    this.prunes.unref();
   }
 
   async stop(): Promise<void> {
     if (this.heartbeats) clearInterval(this.heartbeats);
+    if (this.prunes) clearInterval(this.prunes);
     if (this.timer) clearTimeout(this.timer);
     this.socket.close();
     await this.agents.closeAll();

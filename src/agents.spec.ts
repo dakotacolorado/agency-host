@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync, appendFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { Agents, CARRY_ON, NOTHING_YET, RESUMED, START, type Cursor, type Line } from "./agents.ts";
@@ -381,5 +381,19 @@ describe("deleting", () => {
     await agents.delete(AGENT);
     await agents.stop(AGENT);
     expect(() => agents.create(AGENT, "ana")).toThrow(/was deleted here/);
+  });
+
+  it("takes the credentials, and removes a deleted folder past the time kept", async () => {
+    const { dir, agents } = host();
+    const old = join(dir, ".deleted", "bo-old");
+    mkdirSync(old, { recursive: true });
+    const t = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+    utimesSync(old, t, t);
+    agents.create(AGENT, "ana");
+    agents.start({ agentId: AGENT, sessionId: S1, resume: false, env: { A: "1" } });
+    await agents.delete(AGENT);
+    await agents.prune();
+    expect(existsSync(join(dir, ".deleted", `ana-${AGENT}`, "credentials.env"))).toBe(false);
+    expect(statSync(old).isFile()).toBe(true);
   });
 });

@@ -1,7 +1,7 @@
-import { appendFileSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { all, Home, deleted, validName, type Session } from "./home.ts";
+import { all, Home, deleted, KEPT_MS, prune, validName, type Session } from "./home.ts";
 import { scratch } from "./testing.ts";
 
 const ana = { id: "w1", name: "ana" };
@@ -62,9 +62,83 @@ describe("an agent's folder", () => {
     expect(readdirSync(join(dir, ".deleted"))).toEqual(["ana-w1"]);
   });
 
+  it("leaves its credentials and MCP servers behind when deleted", () => {
+    const dir = scratch("delete-given");
+    const home = new Home(join(dir, "ana"));
+    home.make(ana);
+    writeFileSync(home.credentials(), "TOKEN=x\n");
+    writeFileSync(home.mcp(), "{}\n");
+    home.delete(ana);
+    expect(readdirSync(join(dir, ".deleted", "ana-w1")).sort()).toEqual(["agent.json", "home", "logs"]);
+  });
+
   it("is known deleted from a folder an older host set aside as retired", () => {
     const dir = scratch("retired");
     mkdirSync(join(dir, ".retired", "bo-w9"), { recursive: true });
     expect(deleted(dir, "w9")).toBe(true);
+  });
+});
+
+describe("pruning deleted agents", () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const aside = (dir: string, where: string, name: string, ageMs: number, now: number) => {
+    const path = join(dir, where, name);
+    mkdirSync(join(path, "logs"), { recursive: true });
+    writeFileSync(join(path, "credentials.env"), "TOKEN=x\n");
+    writeFileSync(join(path, "logs", "s.jsonl"), "{}\n");
+    const t = new Date(now - ageMs);
+    utimesSync(path, t, t);
+    return path;
+  };
+
+  it("removes those past the time kept, leaving each known deleted, and takes the credentials of those kept", async () => {
+    const dir = scratch("prune-age");
+    const now = Date.now();
+    const kept = aside(dir, ".deleted", "ana-w1", DAY, now);
+    const old = aside(dir, ".deleted", "bo-w2", 3 * DAY, now);
+    const retired = aside(dir, ".retired", "cy-w3", 30 * DAY, now);
+    const { removed, failed } = await prune(dir, now);
+    expect(removed.sort()).toEqual([old, retired].sort());
+    expect(failed).toEqual([]);
+    expect(statSync(old).isFile()).toBe(true);
+    expect(statSync(retired).size).toBe(0);
+    expect(deleted(dir, "w2")).toBe(true);
+    expect(deleted(dir, "w3")).toBe(true);
+    expect(existsSync(join(kept, "logs", "s.jsonl"))).toBe(true);
+    expect(existsSync(join(kept, "credentials.env"))).toBe(false);
+    expect((await prune(dir, now)).removed).toEqual([]);
+  });
+
+  it("keeps only the newest past the most kept", async () => {
+    const dir = scratch("prune-count");
+    const now = Date.now();
+    for (let i = 0; i < 5; i++) aside(dir, ".deleted", `a${i}-w${i}`, i * 60_000, now);
+    const { removed } = await prune(dir, now, KEPT_MS, 3);
+    expect(removed.map((p) => p.split("/").at(-1)).sort()).toEqual(["a3-w3", "a4-w4"]);
+    expect(readdirSync(join(dir, ".deleted")).filter((n) => statSync(join(dir, ".deleted", n)).isDirectory()).sort()).toEqual(["a0-w0", "a1-w1", "a2-w2"]);
+  });
+
+  it("removes a folder an install left read-only", async () => {
+    const dir = scratch("prune-readonly");
+    const now = Date.now();
+    const path = aside(dir, ".deleted", "ana-w1", 3 * DAY, now);
+    mkdirSync(join(path, "cache", "mod"), { recursive: true });
+    writeFileSync(join(path, "cache", "mod", "f"), "x");
+    chmodSync(join(path, "cache", "mod"), 0o500);
+    chmodSync(join(path, "cache"), 0o500);
+    const t = new Date(now - 3 * DAY);
+    utimesSync(path, t, t);
+    expect((await prune(dir, now)).removed).toEqual([path]);
+    expect(statSync(path).isFile()).toBe(true);
+  });
+
+  it("is dated by the delete, not the folder's last write", () => {
+    const dir = scratch("prune-dated");
+    const home = new Home(join(dir, "ana"));
+    home.make(ana);
+    const t = new Date(Date.now() - 10 * DAY);
+    utimesSync(home.dir, t, t);
+    home.delete(ana);
+    expect(Date.now() - statSync(join(dir, ".deleted", "ana-w1")).mtimeMs).toBeLessThan(DAY);
   });
 });
