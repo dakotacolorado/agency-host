@@ -28,6 +28,10 @@ export const RESUMED =
   "Whatever was under way as it went -- a reply, a tool -- was cut off and may not have finished. If you were " +
   "waiting to be told something, keep waiting; otherwise check what was cut off, then carry on where you left off.";
 
+export const DRAINED =
+  "The host your session runs on restarted for a new release, between your turns: nothing was cut off. If you " +
+  "were waiting to be told something, keep waiting; otherwise carry on where you left off.";
+
 /** However much has piled up, a read stops after this many bytes of events, most of which is Claude Code's own bookkeeping. */
 const RAW_LIMIT = 8 << 20;
 const CHUNK = 256 << 10;
@@ -105,10 +109,17 @@ export interface Start {
 }
 
 interface Live {
+  home: Home;
+  name: string;
   sessionId: string;
   handle: SessionHandle;
   stopping: boolean;
   done: Promise<void>;
+  /** As of the last message it gave, as a read's cursor has them: whether its turn has ended, and its background tasks open. */
+  waiting: boolean;
+  tasks: number;
+  /** The messages sent to it that it has not yet taken, oldest first. */
+  unechoed: { uuid: string; text: string }[];
 }
 
 export interface AgentsOptions {
@@ -144,6 +155,8 @@ export class Agents {
   private readonly o: AgentsOptions;
   private readonly live = new Map<string, Live>();
   private pruning: Promise<void> | null = null;
+  /** Set once a drain has begun: done when no session is live. */
+  private draining: { done: Promise<void>; resolve: () => void } | null = null;
 
   constructor(options: AgentsOptions) {
     this.o = options;
@@ -266,7 +279,7 @@ export class Agents {
         }
       },
     });
-    const live: Live = { sessionId: session.sessionId, handle, stopping: false, done: Promise.resolve() };
+    const live: Live = { home: h, name: record.name, sessionId: session.sessionId, handle, stopping: false, done: Promise.resolve(), waiting: false, tasks: 0, unechoed: [] };
     this.live.set(record.id, live);
     live.done = this.pump(h, record, live, events);
     this.say(live, events, text, uuid, commandId);
@@ -279,7 +292,9 @@ export class Agents {
     try {
       for await (const m of live.handle.events) {
         this.append(events, stamped(m));
+        follow(live, m);
         this.o.changed();
+        this.closeIfBetweenTurns(live);
       }
     } catch (e) {
       why = errorText(e);
@@ -291,11 +306,13 @@ export class Agents {
         if (latest?.sessionId === live.sessionId && !latest.stopped && existsSync(h.dir)) h.ended(live.sessionId);
       }
       this.o.changed();
+      this.drainedOut();
     }
   }
 
   private say(live: Live, events: string, text: string, uuid: string, commandId: string | undefined): void {
     this.append(events, claude.sent(now(), uuid, commandId));
+    live.unechoed.push({ uuid, text });
     live.handle.send(text, uuid);
   }
 
@@ -317,8 +334,19 @@ export class Agents {
     appendFileSync(events, line);
   }
 
-  /** Pushes `text` into the agent's live session now, whether it is working or waiting: working, it takes it at its next step. */
+  /**
+   * Pushes `text` into the agent's live session now, whether it is working or
+   * waiting: working, it takes it at its next step. One a drain has closed is
+   * resumed to take it, and closed again as that turn ends.
+   */
   message(id: string, commandId: string, text: string): void {
+    const found = this.live.has(id) ? undefined : this.all().find((a) => a.record.id === id);
+    const latest = found?.home.latest();
+    if (found && latest?.drained && !latest.stopped && !latest.ended) {
+      found.home.drained(latest.sessionId, false);
+      this.run(found.home, found.record, latest, { resume: latest.claude }, text, claude.uuid(commandId), commandId);
+      return;
+    }
     const live = this.running(id);
     this.say(live, this.find(id).home.events(live.sessionId), text, claude.uuid(commandId), commandId);
   }
@@ -354,6 +382,7 @@ export class Agents {
     const latest = found.home.latest();
     if (latest && !latest.stopped) found.home.stopped(latest.sessionId);
     this.o.changed();
+    this.drainedOut();
   }
 
   /** Stops the agent and moves its folder aside, without its credentials, until a prune removes it. One not here, or deleted already, is done. */
@@ -398,8 +427,45 @@ export class Agents {
   }
 
   /**
+   * Closes each live session at the end of its turn, as `closeAll` does, so
+   * none loses one: a session between turns now, and each other as its turn
+   * ends, a session started or told something meanwhile too. Each is marked
+   * drained before it is closed, so the host that takes it up tells it it
+   * lost nothing. Done once no session is live; called again, the same.
+   */
+  drain(): Promise<void> {
+    if (!this.draining) {
+      let resolve!: () => void;
+      const done = new Promise<void>((r) => (resolve = r));
+      this.draining = { done, resolve };
+      for (const l of this.live.values()) this.closeIfBetweenTurns(l);
+      this.drainedOut();
+    }
+    return this.draining.done;
+  }
+
+  /**
+   * Between turns is as the host reports it waiting rather than working, with
+   * no background task open, which would begin a turn of its own as it ends,
+   * and nothing sent to it still to come back, which it has yet to take.
+   */
+  private closeIfBetweenTurns(live: Live): void {
+    if (!this.draining || live.stopping || !live.waiting || live.tasks > 0 || live.unechoed.length) return;
+    live.home.drained(live.sessionId);
+    // Not a stop: each is resumed when the host is back.
+    live.stopping = true;
+    log(`agent ${live.name}: session ${live.sessionId} closed between turns, to be resumed by the next host`);
+    live.handle.close();
+  }
+
+  private drainedOut(): void {
+    if (this.draining && !this.live.size) this.draining.resolve();
+  }
+
+  /**
    * Takes up every session that was live when the host last went: each is
-   * resumed and told the host restarted, losing the turn that was in flight.
+   * resumed and told the host restarted, losing the turn that was in flight,
+   * or, one a drain closed between turns, that it lost nothing.
    * One cut off before Claude Code wrote anything has nothing to resume, and
    * is begun again as it was first. One that cannot be begun is noted as
    * ended, and reads as interrupted.
@@ -412,7 +478,9 @@ export class Agents {
         const session = latest.stream ? latest : { ...latest, from: 0, stream: true };
         if (!latest.stream) h.begin(session);
         if (claude.transcript(h.claude(), session.claude)) {
-          this.run(h, record, session, { resume: session.claude }, RESUMED, this.madeUp(session), undefined);
+          // Cleared first, so one cut off in the session it is resumed into is told so when the host is next back.
+          if (latest.drained) h.drained(latest.sessionId, false);
+          this.run(h, record, session, { resume: session.claude }, latest.drained ? DRAINED : RESUMED, this.madeUp(session), undefined);
         } else {
           let text = NOTHING_YET;
           try {
@@ -457,6 +525,10 @@ export class Agents {
       };
     }
     const latest = h.latest();
+    // Closed by a drain between turns: it waits, for the next host to resume it.
+    if (latest?.drained && !latest.stopped && !latest.ended) {
+      return { id, state: "waiting", sessionId: latest.sessionId, tasks: 0, ...(at.told !== undefined ? { told: at.told } : {}) };
+    }
     const interrupted = latest && !latest.stopped;
     return {
       id,
@@ -577,6 +649,22 @@ function* linesOf(path: string, offset: number, limit: number): Generator<{ byte
     }
   } finally {
     closeSync(fd);
+  }
+}
+
+/** Keeps `live`'s turn, tasks and messages not yet taken as of `m`, as a read of its events would. */
+function follow(live: Live, m: Message): void {
+  const r = claude.read(JSON.stringify(m));
+  if (r.waiting !== undefined) live.waiting = r.waiting;
+  if (r.tasks !== undefined) live.tasks = r.tasks;
+  for (const e of r.entries) {
+    if (e.from === "instruction" && e.uuid) live.unechoed = live.unechoed.filter((u) => u.uuid !== e.uuid);
+  }
+  // A message taken into the turn under way comes back as its words alone, with no uuid; failing them, the oldest is the one taken first.
+  const attachment = m.attachment as { type?: unknown; prompt?: unknown } | undefined;
+  if (m.type === "attachment" && attachment?.type === "queued_command") {
+    const i = live.unechoed.findIndex((u) => u.text === attachment.prompt);
+    live.unechoed = live.unechoed.filter((_, j) => j !== (i >= 0 ? i : 0));
   }
 }
 

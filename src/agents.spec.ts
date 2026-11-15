@@ -1,9 +1,9 @@
 import { existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { Agents, CARRY_ON, NOTHING_YET, RESUMED, START, type Cursor, type Line } from "./agents.ts";
+import { Agents, CARRY_ON, DRAINED, NOTHING_YET, RESUMED, START, type Cursor, type Line } from "./agents.ts";
 import { EVERY_TOOL, type Permissions } from "./config.ts";
-import { FakeSdk, scratch, settle } from "./testing.ts";
+import { FakeSdk, scratch, settle, type FakeSession } from "./testing.ts";
 
 const AGENT = "3b0f6c1e-9a52-4c1d-8f43-2a6e1c7d9b10";
 const S1 = "9d6a1f0e-4b7c-4e21-a3f8-0c5d2e7b4a19";
@@ -368,6 +368,133 @@ describe("a host that restarts", () => {
     expect(shown(readAll(agents).lines)).toEqual([[0, "instruction", "go", C1], [1, "instruction", "carry on", null]]);
   });
 });
+
+/** Claude Code has written the agent's transcript, so its session can be resumed. */
+function transcript(dir: string, name: string, claudeSession: string): void {
+  const projects = join(dir, name, "home/.claude/projects/-x");
+  mkdirSync(projects, { recursive: true });
+  writeFileSync(join(projects, `${claudeSession}.jsonl`), "{}\n");
+}
+
+/** A session that takes each message and begins a turn, which the test ends. */
+const working = (s: FakeSession) =>
+  (s.onSend = (text, uuid) => {
+    s.emit({ type: "system", subtype: "init", session_id: "s" });
+    s.emit({ type: "user", message: { role: "user", content: text }, uuid, isReplay: true, parent_tool_use_id: null });
+  });
+const endTurn = (s: FakeSession) => s.emit({ type: "result", subtype: "success" });
+
+describe("draining", () => {
+  it("closes at once a session between turns, as the host going does, and reports it waiting", async () => {
+    const { dir, sdk, agents } = host();
+    agents.create(AGENT, "ana");
+    agents.start({ agentId: AGENT, sessionId: S1, resume: false, text: "go" });
+    await settle();
+    const drained = agents.drain();
+    expect(sdk.last.closed).toBe(true);
+    await drained;
+    expect(agents.isLive(AGENT)).toBe(false);
+    expect(readFileSync(join(dir, "ana/sessions.jsonl"), "utf8")).toContain(`{"sessionId":"${S1}","drained":true}`);
+    const latest = agents.all()[0]!.home.latest()!;
+    expect(latest).toMatchObject({ stopped: false, ended: false, drained: true });
+    expect(readAll(agents).report).toMatchObject({ state: "waiting", sessionId: S1, tasks: 0 });
+    // A drain called again is the same, and harmless.
+    await agents.drain();
+  });
+
+  it("closes a session in a turn, or with a background task open, only once that is over", async () => {
+    const { sdk, agents } = host();
+    agents.create(AGENT, "ana");
+    agents.create("w2", "bob");
+    sdk.setup = working;
+    agents.start({ agentId: AGENT, sessionId: S1, resume: false, text: "go" });
+    agents.start({ agentId: "w2", sessionId: "s-bob", resume: false, text: "go" });
+    const [ana, bob] = sdk.sessions as [FakeSession, FakeSession];
+    await settle();
+    bob.emit({ type: "system", subtype: "background_tasks_changed", tasks: [{ id: "t1" }] });
+    endTurn(bob);
+    await settle();
+    let done = false;
+    void agents.drain().then(() => (done = true));
+    await settle();
+    expect([ana.closed, bob.closed]).toEqual([false, false]);
+    // Told something while it worked, which it has not yet taken: its turns are not over.
+    ana.onSend = () => {};
+    agents.message(AGENT, C2, "and this");
+    endTurn(ana);
+    await settle();
+    expect(ana.closed).toBe(false);
+    ana.emit({ type: "attachment", attachment: { type: "queued_command", prompt: "and this" } });
+    endTurn(ana);
+    await settle();
+    expect(ana.closed).toBe(true);
+    expect(bob.closed).toBe(false);
+    bob.emit({ type: "system", subtype: "background_tasks_changed", tasks: [] });
+    await settle();
+    expect(bob.closed).toBe(true);
+    expect(done).toBe(true);
+  });
+
+  it("closes a session started, or a drained one told something, as that turn ends", async () => {
+    const { sdk, agents } = host();
+    agents.create(AGENT, "ana");
+    agents.create("w2", "bob");
+    agents.create("w3", "cy");
+    agents.start({ agentId: "w3", sessionId: "s-cy", resume: false, text: "go" });
+    await settle();
+    sdk.setup = working;
+    agents.start({ agentId: "w2", sessionId: "s-bob", resume: false, text: "go" });
+    await settle();
+    let done = false;
+    void agents.drain().then(() => (done = true));
+    await settle();
+    expect(sdk.sessions[0]!.closed).toBe(true);
+    agents.start({ agentId: AGENT, sessionId: S1, resume: false, text: "go" });
+    agents.message("w3", C1, "one more");
+    const [, bob, ana, cy] = sdk.sessions as FakeSession[];
+    expect(cy!.options.resume).toBe(claudeOf(agents, "w3"));
+    expect(cy!.sent).toEqual([{ text: "one more", uuid: C1 }]);
+    await settle();
+    expect([bob!.closed, ana!.closed, cy!.closed]).toEqual([false, false, false]);
+    for (const s of [bob!, ana!, cy!]) endTurn(s);
+    await settle();
+    expect([bob!.closed, ana!.closed, cy!.closed]).toEqual([true, true, true]);
+    expect(done).toBe(true);
+  });
+
+  it("is told by the next host it lost nothing, where one cut off at the deadline is told it was", async () => {
+    const first = host();
+    first.agents.create(AGENT, "ana");
+    first.agents.create("w2", "bob");
+    first.agents.start({ agentId: AGENT, sessionId: S1, resume: false, text: "go" });
+    first.sdk.setup = working;
+    first.agents.start({ agentId: "w2", sessionId: "s-bob", resume: false, text: "go" });
+    await settle();
+    transcript(first.dir, "ana", claudeOf(first.agents, AGENT));
+    transcript(first.dir, "bob", claudeOf(first.agents, "w2"));
+    void first.agents.drain();
+    await settle();
+    // The deadline: what is still live is closed as the host going closes it.
+    await first.agents.closeAll();
+
+    const again = host(first.dir);
+    again.agents.reconcile();
+    const told = new Map(again.sdk.sessions.map((s) => [s.options.cwd, s.sent[0]!.text]));
+    expect(told).toEqual(new Map([[join(first.dir, "ana"), DRAINED], [join(first.dir, "bob"), RESUMED]]));
+    await settle();
+    expect(readAll(again.agents).report).toMatchObject({ state: "waiting", sessionId: S1 });
+
+    // Resumed, it is no longer drained: cut off now, it is told so.
+    const third = host(first.dir);
+    third.agents.reconcile();
+    expect(third.sdk.sessions.map((s) => s.sent[0]!.text)).toEqual([RESUMED, RESUMED]);
+  });
+});
+
+/** The Claude Code session the agent's latest session carries. */
+function claudeOf(agents: Agents, id: string): string {
+  return agents.all().find((a) => a.record.id === id)!.home.latest()!.claude;
+}
 
 describe("deleting", () => {
   it("stops the agent and moves its folder aside; one not here is done", async () => {

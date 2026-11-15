@@ -57,9 +57,9 @@ afterEach(async () => {
   cleanup = [];
 });
 
-function start(service: Service, sdk = new FakeSdk()) {
+function start(service: Service, sdk = new FakeSdk(), drainSeconds = 1800) {
   const host = new Host({
-    config: { serviceUrl: service.url, token: "t0k3n", hostId: "studio", capacity: 2, labels: ["linux"], agentsDir: scratch("host"), permissions: { allow: ["*"], deny: [] } },
+    config: { serviceUrl: service.url, token: "t0k3n", hostId: "studio", capacity: 2, labels: ["linux"], agentsDir: scratch("host"), drainSeconds, permissions: { allow: ["*"], deny: [] } },
     version: "9.9.9",
     startSession: sdk.start,
     login: null,
@@ -144,6 +144,47 @@ describe("a host on its socket", () => {
     service.command({ id: "c9", kind: "message", agentId: "w9", text: "hi" });
     await until(() => service.results().length >= 1);
     expect(service.results()).toEqual([{ commandId: "c9", ok: false, error: "agent w9 has no live session on this host" }]);
+  });
+});
+
+describe("a host draining", () => {
+  it("stays on its socket taking commands, and stops once its sessions have ended their turns", async () => {
+    const service = await Service.open();
+    const sdk = new FakeSdk();
+    sdk.setup = (s) => (s.onSend = () => {});
+    const { host } = start(service, sdk);
+    await until(() => service.last?.got.length >= 2);
+    service.command({ id: "c1", kind: "create", agentId: "w1", name: "ana" });
+    service.command({ id: "c2", kind: "start", agentId: "w1", sessionId: "s1", resume: false, text: "go" });
+    await until(() => service.results().length >= 2);
+    let drained = false;
+    void host.drain().then(() => (drained = true));
+    void host.drain();
+    service.command({ id: "c3", kind: "message", agentId: "w1", text: "also" });
+    await until(() => service.results().length >= 3);
+    expect(service.results()).toContainEqual({ commandId: "c3", ok: true });
+    expect(sdk.last.closed).toBe(false);
+    sdk.last.turn("go", sdk.last.sent[0]!.uuid, "done");
+    sdk.last.turn("also", sdk.last.sent[1]!.uuid, "done too");
+    await until(() => drained);
+    expect(sdk.last.closed).toBe(true);
+    expect(service.last.ws.readyState).not.toBe(1);
+  });
+
+  it("closes what is still in a turn at drain_seconds, and stops", async () => {
+    const service = await Service.open();
+    const sdk = new FakeSdk();
+    sdk.setup = (s) => (s.onSend = () => {});
+    const { host } = start(service, sdk, 1);
+    await until(() => service.last?.got.length >= 2);
+    service.command({ id: "c1", kind: "create", agentId: "w1", name: "ana" });
+    service.command({ id: "c2", kind: "start", agentId: "w1", sessionId: "s1", resume: false, text: "go" });
+    await until(() => service.results().length >= 2);
+    const began = Date.now();
+    await host.drain();
+    expect(Date.now() - began).toBeGreaterThanOrEqual(900);
+    expect(sdk.last.closed).toBe(true);
+    expect(host.agents.isLive("w1")).toBe(false);
   });
 });
 

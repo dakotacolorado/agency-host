@@ -4,7 +4,7 @@
  *
  * ```text
  * agent.json        who it is: id and name, as created
- * sessions.jsonl    each session the host started for it, and each it stopped
+ * sessions.jsonl    each session the host started for it, each it stopped, and each a drain closed
  * prompt.md         the opening message of its latest session
  * credentials.env   its latest start's variables and tokens, mode 600
  * mcp.json          its latest start's MCP servers, their ${VAR}s unfilled
@@ -54,6 +54,8 @@ export interface Session {
   stopped: boolean;
   /** Seen by the host to end without a stop. A session neither stopped nor ended was live when the host went, and is resumed. */
   ended: boolean;
+  /** Closed by a drain between its turns, and not resumed since: it lost nothing. */
+  drained?: boolean;
 }
 
 /** An agent name as the service allows it, which is also all that keeps a name from reaching outside the agents folder. */
@@ -155,6 +157,12 @@ export class Home {
         for (const s of sessions) if (s.sessionId === id) s.stopped = true;
       } else if (e.ended === true) {
         for (const s of sessions) if (s.sessionId === id) s.ended = true;
+      } else if (typeof e.drained === "boolean") {
+        for (const s of sessions) {
+          if (s.sessionId !== id) continue;
+          if (e.drained) s.drained = true;
+          else delete s.drained;
+        }
       } else if (e.withdrawn === true) {
         for (let i = sessions.length - 1; i >= 0; i--) if (sessions[i]!.sessionId === id) sessions.splice(i, 1);
       }
@@ -167,7 +175,7 @@ export class Home {
   }
 
   begin(session: Session): void {
-    const { stopped: _s, ended: _e, ...line } = session;
+    const { stopped: _s, ended: _e, drained: _d, ...line } = session;
     this.append(line);
   }
 
@@ -177,6 +185,11 @@ export class Home {
 
   ended(sessionId: string): void {
     this.append({ sessionId, ended: true });
+  }
+
+  /** Marks a session closed between its turns by a drain, or, with false, resumed since. */
+  drained(sessionId: string, drained = true): void {
+    this.append({ sessionId, drained });
   }
 
   /** Takes back a session that would not start, so the start is tried again when it is sent again. */
