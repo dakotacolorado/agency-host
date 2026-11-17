@@ -9,6 +9,7 @@
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import * as claude from "./claude.ts";
+import { archive, onFuse } from "./archive.ts";
 import { allows, type Permissions } from "./config.ts";
 import * as context from "./context.ts";
 import * as home from "./home.ts";
@@ -150,6 +151,10 @@ export interface AgentsOptions {
   baseEnv: { [k: string]: string };
   /** Called whenever something an agent report or line could say has changed. */
   changed: () => void;
+  /** Where a deleted agent's records are archived (`archive.ts`); unset, they are not. */
+  archiveDir?: string;
+  /** Whether a path is on the mounted drive; the tests' own folders are not. */
+  mounted?: (path: string) => Promise<boolean>;
 }
 
 /**
@@ -173,6 +178,8 @@ export class Agents {
   private readonly o: AgentsOptions;
   private readonly live = new Map<string, Live>();
   private pruning: Promise<void> | null = null;
+  /** Archives under way, so a test can wait them out. */
+  readonly archiving = new Set<Promise<void>>();
   /** Set once a drain has begun: done when no session is live. */
   private draining: { done: Promise<void>; resolve: () => void } | null = null;
 
@@ -431,7 +438,10 @@ export class Agents {
     this.drainedOut();
   }
 
-  /** Stops the agent and moves its folder aside, without its credentials, until a prune removes it. One not here, or deleted already, is done. */
+  /**
+   * Stops the agent and moves its folder aside, without its credentials, until a prune removes it, and
+   * archives its records. One not here, or deleted already, is done.
+   */
   async delete(id: string): Promise<void> {
     let found;
     try {
@@ -440,9 +450,23 @@ export class Agents {
       return;
     }
     await this.stop(id);
-    found.home.delete(found.record);
+    const aside = found.home.delete(found.record);
     this.o.changed();
+    if (this.o.archiveDir) this.archive(aside, found.record, this.o.archiveDir);
     void this.prune();
+  }
+
+  /**
+   * In the background: a drive that hangs must not hold up the delete, and one that fails never fails it,
+   * since the folder in `.deleted` still holds everything.
+   */
+  private archive(aside: string, record: AgentRecord, dir: string): void {
+    const label = `${record.name}-${record.id}`;
+    const p: Promise<void> = archive(aside, record, dir, this.o.mounted ?? onFuse)
+      .then((path) => log(`${label}: archived to ${path}`))
+      .catch((e) => log(`${label}: not archived to ${dir}: ${errorText(e)}`))
+      .finally(() => this.archiving.delete(p));
+    this.archiving.add(p);
   }
 
   /** Removes deleted agents' folders past what is kept (`home.prune`); one prune at a time, which a call during it shares. */

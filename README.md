@@ -88,6 +88,7 @@ deny = ["WebFetch", "mcp__github__merge*"]
 | `labels` | none | Labels requests can ask a host to carry. |
 | `agents_dir` | `~/agents` | Where each agent's folder is. Two hosts on one machine need different ones. |
 | `drain_seconds` | `1800` | How long a drain (`SIGUSR2`) waits for sessions to finish their turns before it closes the rest. |
+| `archive_dir` | none | Where each deleted agent's records are kept for good, as `<name>-<id>.tar.zst`. It must be on a FUSE-mounted drive. |
 | `permissions.allow` | `["*"]` | Tools a session may use. A name ending in `*` matches every tool it begins. |
 | `permissions.deny` | none | Tools a session may not use. Checked before `allow`. |
 
@@ -110,6 +111,15 @@ A deleted agent's folder moves to `<agents_dir>/.deleted/<name>-<id>/`,
 without its `credentials.env` and `mcp.json`. The newest 100 are kept,
 however old; the host removes the rest when it starts, after each delete, and
 hourly, leaving an empty file by the folder's name.
+
+With `archive_dir` set, a delete also writes `<archive_dir>/<name>-<id>.tar.zst`
+holding `agent.json`, `sessions.jsonl`, `prompt.md`, `logs/` and
+`home/.claude/` (its transcripts), and never its `credentials.env`,
+`mcp.json`, Claude login (`.credentials*`) or anything else in the folder, such
+as what it cloned. List one with `tar -tf <file>` (GNU tar with the `zstd` program installed). The archive is
+written in the background and never fails the delete: if `archive_dir` is not on
+a FUSE mount (the drive is not mounted) or the write fails, the host logs
+`<name>-<id>: not archived to …` and the folder in `.deleted` is all there is.
 
 To take a session over by hand, stop the agent in agency, then in its folder:
 
