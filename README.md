@@ -101,20 +101,26 @@ folder `<agents_dir>/<name>/`:
 agent.json        id and name
 sessions.jsonl    each session started, stopped, ended or drained
 prompt.md         the opening message of the latest session
-credentials.env   the variables and tokens it was given, readable by you alone
+env.json          the addresses of the services it was given (no token)
 home/.claude/     its own Claude Code settings, CLAUDE.md, skills and transcripts
 logs/<id>.jsonl   every SDK message of each session
 logs/<id>.log     each session's stderr
 ```
 
+Its secrets (the tokens agency gives each session) are set only in the
+session's environment and written nowhere. A host that restarts holds none, so
+it does not run a session it held: it reports the agent as needing a start, and
+agency answers with one that carries its secrets. A `credentials.env` an older
+host left is removed.
+
 A deleted agent's folder moves to `<agents_dir>/.deleted/<name>-<id>/`,
-without its `credentials.env` and `mcp.json`. The newest 100 are kept,
+without its `env.json` and `mcp.json`. The newest 100 are kept,
 however old; the host removes the rest when it starts, after each delete, and
 hourly, leaving an empty file by the folder's name.
 
 With `archive_dir` set, a delete also writes `<archive_dir>/<name>-<id>.tar.zst`
 holding `agent.json`, `sessions.jsonl`, `prompt.md`, `logs/` and
-`home/.claude/` (its transcripts), and never its `credentials.env`,
+`home/.claude/` (its transcripts), and never its `env.json`, `credentials.env`,
 `mcp.json`, Claude login (`.credentials*`) or anything else in the folder, such
 as what it cloned. List one with `tar -tf <file>` (GNU tar with the `zstd` program installed). The archive is
 written in the background and never fails the delete: if `archive_dir` is not on

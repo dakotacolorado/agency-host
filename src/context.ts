@@ -142,26 +142,9 @@ export function env(given: Record<string, string> | undefined): Record<string, s
 }
 
 /**
- * Writes `variables` to `file` as shell assignments, readable by the host's
- * user alone; with none, removes the last. A session resumed after the host
- * restarts is given them again from here.
+ * The variables an older host wrote to `file`, read back; no host writes it now. Only so a session resumed
+ * across the upgrade keeps them once: the caller removes the file.
  */
-export function writeCredentials(file: string, variables: Record<string, string>): void {
-  const entries = Object.entries(variables);
-  if (!entries.length) {
-    if (existsSync(file)) unlinkSync(file);
-    return;
-  }
-  const bad = entries.find(([k]) => !variable(k));
-  if (bad) throw new Error(`${JSON.stringify(bad[0])} is not a variable a session can be given`);
-  const text = entries.map(([k, v]) => `${k}='${v.replaceAll("'", `'\\''`)}'\n`).join("");
-  // Made, or made again, readable by its owner alone before anything is in it.
-  if (existsSync(file)) chmodSync(file, 0o600);
-  writeFileSync(file, text, { mode: 0o600 });
-  chmodSync(file, 0o600);
-}
-
-/** What `writeCredentials` wrote, read back. */
 export function readCredentials(file: string): Record<string, string> {
   let text: string;
   try {
