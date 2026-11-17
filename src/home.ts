@@ -56,6 +56,8 @@ export interface Session {
   /** The model and effort its start named, or a `configure` since did; absent, Claude Code's defaults. Kept so the session resumes on them. */
   model?: string;
   effort?: string;
+  /** Run in a container (`container.ts`) rather than on the host, as its start said; absent, on the host. Kept so the session resumes where it ran. */
+  runtime?: "container";
 }
 
 /** An agent name as the service allows it, which is also all that keeps a name from reaching outside the agents folder. */
@@ -158,6 +160,7 @@ export class Home {
           ...(typeof e.opening === "string" ? { opening: e.opening } : {}),
           ...(typeof e.model === "string" ? { model: e.model } : {}),
           ...(typeof e.effort === "string" ? { effort: e.effort } : {}),
+          ...(e.runtime === "container" ? { runtime: "container" as const } : {}),
           stopped: false,
           ended: false,
         });

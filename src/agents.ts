@@ -11,6 +11,7 @@ import { dirname } from "node:path";
 import * as claude from "./claude.ts";
 import { archive, onFuse } from "./archive.ts";
 import { allows, type Permissions } from "./config.ts";
+import * as container from "./container.ts";
 import * as context from "./context.ts";
 import * as home from "./home.ts";
 import type { Home, Record as AgentRecord, Session } from "./home.ts";
@@ -127,6 +128,8 @@ export interface Start {
   mcpServers?: { [k: string]: unknown };
   model?: string;
   effort?: Effort;
+  /** Where it runs; absent, as the agent's last session did, or on the host. */
+  runtime?: "container" | "host";
 }
 
 interface Live {
@@ -157,6 +160,8 @@ export interface AgentsOptions {
   archiveDir?: string;
   /** Whether a path is on the mounted drive; the tests' own folders are not. */
   mounted?: (path: string) => Promise<boolean>;
+  /** How this host runs a session in a container; unset, it runs none, and refuses a start that asks for one. */
+  containers?: container.Containers;
 }
 
 /**
@@ -242,6 +247,8 @@ export class Agents {
     const sessions = h.sessions();
     if (sessions.some((x) => x.sessionId === s.sessionId)) return;
     const previous = s.resume ? sessions.at(-1) : undefined;
+    const boxed = (s.runtime ?? (previous?.runtime === "container" ? "container" : "host")) === "container";
+    if (boxed && !this.o.containers) throw new Error(`${record.name} runs in a container, and this host has no agent image to run one in`);
     const opening = s.text !== undefined && s.commandId ? claude.uuid(s.commandId) : undefined;
     const session: Session = {
       sessionId: s.sessionId,
@@ -252,6 +259,7 @@ export class Agents {
       // Only what this start names: one that names none runs on Claude Code's defaults, as before there were any.
       ...(s.model ? { model: s.model } : {}),
       ...(s.effort ? { effort: s.effort } : {}),
+      ...(boxed ? { runtime: "container" as const } : {}),
       stopped: false,
       ended: false,
     };
@@ -260,8 +268,9 @@ export class Agents {
     // A start that carries neither keeps what the last one wrote.
     if (s.context !== undefined || s.documents !== undefined) context.write(h.claude(), s.context, s.documents ?? []);
     // The rules follow the host's version, so each session is told the ones of the host it runs on,
-    // with the honed skills it was last given.
-    claude.prepare(h.claude(), h.dir, rules(h.dir, record.name, context.instructions(h.claude())));
+    // with the honed skills it was last given, and its folder where its Claude Code sees it.
+    const seen = boxed ? container.INSIDE : h.dir;
+    claude.prepare(h.claude(), h.dir, rules(seen, record.name, context.instructions(h.claude())), boxed ? container.INSIDE : undefined);
     // Its secrets stay in memory and go only to the session's environment; the addresses, which are no secret,
     // are kept so a session resumed after the host restarts has them again.
     this.secrets.set(s.agentId, context.env(s.secrets));
@@ -310,22 +319,26 @@ export class Agents {
     mkdirSync(dirname(events), { recursive: true });
     this.append(events, claude.started(now()));
     claude.subagents(h.claude());
-    const env: Record<string, string> = {
-      ...this.o.baseEnv,
-      ...this.given(h, record.id),
-      ...claude.claudeEnv(h.claude(), this.o.login),
-    };
+    const boxed = session.runtime === "container" ? this.o.containers : undefined;
+    if (session.runtime === "container" && !boxed) throw new Error(`${record.name} runs in a container, and this host has no agent image to run one in`);
+    // In a container, nothing of the host's environment: its own variables, and its home and Claude Code where it sees them.
+    const env: Record<string, string> = boxed
+      ? { ...this.given(h, record.id), HOME: container.INSIDE_HOME, CLAUDE_CONFIG_DIR: container.INSIDE_STATE }
+      : { ...this.o.baseEnv, ...this.given(h, record.id), ...claude.claudeEnv(h.claude(), this.o.login) };
     let mcpServers: Record<string, unknown> | undefined;
     if (existsSync(h.mcp())) {
       const given = (JSON.parse(readFileSync(h.mcp(), "utf8")) as { mcpServers?: Record<string, unknown> }).mcpServers ?? {};
       const { servers, missing } = context.expand(given, env);
       if (missing.length) log(`agent ${record.name}: its MCP servers name ${missing.join(", ")}, which its session is not given`);
-      mcpServers = servers;
+      // A container's Claude Code fills the ${VAR}s itself from its environment: the SDK passes the servers on its
+      // command line, which a token must not be on.
+      mcpServers = boxed ? given : servers;
     }
     const errors = h.errors(session.sessionId);
     const handle = this.o.startSession({
-      cwd: h.dir,
+      cwd: boxed ? container.INSIDE : h.dir,
       env,
+      ...(boxed ? { container: { ...boxed, name: `agent-${record.id}`, dir: h.dir, limits: container.limits(h.claude()) } } : {}),
       ...("resume" in begin ? { resume: begin.resume } : { sessionId: begin.fresh }),
       ...(mcpServers ? { mcpServers } : {}),
       ...(session.model ? { model: session.model } : {}),

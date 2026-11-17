@@ -92,6 +92,14 @@ deny = ["WebFetch", "mcp__github__merge*"]
 | `permissions.allow` | `["*"]` | Tools a session may use. A name ending in `*` matches every tool it begins. |
 | `permissions.deny` | none | Tools a session may not use. Checked before `allow`. |
 
+Two environment variables set how container sessions run (see
+[Containers](#containers)):
+
+| Variable | Default | What it does |
+|---|---|---|
+| `AGENCY_HOST_IMAGE` | `localhost/agency-agent:<release>`, when run from `releases/<release>/` | The image a container session runs in, built from `image/Containerfile`. With neither, no session runs in a container here. |
+| `AGENCY_HOST_SLICE` | `agencyagents.slice` | The systemd user slice the containers run under, which can cap all of them together. |
+
 ## Use it
 
 You manage agents through agency, not here. On this machine, each agent has a
@@ -127,7 +135,7 @@ written in the background and never fails the delete: if `archive_dir` is not on
 a FUSE mount (the drive is not mounted) or the write fails, the host logs
 `<name>-<id>: not archived to …` and the folder in `.deleted` is all there is.
 
-To take a session over by hand, stop the agent in agency, then in its folder:
+To take a session over by hand (a host agent's), stop the agent in agency, then in its folder:
 
 ```sh
 CLAUDE_CONFIG_DIR=<agents_dir>/<name>/home/.claude claude --resume <id>
@@ -156,6 +164,33 @@ size of its session's context as of its last request.
 Each agent's Claude Code has its own `Explore` subagent
 (`home/.claude/agents/Explore.md`), which takes the built-in's place: a
 read-only search on Haiku, without the write tools.
+
+### Containers
+
+A `start` whose `runtime` is `container` runs the session's Claude Code in
+podman. The host keeps the Agent SDK and the socket, and only Claude Code runs
+in the container:
+
+- **Mounts:** the agent's folder at `/agent`, with its home at `/agent/home`
+  and its Claude Code at `/agent/home/.claude`, and `/cellar` where the host has
+  it. Nothing else of the host's.
+- **Network:** its own network namespace (pasta). DNS goes to the host's
+  resolver, so tailnet names resolve as they do on the host.
+- **Limits:** the CPUs and memory in its role's `role.json` (`cpus`,
+  `memoryMiB`), defaulting to 4 CPUs and 8 GiB.
+- **Environment:** its variables and secrets only, none of the host's. They are
+  handed over on an inherited pipe, so no value is on a command line or in the
+  container's config.
+- **Lifecycle:** the container is `agent-<id>`, and it is removed when its
+  session ends. A resumed session (by a start, after a drain, or after a
+  restart) runs in a new container with the same mounts, and carries on the
+  transcript in `/agent/home/.claude`.
+
+The session's MCP servers reach Claude Code with their `${VAR}`s unfilled, and
+Claude Code fills them in from its environment. A session that ran in a
+container resumes in one. A host agent (`runtime` `host`, or none) runs as
+before. A container cannot SSH to its own host by Tailscale SSH, just as the
+host cannot.
 
 ## Develop it
 

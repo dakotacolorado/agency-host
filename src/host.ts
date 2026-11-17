@@ -7,6 +7,7 @@
 import { Agents, START } from "./agents.ts";
 import { Commands, parse, type CommandReport } from "./commands.ts";
 import type { Config } from "./config.ts";
+import type { Containers } from "./container.ts";
 import { Reporter } from "./report.ts";
 import type { StartSession } from "./sdk.ts";
 import { Socket, socketUrl } from "./socket.ts";
@@ -25,6 +26,8 @@ export interface HostOptions {
   startSession: StartSession;
   login: string | null;
   baseEnv: { [k: string]: string };
+  /** How it runs a session in a container; unset, it runs none. */
+  containers?: Containers;
   heartbeatMs?: number;
   batchMs?: number;
   backoffMs?: [number, number];
@@ -55,6 +58,7 @@ export class Host {
       permissions: o.config.permissions,
       login: o.login,
       baseEnv: o.baseEnv,
+      ...(o.containers ? { containers: o.containers } : {}),
       ...(o.config.archiveDir ? { archiveDir: o.config.archiveDir } : {}),
       changed: () => this.soon(),
     });
