@@ -227,7 +227,7 @@ export class Home {
    * `<agents_dir>/.deleted/<name>-<id>`, so a new agent can be given its
    * name. It is kept there for a while, until `prune` removes it.
    */
-  delete(record: Record): void {
+  delete(record: Record): string {
     for (const f of GIVEN) rmSync(join(this.dir, f), { force: true });
     const parent = dirname(this.dir);
     mkdirSync(join(parent, DELETED), { recursive: true });
@@ -236,6 +236,7 @@ export class Home {
     // Dated by its deletion, not its last write, so it is kept for its full time.
     const t = new Date();
     utimesSync(aside, t, t);
+    return aside;
   }
 }
 

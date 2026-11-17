@@ -32,6 +32,12 @@ describe("the config file", () => {
     expect(read(`${BASE}tmux_socket = "beta"`)).toEqual(config);
   });
 
+  it("archives deleted agents only where archive_dir says, at an absolute path", () => {
+    expect(read(BASE).archiveDir).toBeUndefined();
+    expect(read(`${BASE}archive_dir = "/cellar/agency/agents"`).archiveDir).toBe("/cellar/agency/agents");
+    expect(() => read(`${BASE}archive_dir = "agents"`)).toThrow(/archive_dir agents is not an absolute path/);
+  });
+
   it("puts agents in ~/agents unless it says otherwise, and only at an absolute path", () => {
     expect(read(BASE).agentsDir).toBe("/home/me/agents");
     expect(read(`${BASE}agents_dir = "/srv/agents"`).agentsDir).toBe("/srv/agents");

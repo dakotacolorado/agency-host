@@ -55,6 +55,7 @@ export class Host {
       permissions: o.config.permissions,
       login: o.login,
       baseEnv: o.baseEnv,
+      ...(o.config.archiveDir ? { archiveDir: o.config.archiveDir } : {}),
       changed: () => this.soon(),
     });
     this.reporter = new Reporter(this.agents);

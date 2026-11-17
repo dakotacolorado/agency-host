@@ -16,6 +16,8 @@ export interface Config {
   agentsDir: string;
   /** How long a drain waits for sessions to finish their turns before it closes the rest as a stop of the host does. */
   drainSeconds: number;
+  /** Where a deleted agent's records are kept for good, on a drive every host mounts. Unset, they are kept only in `.deleted`. */
+  archiveDir?: string;
 }
 
 /**
@@ -39,7 +41,7 @@ export function allows(permissions: Permissions, tool: string): boolean {
 }
 
 /** `tmux_socket` was read by an older release, and is accepted so a config that still names it is not refused. */
-const KEYS = new Set(["service_url", "token", "host_id", "capacity", "labels", "agents_dir", "drain_seconds", "permissions", "tmux_socket"]);
+const KEYS = new Set(["service_url", "token", "host_id", "capacity", "labels", "agents_dir", "drain_seconds", "archive_dir", "permissions", "tmux_socket"]);
 
 /**
  * `agency-host/config.toml` in the config folder, or, when only that exists,
@@ -107,6 +109,8 @@ export function fromText(text: string, home: string | null): Config {
   if (!(typeof drainSeconds === "number" && Number.isInteger(drainSeconds) && drainSeconds >= 0)) {
     throw new Error("drain_seconds is not a whole number");
   }
+  const archiveDir = string("archive_dir");
+  if (archiveDir !== undefined && !isAbsolute(archiveDir)) throw new Error(`archive_dir ${archiveDir} is not an absolute path`);
   let permissions = EVERY_TOOL;
   if (file.permissions !== undefined) {
     const p = file.permissions as Record<string, unknown>;
@@ -125,6 +129,7 @@ export function fromText(text: string, home: string | null): Config {
     ...(file.labels !== undefined ? { labels: strings(file.labels, "labels") } : {}),
     agentsDir,
     drainSeconds,
+    ...(archiveDir !== undefined ? { archiveDir } : {}),
     permissions,
   };
 }
