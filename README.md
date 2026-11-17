@@ -141,6 +141,14 @@ npm run build
 AGENCY_HOST_REAL_CLAUDE=1 npx vitest run src/real.spec.ts   # one real session; uses a little usage
 ```
 
+`image/Containerfile` is the image agents' sessions run in when they run in a
+container: Node 24, git, gh, the Claude Code the Agent SDK bundles, Rust
+(with clippy and rustfmt), uv and the common command-line tools, each pinned.
+Build it with `podman build -t agency-agent image/`. Run it with
+`--userns=keep-id` and the agent's folder mounted at `/agent`; its home is
+`/agent/home`. Bumping the Agent SDK means bumping `CLAUDE_SDK_VERSION` and
+`CLAUDE_SDK_INTEGRITY` there too, which `npm test` checks.
+
 ## License
 
 MIT. See [LICENSE](./LICENSE).
