@@ -9,7 +9,7 @@
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import * as claude from "./claude.ts";
-import { archive, onFuse } from "./archive.ts";
+import { archive } from "./archive.ts";
 import { allows, type Permissions } from "./config.ts";
 import * as container from "./container.ts";
 import * as context from "./context.ts";
@@ -158,8 +158,6 @@ export interface AgentsOptions {
   changed: () => void;
   /** Where a deleted agent's records are archived (`archive.ts`); unset, they are not. */
   archiveDir?: string;
-  /** Whether a path is on the mounted drive; the tests' own folders are not. */
-  mounted?: (path: string) => Promise<boolean>;
   /** How this host runs a session in a container; unset, it runs none, and refuses a start that asks for one. */
   containers?: container.Containers;
 }
@@ -503,12 +501,12 @@ export class Agents {
   }
 
   /**
-   * In the background: a drive that hangs must not hold up the delete, and one that fails never fails it,
+   * In the background: a disk that hangs must not hold up the delete, and one that fails never fails it,
    * since the folder in `.deleted` still holds everything.
    */
   private archive(aside: string, record: AgentRecord, dir: string): void {
     const label = `${record.name}-${record.id}`;
-    const p: Promise<void> = archive(aside, record, dir, this.o.mounted ?? onFuse)
+    const p: Promise<void> = archive(aside, record, dir)
       .then((path) => log(`${label}: archived to ${path}`))
       .catch((e) => log(`${label}: not archived to ${dir}: ${errorText(e)}`))
       .finally(() => this.archiving.delete(p));

@@ -1,11 +1,11 @@
 /**
  * A deleted agent's records, kept for good in `<archive_dir>/<name>-<id>.tar.zst`
- * on a drive every host mounts, so they outlive the host's own disk.
+ * in a folder on the host's own disk.
  */
 import { spawn } from "node:child_process";
 import { createWriteStream, existsSync } from "node:fs";
-import { mkdir, rename, rm, statfs } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { mkdir, rename, rm } from "node:fs/promises";
+import { join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { createZstdCompress } from "node:zlib";
 import type { Record } from "./home.ts";
@@ -16,26 +16,14 @@ export const KEPT = ["agent.json", "sessions.jsonl", "prompt.md", "logs", "home/
 /** Left out wherever they are under what is kept: its Claude login, and anything that names itself credentials or MCP servers. */
 export const LEFT_OUT = [".credentials*", "credentials.env", "mcp.json", ".mcp.json"];
 
-/** `f_type` of a FUSE filesystem (linux/magic.h). */
-const FUSE_SUPER_MAGIC = 0x65735546;
-
-/** Whether `path`, or the nearest folder above it that exists, is on a FUSE mount. */
-export async function onFuse(path: string): Promise<boolean> {
-  let at = path;
-  while (!existsSync(at) && dirname(at) !== at) at = dirname(at);
-  return (await statfs(at)).type === FUSE_SUPER_MAGIC;
-}
-
 /**
  * Writes the records of the agent whose folder is `folder` (already moved
  * aside, its credentials gone) to `<dir>/<name>-<id>.tar.zst`, through a
- * hidden temporary name so a reader never sees half of one. `dir` must be on
- * the mounted drive: unmounted, it is the root disk, and a copy there is no
- * better kept than the folder itself.
+ * hidden temporary name so a reader never sees half of one. `dir` is any local
+ * folder, made (mode 700) if missing.
  */
-export async function archive(folder: string, record: Record, dir: string, mounted: (path: string) => Promise<boolean> = onFuse): Promise<string> {
-  if (!(await mounted(dir))) throw new Error(`${dir} is not on a mounted drive`);
-  await mkdir(dir, { recursive: true });
+export async function archive(folder: string, record: Record, dir: string): Promise<string> {
+  await mkdir(dir, { recursive: true, mode: 0o700 });
   const name = `${record.name}-${record.id}.tar.zst`;
   const path = join(dir, name);
   const partial = join(dir, `.${name}.partial`);

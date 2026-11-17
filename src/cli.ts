@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { loginDir } from "./claude.ts";
 import { banner, wantsColor } from "./banner.ts";
 import { load } from "./config.ts";
-import { CELLAR, releaseImage, SLICE, type Containers } from "./container.ts";
+import { releaseImage, SLICE, type Containers } from "./container.ts";
 import { Host } from "./host.ts";
 import { hold } from "./lock.ts";
 import { startSdkSession } from "./sdk.ts";
@@ -40,7 +40,7 @@ const CONFIG_VARS = ["AGENCY_HOST_CONFIG", "AGENT_HOST_CONFIG", "AGENCY_HOST_IMA
 function containers(env: { [k: string]: string }): Containers | undefined {
   const image = process.env.AGENCY_HOST_IMAGE || releaseImage(new URL(".", import.meta.url).pathname);
   if (!image) return undefined;
-  return { podman: "podman", image, slice: process.env.AGENCY_HOST_SLICE || SLICE, cellar: existsSync(CELLAR) ? CELLAR : null, env };
+  return { podman: "podman", image, slice: process.env.AGENCY_HOST_SLICE || SLICE, env };
 }
 
 export function parseArgs(args: string[], env: NodeJS.ProcessEnv, color = false): { config: string | null } | { exit: number; say: string } {

@@ -2,7 +2,7 @@
  * Claude Code in a container, for an agent whose runtime is `container`: the
  * Agent SDK and the socket stay on the host, and the SDK's Claude Code
  * process is `podman run` of the agent image (`image/Containerfile`), with
- * the agent's folder at /agent, the drive at /cellar, a network of its own
+ * the agent's folder at /agent, a network of its own
  * and its role's CPU and memory, and nothing else of the host's.
  *
  * Its environment, secrets among them, goes down an inherited pipe (fd 3)
@@ -42,16 +42,11 @@ export const DEFAULT_LIMITS: Limits = { cpus: 4, memoryMiB: 8192 };
  */
 const DNS = "169.254.1.1";
 
-/** The drive every host mounts (cellar-host), mounted into each container where the host has it. */
-export const CELLAR = "/cellar";
-
 /** What the host runs containers with. */
 export interface Containers {
   podman: string;
   image: string;
   slice: string;
-  /** The drive to mount at /cellar, or null on a host without it. */
-  cellar: string | null;
   /** podman's own environment: the host's. */
   env: Record<string, string>;
 }
@@ -123,7 +118,6 @@ export function podmanArgs(r: ContainerRun, command: string[]): string[] {
     "--preserve-fds=1",
     "-v",
     `${r.dir}:${INSIDE}`,
-    ...(r.cellar ? ["-v", `${r.cellar}:${CELLAR}:rslave`] : []),
     "-w",
     INSIDE,
     r.image,

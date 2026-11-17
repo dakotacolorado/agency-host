@@ -12,7 +12,7 @@ const S1 = "9d6a1f0e-4b7c-4e21-a3f8-0c5d2e7b4a19";
 const S2 = "1d6a1f0e-4b7c-4e21-a3f8-0c5d2e7b4a20";
 const C1 = "aaaaaaaa-0000-4000-8000-000000000001";
 
-const CONTAINERS: Containers = { podman: "podman", image: "localhost/agency-agent:0.4.0-abc1234", slice: "agencyagents.slice", cellar: "/cellar", env: { PATH: "/usr/bin", HOME: "/home/me" } };
+const CONTAINERS: Containers = { podman: "podman", image: "localhost/agency-agent:0.4.0-abc1234", slice: "agencyagents.slice", env: { PATH: "/usr/bin", HOME: "/home/me" } };
 
 const box = (over: Partial<ContainerRun> = {}): ContainerRun => ({ ...CONTAINERS, name: `agent-${AGENT}`, dir: "/home/me/agents/ana", limits: { cpus: 2, memoryMiB: 4096 }, ...over });
 
@@ -26,20 +26,20 @@ const role = (settings: object) => ({
 });
 
 describe("a container's podman arguments", () => {
-  it("mount the agent's folder at /agent and the drive at /cellar, with its limits, its own network and slice, and nothing of the host's home", () => {
+  it("mount the agent's folder at /agent with its limits, its own network and slice, and nothing of the host's home", () => {
     const args = podmanArgs(box(), ["claude", "--verbose"]);
     expect(args.slice(0, 3)).toEqual(["run", "--rm", "-i"]);
     const joined = args.join(" ");
     expect(joined).toContain(`--name agent-${AGENT}`);
     expect(joined).toContain("-v /home/me/agents/ana:/agent ");
-    expect(joined).toContain("-v /cellar:/cellar:rslave ");
     expect(joined).toContain("-w /agent ");
     expect(joined).toContain("--cpus 2 --memory 4096m");
     expect(args).toContain("--userns=keep-id");
     expect(args).toContain("--cgroup-parent=agencyagents.slice");
     expect(args.find((a) => a.startsWith("--network="))).toMatch(/^--network=pasta:/);
-    expect(args.filter((a) => a === "-v")).toHaveLength(2);
-    // The only host path mounted is the agent's own folder (and the drive).
+    expect(args.filter((a) => a === "-v")).toHaveLength(1);
+    expect(joined).not.toContain("cellar");
+    // The only host path mounted is the agent's own folder.
     expect(args.filter((a) => a.startsWith("/home/me"))).toEqual(["/home/me/agents/ana:/agent"]);
     expect(args).not.toContain("-e");
     expect(args.some((a) => a.startsWith("--env"))).toBe(false);
@@ -47,8 +47,9 @@ describe("a container's podman arguments", () => {
     expect(args[args.indexOf("localhost/agency-agent:0.4.0-abc1234") + 1]).toBe("bash");
   });
 
-  it("leave out /cellar on a host without the drive", () => {
-    expect(podmanArgs(box({ cellar: null }), ["claude"]).filter((a) => a === "-v")).toHaveLength(1);
+  it("hold no /cellar mount, whether or not the host has /cellar", () => {
+    expect(podmanArgs(box(), ["claude"]).filter((a) => a === "-v")).toHaveLength(1);
+    expect(podmanArgs(box(), ["claude"]).join(" ")).not.toContain("/cellar");
   });
 });
 
