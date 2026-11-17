@@ -52,6 +52,9 @@ export interface AgentReport {
   told?: boolean;
   /** When the usage limit that ended its last turn resets; null once a turn has begun since, or when none did. */
   limitedUntil: string | null;
+  /** Results its live session has ended, and the sum of their `duration_ms`. */
+  turns?: number;
+  activeMs?: number;
   /** The size of its session's context as of its last request to the model, once it has made one. */
   contextTokens?: number;
 }
@@ -87,6 +90,10 @@ export interface Cursor {
   tasks: number;
   told?: boolean;
   tokens: claude.Tokens;
+  /** Of the session's turns: the tokens by model, the results read and the sum of their durations. */
+  byModel?: claude.ByModel;
+  turns?: number;
+  activeMs?: number;
   pending: { [uuid: string]: string | null };
   limitedUntil?: string;
   rejected?: string;
@@ -100,7 +107,7 @@ export interface Batch {
   next: Cursor;
   usage?: Usage;
   /** Each session whose tokens the lines read added to, with its total as of the last of them. */
-  tokens: { sessionId: string; tokens: claude.Tokens }[];
+  tokens: { sessionId: string; tokens: claude.Tokens; byModel?: claude.ByModel }[];
 }
 
 /** What a start carries. */
@@ -563,6 +570,8 @@ export class Agents {
         tasks: Math.min(at.tasks, MOST_TASKS),
         ...(at.told !== undefined ? { told: at.told } : {}),
         limitedUntil,
+        turns: at.turns ?? 0,
+        activeMs: at.activeMs ?? 0,
         ...(at.contextTokens !== undefined ? { contextTokens: at.contextTokens } : {}),
       };
     }
@@ -609,7 +618,7 @@ export class Agents {
     let size = 0;
     let usage: Usage | undefined;
     const tokens: Batch["tokens"] = [];
-    const onTo = (c: Cursor): Cursor => ({ ...c, file: c.file + 1, offset: 0, tasks: 0, told: undefined, tokens: claude.NO_TOKENS, pending: {}, limitedUntil: undefined, rejected: undefined, contextTokens: undefined });
+    const onTo = (c: Cursor): Cursor => ({ ...c, file: c.file + 1, offset: 0, tasks: 0, told: undefined, tokens: claude.NO_TOKENS, byModel: undefined, turns: undefined, activeMs: undefined, pending: {}, limitedUntil: undefined, rejected: undefined, contextTokens: undefined });
     files: while (next.file < sources.length) {
       const sessionId = sources[next.file]!;
       const last = next.file + 1 === sources.length;
@@ -660,11 +669,14 @@ export class Agents {
           ...limitAfter(next, r),
           ...(r.contextTokens !== undefined ? { contextTokens: r.contextTokens } : {}),
         };
+        if (r.durationMs !== undefined) next = { ...next, turns: (next.turns ?? 0) + 1, activeMs: (next.activeMs ?? 0) + r.durationMs };
         if (r.tokens) {
           next = { ...next, tokens: claude.addTokens(next.tokens, r.tokens) };
+          if (r.byModel) next = { ...next, byModel: claude.addByModel(next.byModel ?? {}, r.byModel) };
           const held = tokens.at(-1);
-          if (held?.sessionId === sessionId) held.tokens = next.tokens;
-          else tokens.push({ sessionId, tokens: next.tokens });
+          const entry = { sessionId, tokens: next.tokens, ...(next.byModel ? { byModel: next.byModel } : {}) };
+          if (held?.sessionId === sessionId) Object.assign(held, entry);
+          else tokens.push(entry);
         }
         if (r.usage) usage = { readAt: at, ...r.usage };
         lines.push(...read);

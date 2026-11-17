@@ -243,3 +243,13 @@ describe("an agent's Claude Code", () => {
     expect(transcript(state, "s1")).toBe(join(state, "projects/-some-folder/s1.jsonl"));
   });
 });
+
+describe("a result's models and duration", () => {
+  it("names each model's tokens, and carries the turn's duration", () => {
+    const r = read(JSON.stringify({ type: "result", duration_ms: 1234, model_usage_since_last_result: { "claude-opus-5-5": { inputTokens: 1, outputTokens: 2 }, "claude-sonnet-5-5": { inputTokens: 3, outputTokens: 4 } } }));
+    expect(r.durationMs).toBe(1234);
+    expect(Object.keys(r.byModel!)).toEqual(["claude-opus-5-5", "claude-sonnet-5-5"]);
+    expect(r.tokens).toMatchObject({ inputTokens: 4, outputTokens: 6 });
+    expect(read(JSON.stringify({ type: "result", usage: { input_tokens: 1 } })).byModel).toBeUndefined();
+  });
+});
