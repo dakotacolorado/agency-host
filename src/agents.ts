@@ -58,6 +58,8 @@ export interface AgentReport {
   activeMs?: number;
   /** The size of its session's context as of its last request to the model, once it has made one. */
   contextTokens?: number;
+  /** Held but not run, for want of the secrets a start gives; the service answers with a start that resumes it. */
+  needsStart?: boolean;
 }
 
 export interface Line {
@@ -164,7 +166,7 @@ export interface AgentsOptions {
 export function rules(dir: string, name: string, instructions = ""): string {
   const own =
     `You are agent \`${name}\`, and your folder is \`${dir}\`. A person reads everything you write, and what to do ` +
-    "comes to you as messages. Clone whatever you need into your folder; `home/`, `logs/`, `credentials.env`, " +
+    "comes to you as messages. Clone whatever you need into your folder; `home/`, `logs/`, `env.json`, " +
     "`mcp.json`, `prompt.md`, `sessions.jsonl` and `agent.json` are the host's records of you, so leave them be.\n";
   if (!instructions) return own;
   return (
@@ -177,6 +179,13 @@ export function rules(dir: string, name: string, instructions = ""): string {
 export class Agents {
   private readonly o: AgentsOptions;
   private readonly live = new Map<string, Live>();
+  /**
+   * The secrets of each live agent's latest start, by agent id: in memory only, never written. A session the
+   * host resumes by itself after it restarts has none until the next start gives it some.
+   */
+  private readonly secrets = new Map<string, Record<string, string>>();
+  /** Agents whose held session was not run, for want of secrets: reported as needing a start until one comes. */
+  private readonly awaiting = new Set<string>();
   private pruning: Promise<void> | null = null;
   /** Archives under way, so a test can wait them out. */
   readonly archiving = new Set<Promise<void>>();
@@ -253,8 +262,12 @@ export class Agents {
     // The rules follow the host's version, so each session is told the ones of the host it runs on,
     // with the honed skills it was last given.
     claude.prepare(h.claude(), h.dir, rules(h.dir, record.name, context.instructions(h.claude())));
-    // Its variables go with its tokens, so a session resumed after the host restarts is given them again.
-    context.writeCredentials(h.credentials(), { ...context.env(s.env), ...context.env(s.secrets) });
+    // Its secrets stay in memory and go only to the session's environment; the addresses, which are no secret,
+    // are kept so a session resumed after the host restarts has them again.
+    this.secrets.set(s.agentId, context.env(s.secrets));
+    this.awaiting.delete(s.agentId);
+    writeFileSync(h.env(), `${JSON.stringify(context.env(s.env), null, 2)}\n`);
+    this.forgetLegacy(h);
     // A start names every server its session may call, so one that names none takes away the last start's.
     if (s.mcpServers && Object.keys(s.mcpServers).length) {
       writeFileSync(h.mcp(), `${JSON.stringify({ mcpServers: s.mcpServers }, null, 2)}\n`);
@@ -271,6 +284,22 @@ export class Agents {
     }
   }
 
+  /** A credentials.env an older host left holds tokens it no longer reads: removed. */
+  private forgetLegacy(h: Home): void {
+    if (existsSync(h.legacyCredentials())) unlinkSync(h.legacyCredentials());
+  }
+
+  /** What a session of the agent is given: its addresses, then its secrets. */
+  private given(h: Home, agentId: string): Record<string, string> {
+    let addresses: Record<string, string> = {};
+    try {
+      addresses = context.env(JSON.parse(readFileSync(h.env(), "utf8")) as Record<string, string>);
+    } catch {
+      // Never started by a host that keeps them here.
+    }
+    return { ...addresses, ...this.secrets.get(agentId) };
+  }
+
   private madeUp(session: Session): string {
     return claude.hostUuid(`${session.sessionId}/${now()}`);
   }
@@ -283,7 +312,7 @@ export class Agents {
     claude.subagents(h.claude());
     const env: Record<string, string> = {
       ...this.o.baseEnv,
-      ...context.readCredentials(h.credentials()),
+      ...this.given(h, record.id),
       ...claude.claudeEnv(h.claude(), this.o.login),
     };
     let mcpServers: Record<string, unknown> | undefined;
@@ -374,6 +403,10 @@ export class Agents {
     const found = this.live.has(id) ? undefined : this.all().find((a) => a.record.id === id);
     const latest = found?.home.latest();
     if (found && latest?.drained && !latest.stopped && !latest.ended) {
+      if (!this.secrets.has(id)) {
+        this.awaiting.add(id);
+        throw new Error(`agent ${id} waits for a start with its secrets: send the message again once it has one`);
+      }
       found.home.drained(latest.sessionId, false);
       this.run(found.home, found.record, latest, { resume: latest.claude }, text, claude.uuid(commandId), commandId);
       return;
@@ -543,7 +576,15 @@ export class Agents {
   reconcile(): void {
     for (const { home: h, record } of this.all()) {
       const latest = h.latest();
+      this.forgetLegacy(h);
       if (!latest || latest.stopped || latest.ended || this.live.has(record.id)) continue;
+      // A session is never run without the secrets a start gives it, and a restarted host holds none: it is
+      // reported as needing a start, which resumes it.
+      if (!this.secrets.has(record.id)) {
+        this.awaiting.add(record.id);
+        log(`agent ${record.name}: session ${latest.sessionId} waits for a start with its secrets`);
+        continue;
+      }
       try {
         const session = latest.stream ? latest : { ...latest, from: 0, stream: true };
         if (!latest.stream) h.begin(session);
@@ -600,6 +641,18 @@ export class Agents {
       };
     }
     const latest = h.latest();
+    if (this.awaiting.has(id) && latest && !latest.stopped && !latest.ended) {
+      return {
+        id,
+        state: "waiting",
+        sessionId: latest.sessionId,
+        tasks: 0,
+        needsStart: true,
+        ...(at.told !== undefined ? { told: at.told } : {}),
+        limitedUntil,
+        ...(at.contextTokens !== undefined ? { contextTokens: at.contextTokens } : {}),
+      };
+    }
     // Closed by a drain between turns: it waits, for the next host to resume it.
     if (latest?.drained && !latest.stopped && !latest.ended) {
       return {

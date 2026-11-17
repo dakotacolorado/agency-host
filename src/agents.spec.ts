@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync, utimesSync, writeFileSync, appendFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync, utimesSync, writeFileSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { Agents, CARRY_ON, DRAINED, NOTHING_YET, RESUMED, START, type Cursor, type Line } from "./agents.ts";
@@ -77,8 +77,9 @@ describe("starting a session", () => {
     expect(rules).toContain("From honed's `agent-roles/planner`, v3, also at `skills/planner/`:\n\nplan\n");
     expect(rules).not.toContain("page");
     expect(readFileSync(join(dir, "ana/prompt.md"), "utf8")).toBe("Do the work.");
-    expect(statSync(join(dir, "ana/credentials.env")).mode & 0o777).toBe(0o600);
-    // No token on disk but credentials.env.
+    // No token on disk at all: its addresses are kept in env.json, its secrets only in the session's environment.
+    expect(existsSync(join(dir, "ana/credentials.env"))).toBe(false);
+    expect(JSON.parse(readFileSync(join(dir, "ana/env.json"), "utf8"))).toEqual({ WT_URL: "https://wt" });
     expect(readFileSync(join(dir, "ana/mcp.json"), "utf8")).not.toContain("s3cret");
     expect(readFileSync(join(dir, "ana/sessions.jsonl"), "utf8")).toContain(`"sessionId":"${S1}"`);
     const o = sdk.last.options;
@@ -337,12 +338,40 @@ describe("a usage limit", () => {
 
     const again = host(first.dir);
     expect(readAll(again.agents).report).toMatchObject({ sessionId: S1, limitedUntil: RESETS });
-    // Told it restarted, its session is resumed into a turn of its own, which a limit that still holds ends again.
+    // It holds no secrets, so it does not run the session: it asks for a start.
     again.agents.reconcile();
-    expect(again.sdk.last.sent[0]!.text).toBe(RESUMED);
-    expect(readAll(again.agents).report).toMatchObject({ state: "working", sessionId: S1, limitedUntil: RESETS });
+    expect(again.sdk.sessions).toHaveLength(0);
+    expect(readAll(again.agents).report).toMatchObject({ state: "waiting", sessionId: S1, needsStart: true, limitedUntil: RESETS });
+    again.agents.start({ agentId: AGENT, sessionId: S2, resume: true, secrets: { GH_TOKEN: "fresh" } });
+    expect(again.sdk.last.options).toMatchObject({ resume: S1, env: { GH_TOKEN: "fresh" } });
+    expect(readAll(again.agents).report).toMatchObject({ state: "working", sessionId: S2 });
     await again.agents.stop(AGENT);
     expect(readAll(again.agents).report).toMatchObject({ state: "idle", limitedUntil: null });
+  });
+});
+
+describe("secrets", () => {
+  it("are never written under the agent's folder, and a credentials.env an older host left is removed", async () => {
+    const first = host();
+    first.agents.create(AGENT, "ana");
+    writeFileSync(join(first.dir, "ana/credentials.env"), "GH_TOKEN='old'\n");
+    first.agents.start({ agentId: AGENT, sessionId: S1, resume: false, text: "go", secrets: { GH_TOKEN: "very-secret-value" }, env: { WT_URL: "https://wt" } });
+    await settle();
+    expect(existsSync(join(first.dir, "ana/credentials.env"))).toBe(false);
+    const files: string[] = [];
+    const walk = (d: string) => {
+      for (const e of readdirSync(d, { withFileTypes: true })) (e.isDirectory() ? walk : (f: string) => files.push(f))(join(d, e.name));
+    };
+    walk(join(first.dir, "ana"));
+    for (const f of files) expect(readFileSync(f, "utf8"), f).not.toContain("very-secret-value");
+    expect(first.sdk.last.options.env).toMatchObject({ GH_TOKEN: "very-secret-value", WT_URL: "https://wt" });
+    // A host that restarts still has the addresses, and no secret.
+    writeFileSync(join(first.dir, "ana/credentials.env"), "GH_TOKEN='old'\n");
+    const again = host(first.dir);
+    again.agents.reconcile();
+    expect(existsSync(join(first.dir, "ana/credentials.env"))).toBe(false);
+    expect(JSON.parse(readFileSync(join(first.dir, "ana/env.json"), "utf8"))).toEqual({ WT_URL: "https://wt" });
+    expect(again.sdk.sessions).toHaveLength(0);
   });
 });
 
@@ -393,6 +422,8 @@ describe("the model a session runs on", () => {
 
     const again = host(first.dir);
     again.agents.reconcile();
+    expect(again.sdk.sessions).toHaveLength(0);
+    again.agents.start({ agentId: AGENT, sessionId: S2, resume: true, model: "claude-sonnet-5-5" });
     expect(again.sdk.last.options).toMatchObject({ resume: S1, model: "claude-sonnet-5-5" });
     expect(again.sdk.last.options.effort).toBeUndefined();
     // An agent made before the host wrote its Explore is given it as its session is resumed.
@@ -456,48 +487,51 @@ describe("a host that restarts", () => {
 
     const again = host(first.dir);
     again.agents.reconcile();
+    // Nothing is run: a session is never run without the secrets a start gives it.
+    expect(again.sdk.sessions).toHaveLength(0);
+    expect(readAll(again.agents).report).toMatchObject({ state: "waiting", sessionId: S1, needsStart: true });
+    again.agents.start({ agentId: AGENT, sessionId: S2, resume: true, secrets: { GH_TOKEN: "fresh" } });
     expect(again.sdk.sessions).toHaveLength(1);
     const s = again.sdk.last;
-    expect(s.options.resume).toBe(S1);
-    expect(s.sent[0]!.text).toBe(RESUMED);
+    expect(s.options).toMatchObject({ resume: S1, env: { GH_TOKEN: "fresh" } });
+    expect(s.sent[0]!.text).toBe(CARRY_ON);
     await settle();
-    expect(readAll(again.agents).report).toMatchObject({ state: "waiting", sessionId: S1 });
+    const after = readAll(again.agents).report;
+    expect(after).toMatchObject({ state: "waiting", sessionId: S2 });
+    expect(after.needsStart).toBeUndefined();
     expect(readAll(again.agents, "w2").report.state).toBe("idle");
     expect(readAll(again.agents, "w3").report).toMatchObject({ state: "interrupted", sessionId: "s-cy" });
     expect(readAll(again.agents, "w4").report.state).toBe("idle");
     expect(shown(readAll(again.agents).lines)).toEqual([
       [0, "instruction", "go", C1],
       [1, "agent", "said: go", null],
-      [2, "instruction", RESUMED, null],
-      [3, "agent", `said: ${RESUMED}`, null],
+      [2, "instruction", CARRY_ON, null],
+      [3, "agent", `said: ${CARRY_ON}`, null],
     ]);
   });
 
-  it("begins again as it was first a session cut off before Claude Code wrote anything", async () => {
+  it("waits for a start, not run again as it was first, for a session cut off before Claude Code wrote anything", async () => {
     const first = host();
     first.agents.create(AGENT, "ana");
     first.sdk.setup = (s) => (s.onSend = () => {});
     first.agents.start({ commandId: C1, agentId: AGENT, sessionId: S1, resume: false, text: "go" });
     const again = host(first.dir);
     again.agents.reconcile();
-    expect(again.sdk.last.options).toMatchObject({ sessionId: S1 });
-    expect(again.sdk.last.sent).toEqual([{ text: "go", uuid: C1 }]);
-    await settle();
-    expect(shown(readAll(again.agents).lines)).toEqual([[0, "instruction", "go", C1], [1, "agent", "said: go", null]]);
+    expect(again.sdk.sessions).toHaveLength(0);
+    expect(readAll(again.agents).report).toMatchObject({ needsStart: true, sessionId: S1 });
   });
 
-  it("reports interrupted a session that cannot be resumed", () => {
+  it("does not try a session it holds no secrets for, even where Claude Code cannot be run", () => {
     const first = host();
     first.agents.create(AGENT, "ana");
     first.agents.start({ agentId: AGENT, sessionId: S1, resume: false, text: "go" });
     const again = host(first.dir);
     again.sdk.refuse = "no Claude Code";
     again.agents.reconcile();
-    expect(readAll(again.agents).report).toMatchObject({ state: "interrupted", sessionId: S1 });
-    // Not tried again on the next start of the host.
-    const third = host(first.dir);
-    third.agents.reconcile();
-    expect(third.sdk.sessions).toHaveLength(0);
+    // Not tried: it waits for a start, which a host that cannot run Claude Code fails.
+    expect(readAll(again.agents).report).toMatchObject({ needsStart: true, sessionId: S1 });
+    expect(() => again.agents.start({ agentId: AGENT, sessionId: S2, resume: true })).toThrow(/no Claude Code/);
+    expect(again.agents.report(again.agents.all()[0]!.home, AGENT, START)).toMatchObject({ state: "interrupted", sessionId: S1 });
   });
 
   it("reads on from what the Rust host wrote, its echoes naming their commands", () => {
@@ -630,15 +664,16 @@ describe("draining", () => {
 
     const again = host(first.dir);
     again.agents.reconcile();
-    const told = new Map(again.sdk.sessions.map((s) => [s.options.cwd, s.sent[0]!.text]));
-    expect(told).toEqual(new Map([[join(first.dir, "ana"), DRAINED], [join(first.dir, "bob"), RESUMED]]));
+    expect(again.sdk.sessions).toHaveLength(0);
+    expect(readAll(again.agents).report).toMatchObject({ state: "waiting", sessionId: S1, needsStart: true });
+    expect(readAll(again.agents, "w2").report).toMatchObject({ state: "waiting", sessionId: "s-bob", needsStart: true });
+    // A message to a drained one waits for a start too.
+    expect(() => again.agents.message(AGENT, C1, "hello")).toThrow(/waits for a start with its secrets/);
+    for (const [id, session] of [[AGENT, S2], ["w2", "s-bob2"]] as const) again.agents.start({ agentId: id, sessionId: session, resume: true, secrets: { GH_TOKEN: "fresh" } });
+    expect(again.sdk.sessions).toHaveLength(2);
     await settle();
-    expect(readAll(again.agents).report).toMatchObject({ state: "waiting", sessionId: S1 });
-
-    // Resumed, it is no longer drained: cut off now, it is told so.
-    const third = host(first.dir);
-    third.agents.reconcile();
-    expect(third.sdk.sessions.map((s) => s.sent[0]!.text)).toEqual([RESUMED, RESUMED]);
+    expect(readAll(again.agents).report).toMatchObject({ state: "waiting", sessionId: S2 });
+    expect(readAll(again.agents).report.needsStart).toBeUndefined();
   });
 });
 

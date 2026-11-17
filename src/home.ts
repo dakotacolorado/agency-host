@@ -6,7 +6,7 @@
  * agent.json        who it is: id and name, as created
  * sessions.jsonl    each session the host started for it, each it stopped, and each a drain closed
  * prompt.md         the opening message of its latest session
- * credentials.env   its latest start's variables and tokens, mode 600
+ * env.json         its latest start's variables, the addresses of its services: never a token
  * mcp.json          its latest start's MCP servers, their ${VAR}s unfilled
  * home/.claude/     its own Claude Code: settings, rules, skills, transcripts
  * logs/<id>.jsonl   every message each session's SDK stream gave, as it came
@@ -31,7 +31,7 @@ const RETIRED = ".retired";
 export const KEPT_MOST = 100;
 
 /** What a deleted agent's folder keeps of what a session was given: nothing. */
-const GIVEN = ["credentials.env", "mcp.json"];
+const GIVEN = ["credentials.env", "env.json", "mcp.json"];
 
 export interface Record {
   id: string;
@@ -87,7 +87,13 @@ export class Home {
     return join(this.dir, "prompt.md");
   }
 
-  credentials(): string {
+  /** The addresses its latest start gave it, kept for a session the host resumes itself. Tokens are never here. */
+  env(): string {
+    return join(this.dir, "env.json");
+  }
+
+  /** What older hosts kept its tokens in: read once and removed (`Agents`). */
+  legacyCredentials(): string {
     return join(this.dir, "credentials.env");
   }
 

@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { env, expand, instructions, readCredentials, write, writeCredentials, written, type Context } from "./context.ts";
+import { env, expand, instructions, readCredentials, write, written, type Context } from "./context.ts";
 import { scratch } from "./testing.ts";
 
 const file = (path: string, content: string, executable = false) => ({ path, content, executable });
@@ -77,18 +77,12 @@ describe("a start's instructions", () => {
 });
 
 describe("a start's variables", () => {
-  it("go to a file only its owner reads, read back as given, and away with none", () => {
+  it("an older host's file is read back as it wrote it, and a missing one gives none", () => {
     const dir = scratch("credentials");
     const path = join(dir, "credentials.env");
-    writeFileSync(path, "OLD=1", { mode: 0o644 });
-    writeCredentials(path, { WT_TOKEN: "it's $x `y`\nz", DS_URL: "https://ds" });
+    writeFileSync(path, "WT_TOKEN='it'\\''s $x `y`\nz'\nDS_URL='https://ds'\n");
     expect(readCredentials(path)).toEqual({ WT_TOKEN: "it's $x `y`\nz", DS_URL: "https://ds" });
-    expect(readFileSync(path, "utf8")).toContain("WT_TOKEN='it'\\''s $x `y`");
-    expect(statSync(path).mode & 0o777).toBe(0o600);
-    expect(() => writeCredentials(path, { "A-B": "x" })).toThrow(/not a variable/);
-    writeCredentials(path, {});
-    expect(existsSync(path)).toBe(false);
-    writeCredentials(path, {});
+    expect(readCredentials(join(dir, "none.env"))).toEqual({});
   });
 
   it("never set what the host sets itself", () => {

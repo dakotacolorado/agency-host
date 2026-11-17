@@ -66,7 +66,7 @@ describe("an agent's folder", () => {
     const dir = scratch("delete-given");
     const home = new Home(join(dir, "ana"));
     home.make(ana);
-    writeFileSync(home.credentials(), "TOKEN=x\n");
+    writeFileSync(home.legacyCredentials(), "TOKEN=x\n");
     writeFileSync(home.mcp(), "{}\n");
     home.delete(ana);
     expect(readdirSync(join(dir, ".deleted", "ana-w1")).sort()).toEqual(["agent.json", "home", "logs"]);
