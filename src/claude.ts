@@ -276,6 +276,8 @@ export interface Read {
   turn?: "begins" | "continues" | "ends";
   /** The size of the main thread's context as of this request to the model: its input, cache read and cache write tokens, when it is a main-thread assistant message that says. */
   contextTokens?: number;
+  /** True for a compaction that gives no size after it: the context stands at none known until the next main-thread message says. */
+  contextUnknown?: boolean;
   /** What its turn used, subagents included, when it is a `result` that says. */
   tokens?: Tokens;
   /** The same by model id, when the `result` names the models; its sum is `tokens`. */
@@ -473,6 +475,18 @@ export function read(line: string): Read {
         out.entries.push({ from: "tool", text: `${block.name} ${cut(JSON.stringify(block.input ?? null), LONGEST_INPUT, () => 1)}` });
       }
     }
+  }
+  if (v.type === "system" && v.subtype === "compact_boundary") {
+    const m = obj(v.compact_metadata);
+    const kilo = (n: number) => (n >= 1000 ? `${Math.round(n / 1000)}k` : `${n}`);
+    const before = typeof m.pre_tokens === "number" ? count(m.pre_tokens) : undefined;
+    const after = typeof m.post_tokens === "number" ? count(m.post_tokens) : undefined;
+    const how = m.trigger === "auto" ? " automatically" : "";
+    const size =
+      before !== undefined && after !== undefined ? `: ${kilo(before)} → ${kilo(after)} tokens of context` : before !== undefined ? ` (${kilo(before)} tokens of context)` : "";
+    out.entries.push({ from: "agent", text: `Compacted the conversation${how}${size}` });
+    if (after !== undefined) out.contextTokens = after;
+    else out.contextUnknown = true;
   }
   return out;
 }

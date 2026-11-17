@@ -756,6 +756,7 @@ export class Agents {
           pending,
           ...limitAfter(next, r),
           ...(r.contextTokens !== undefined ? { contextTokens: r.contextTokens } : {}),
+          ...(r.contextUnknown ? { contextTokens: undefined } : {}),
         };
         if (r.durationMs !== undefined) next = { ...next, turns: (next.turns ?? 0) + 1, activeMs: (next.activeMs ?? 0) + r.durationMs };
         if (r.tokens) {

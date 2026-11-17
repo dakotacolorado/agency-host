@@ -737,4 +737,29 @@ describe("tokens by model, turns and active time", () => {
     // Only the new session's own first turn, not the old one's four.
     expect(readAll(agents).report).toMatchObject({ turns: 1, activeMs: 0 });
   });
+
+  it("is the post-compact size at once when the compaction gives it, and none until the next request when not", async () => {
+    const { sdk, agents } = host();
+    agents.create(AGENT, "ana");
+    agents.start({ agentId: AGENT, sessionId: S1, resume: false });
+    await settle();
+    const assistant = (input: number) =>
+      sdk.last.emit({ type: "assistant", message: { model: "claude-haiku-5-5", content: [{ type: "text", text: "hi" }], stop_reason: null, usage: { input_tokens: input } }, parent_tool_use_id: null });
+    const boundary = (compact_metadata: object) => sdk.last.emit({ type: "system", subtype: "compact_boundary", compact_metadata });
+    assistant(182000);
+    boundary({ trigger: "manual", pre_tokens: 182000, post_tokens: 21000 });
+    await settle();
+    const all = readAll(agents);
+    expect(all.report.contextTokens).toBe(21000);
+    expect(all.lines.filter((l) => l.text.startsWith("Compacted"))).toEqual([expect.objectContaining({ from: "agent", text: "Compacted the conversation: 182k → 21k tokens of context" })]);
+    assistant(180000);
+    boundary({ trigger: "auto", pre_tokens: 180000 });
+    await settle();
+    const next = readAll(agents);
+    expect(next.report.contextTokens).toBeUndefined();
+    expect(next.lines.at(-1)).toMatchObject({ from: "agent", text: "Compacted the conversation automatically (180k tokens of context)" });
+    assistant(22000);
+    await settle();
+    expect(readAll(agents).report.contextTokens).toBe(22000);
+  });
 });
