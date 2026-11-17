@@ -68,7 +68,7 @@ describe.skipIf(!real)("a real session", () => {
       const before = readOn().contextTokens!;
       const seen = lines.length;
       agents.message(id, "6a1c2f3e-0000-4000-8000-00000000c003", "/compact");
-      await until(() => lines.slice(seen).some((l) => l.from === "agent" && l.text.startsWith("Compacted the conversation")) && readOn().state === "waiting", 150_000);
+      await until(() => readOn().state === "waiting" && lines.slice(seen).some((l) => l.from === "agent" && l.text.startsWith("Compacted the conversation")), 150_000);
       const compacted = lines.slice(seen).filter((l) => l.text.startsWith("Compacted the conversation"));
       expect(compacted).toHaveLength(1);
       console.log(`real session: ${compacted[0]!.text}; context ${before} -> ${readOn().contextTokens}`);
