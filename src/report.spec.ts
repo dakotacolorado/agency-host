@@ -32,7 +32,7 @@ describe("a report", () => {
     expect(body.agents.map((a) => a.state)).toEqual(["waiting", "idle"]);
     expect(body.lines.map((l) => [l.agentId, l.seq, l.text])).toEqual([["w1", 0, "go"], ["w1", 1, "said: go"]]);
     expect(body.commandResults).toEqual([{ commandId: "c1", ok: true }]);
-    expect(body.tokens).toEqual([{ agentId: "w1", sessionId: "s1", inputTokens: 1, outputTokens: 10, cacheCreationInputTokens: 0, cacheReadInputTokens: 100 }]);
+    expect(body.tokens).toEqual([{ agentId: "w1", sessionId: "s1", inputTokens: 1, outputTokens: 10, cacheCreationInputTokens: 0, cacheReadInputTokens: 100, byModel: { m: { inputTokens: 1, outputTokens: 10, cacheCreationInputTokens: 0, cacheReadInputTokens: 100 } } }]);
     expect(body.usage).toEqual({ readAt: "2026-11-13T08:00:00.000Z", fiveHour: { utilization: 0.5, resetsAt: "2026-11-13T12:40:00.000Z" } });
     // Not sent: the same again.
     expect(parsed(reporter.next(2)!.text)).toEqual(body);
@@ -95,7 +95,7 @@ describe("a report", () => {
     for (const m of LIMIT_STOP) sdk.last.emit(m);
     await settle();
     const limited = reporter.next(1)!;
-    expect(JSON.parse(limited.text).agents).toEqual([{ id: "w1", state: "waiting", sessionId: "s1", tasks: 0, told: true, limitedUntil: "2026-11-15T08:50:00.000Z" }]);
+    expect(JSON.parse(limited.text).agents).toEqual([{ id: "w1", state: "waiting", sessionId: "s1", tasks: 0, told: true, limitedUntil: "2026-11-15T08:50:00.000Z", turns: 2, activeMs: 227 }]);
     limited.sent();
     agents.message("w1", "c2", "Carry on.");
     const resumed = reporter.next(1)!;

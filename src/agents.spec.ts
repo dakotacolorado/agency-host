@@ -215,15 +215,15 @@ describe("an agent's state", () => {
     s.onSend = () => {};
     expect(readAll(agents).report).toMatchObject({ state: "working", sessionId: S1 });
     await settle();
-    expect(readAll(agents).report).toEqual({ id: AGENT, state: "waiting", sessionId: S1, tasks: 0, told: true, limitedUntil: null });
+    expect(readAll(agents).report).toEqual({ id: AGENT, state: "waiting", sessionId: S1, tasks: 0, told: true, limitedUntil: null, turns: 1, activeMs: 0 });
     // A turn a background task's end begins is not told.
     s.emit({ type: "system", subtype: "init" });
     await settle();
-    expect(readAll(agents).report).toEqual({ id: AGENT, state: "working", sessionId: S1, tasks: 0, told: false, limitedUntil: null });
+    expect(readAll(agents).report).toEqual({ id: AGENT, state: "working", sessionId: S1, tasks: 0, told: false, limitedUntil: null, turns: 1, activeMs: 0 });
     s.emit({ type: "system", subtype: "background_tasks_changed", tasks: [{ task_id: "a" }, { task_id: "b" }] });
     s.emit({ type: "result", subtype: "success" });
     await settle();
-    expect(readAll(agents).report).toEqual({ id: AGENT, state: "waiting", sessionId: S1, tasks: 2, told: false, limitedUntil: null });
+    expect(readAll(agents).report).toEqual({ id: AGENT, state: "waiting", sessionId: S1, tasks: 2, told: false, limitedUntil: null, turns: 2, activeMs: 0 });
     await agents.stop(AGENT);
     expect(s.closed).toBe(true);
     expect(readAll(agents).report).toMatchObject({ state: "idle", sessionId: null, tasks: 0 });
@@ -272,8 +272,8 @@ describe("tokens and usage", () => {
     await settle();
     const { tokens, usage } = readAll(agents);
     const total = (n: number) => ({ inputTokens: n, outputTokens: 10 * n, cacheCreationInputTokens: 0, cacheReadInputTokens: 100 * n });
-    expect(tokens.at(-2)).toEqual({ sessionId: S1, tokens: total(2) });
-    expect(tokens.at(-1)).toEqual({ sessionId: S2, tokens: total(1) });
+    expect(tokens.at(-2)).toEqual({ sessionId: S1, tokens: total(2), byModel: { m: total(2) } });
+    expect(tokens.at(-1)).toEqual({ sessionId: S2, tokens: total(1), byModel: { m: total(1) } });
     expect(usage).toEqual({ readAt: "2026-11-13T08:01:00.000Z", sevenDay: { utilization: 0.8, resetsAt: "2026-11-14T15:00:00.000Z" } });
   });
 });
@@ -675,4 +675,31 @@ describe("deleting", () => {
     expect(statSync(old).isDirectory()).toBe(true);
   });
 
+});
+
+describe("tokens by model, turns and active time", () => {
+  const usage = (n: number) => ({ inputTokens: n, outputTokens: 2 * n, cacheCreationInputTokens: 3 * n, cacheReadInputTokens: 4 * n });
+  it("reports each model's total, the four counts as their sum, and the turns and their durations, starting again with a new session", async () => {
+    const { sdk, agents } = host();
+    agents.create(AGENT, "ana");
+    agents.start({ agentId: AGENT, sessionId: S1, resume: false });
+    await settle();
+    const result = (since: object, ms: number) => sdk.last.emit({ type: "result", subtype: "success", duration_ms: ms, model_usage_since_last_result: since });
+    result({ "claude-opus-5-5": usage(1) }, 100);
+    result({ "claude-sonnet-5-5": usage(2), "claude-opus-5-5": usage(3) }, 250);
+    result({ "claude-sonnet-5-5": usage(1) }, 50);
+    await settle();
+    const r = readAll(agents);
+    // The session's own first turn, of the scripted session, is counted too.
+    const first = { inputTokens: 1, outputTokens: 10, cacheCreationInputTokens: 0, cacheReadInputTokens: 100 };
+    const last = r.tokens.at(-1) as unknown as { tokens: unknown; byModel: unknown };
+    expect(last.byModel).toEqual({ m: first, "claude-opus-5-5": usage(4), "claude-sonnet-5-5": usage(3) });
+    expect(last.tokens).toEqual({ inputTokens: 8, outputTokens: 24, cacheCreationInputTokens: 21, cacheReadInputTokens: 128 });
+    expect(r.report).toMatchObject({ turns: 4, activeMs: 400 });
+    await agents.stop(AGENT);
+    agents.start({ agentId: AGENT, sessionId: S2, resume: false });
+    await settle();
+    // Only the new session's own first turn, not the old one's four.
+    expect(readAll(agents).report).toMatchObject({ turns: 1, activeMs: 0 });
+  });
 });

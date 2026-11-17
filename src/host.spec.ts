@@ -123,7 +123,7 @@ describe("a host on its socket", () => {
     await until(() => service.sockets.length === 2 && service.last.got.length >= 2);
     const [report, heartbeat] = service.last.got;
     expect(report!.type).toBe("report");
-    expect(report!.agents).toEqual([{ id: "w1", state: "waiting", sessionId: "s1", tasks: 0, told: true, limitedUntil: null }]);
+    expect(report!.agents).toEqual([{ id: "w1", state: "waiting", sessionId: "s1", tasks: 0, told: true, limitedUntil: null, turns: 1, activeMs: 0 }]);
     // Lines that went up on the last socket are not sent again.
     expect(report!.lines).toEqual([]);
     expect(heartbeat!.type).toBe("heartbeat");

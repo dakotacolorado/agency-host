@@ -6,7 +6,7 @@
  */
 import type { AgentReport, Agents, Cursor, Line, Usage } from "./agents.ts";
 import { START } from "./agents.ts";
-import type { Tokens } from "./claude.ts";
+import type { ByModel, Tokens } from "./claude.ts";
 import type { CommandReport } from "./commands.ts";
 import { log } from "./sys.ts";
 
@@ -31,6 +31,8 @@ export const MOST_TOKENS = 256;
 export interface TokenReport extends Tokens {
   agentId: string;
   sessionId: string;
+  /** The same counts by model id, subagents included; their sum is the four counts. */
+  byModel?: ByModel;
 }
 
 /** Each agent's id, where its read began and ended, and what it read. */
@@ -54,8 +56,8 @@ export class Totals {
   private readonly read = new Map<string, TokenReport>();
   private told: { on: number; was: Map<string, string> } | null = null;
 
-  add(agentId: string, totals: { sessionId: string; tokens: Tokens }[]): void {
-    for (const t of totals) this.read.set(`${agentId}\n${t.sessionId}`, { agentId, sessionId: t.sessionId, ...t.tokens });
+  add(agentId: string, totals: { sessionId: string; tokens: Tokens; byModel?: ByModel }[]): void {
+    for (const t of totals) this.read.set(`${agentId}\n${t.sessionId}`, { agentId, sessionId: t.sessionId, ...t.tokens, ...(t.byModel ? { byModel: t.byModel } : {}) });
   }
 
   /** Only the agents still here are kept, so a deleted agent's sessions are not told again on every socket. */

@@ -233,6 +233,15 @@ export interface Tokens {
   cacheReadInputTokens: number;
 }
 
+/** Token counts by model id. */
+export type ByModel = { [model: string]: Tokens };
+
+export function addByModel(a: ByModel, b: ByModel): ByModel {
+  const out: ByModel = { ...a };
+  for (const [m, t] of Object.entries(b)) out[m] = addTokens(out[m] ?? NO_TOKENS, t);
+  return out;
+}
+
 export const NO_TOKENS: Tokens = { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 };
 
 export function addTokens(a: Tokens, b: Tokens): Tokens {
@@ -268,6 +277,10 @@ export interface Read {
   contextTokens?: number;
   /** What its turn used, subagents included, when it is a `result` that says. */
   tokens?: Tokens;
+  /** The same by model id, when the `result` names the models; its sum is `tokens`. */
+  byModel?: ByModel;
+  /** The `duration_ms` of the turn, when it is a `result` that says. */
+  durationMs?: number;
   /** For the host's own record of a message it sent: that message's uuid and the command it carried. */
   sent?: { uuid: string; commandId?: string };
 }
@@ -328,27 +341,32 @@ function rejected(v: Json): string | undefined {
  * `result` are in none of its results and go uncounted rather than risk
  * being counted twice.
  */
-function tokens(v: Json): Tokens | undefined {
+function tokens(v: Json): { total: Tokens; byModel?: ByModel } | undefined {
   if (v.type !== "result") return undefined;
   const since = v.model_usage_since_last_result;
   if (since && typeof since === "object") {
-    return Object.values(since as Json).reduce<Tokens>((sum, m) => {
+    const byModel: ByModel = {};
+    for (const [model, m] of Object.entries(since as Json)) {
       const u = obj(m);
-      return addTokens(sum, {
+      byModel[model] = {
         inputTokens: count(u.inputTokens),
         outputTokens: count(u.outputTokens),
         cacheCreationInputTokens: count(u.cacheCreationInputTokens),
         cacheReadInputTokens: count(u.cacheReadInputTokens),
-      });
-    }, NO_TOKENS);
+      };
+    }
+    return { total: Object.values(byModel).reduce(addTokens, NO_TOKENS), byModel };
   }
+  // Without per-model usage the models are not named: the counts stand alone.
   if (!v.usage || typeof v.usage !== "object") return undefined;
   const u = obj(v.usage);
   return {
-    inputTokens: count(u.input_tokens),
-    outputTokens: count(u.output_tokens),
-    cacheCreationInputTokens: count(u.cache_creation_input_tokens),
-    cacheReadInputTokens: count(u.cache_read_input_tokens),
+    total: {
+      inputTokens: count(u.input_tokens),
+      outputTokens: count(u.output_tokens),
+      cacheCreationInputTokens: count(u.cache_creation_input_tokens),
+      cacheReadInputTokens: count(u.cache_read_input_tokens),
+    },
   };
 }
 
@@ -371,7 +389,11 @@ export function read(line: string): Read {
   const u = usage(v);
   if (u) out.usage = u;
   const t = tokens(v);
-  if (t) out.tokens = t;
+  if (t) {
+    out.tokens = t.total;
+    if (t.byModel) out.byModel = t.byModel;
+  }
+  if (v.type === "result") out.durationMs = count(v.duration_ms);
   const limit = rejected(v);
   if (limit) out.rejected = limit;
   if (v.type === "result") out.turn = "ends";
