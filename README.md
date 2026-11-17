@@ -88,7 +88,7 @@ deny = ["WebFetch", "mcp__github__merge*"]
 | `labels` | none | Labels requests can ask a host to carry. |
 | `agents_dir` | `~/agents` | Where each agent's folder is. Two hosts on one machine need different ones. |
 | `drain_seconds` | `1800` | How long a drain (`SIGUSR2`) waits for sessions to finish their turns before it closes the rest. |
-| `archive_dir` | none | Where each deleted agent's records are kept for good, as `<name>-<id>.tar.zst`. It must be on a FUSE-mounted drive. |
+| `archive_dir` | none | Where each deleted agent's records are kept for good, as `<name>-<id>.tar.zst`. Any absolute local folder; it is made if missing. |
 | `permissions.allow` | `["*"]` | Tools a session may use. A name ending in `*` matches every tool it begins. |
 | `permissions.deny` | none | Tools a session may not use. Checked before `allow`. |
 
@@ -131,8 +131,7 @@ holding `agent.json`, `sessions.jsonl`, `prompt.md`, `logs/` and
 `home/.claude/` (its transcripts), and never its `env.json`, `credentials.env`,
 `mcp.json`, Claude login (`.credentials*`) or anything else in the folder, such
 as what it cloned. List one with `tar -tf <file>` (GNU tar with the `zstd` program installed). The archive is
-written in the background and never fails the delete: if `archive_dir` is not on
-a FUSE mount (the drive is not mounted) or the write fails, the host logs
+written in the background and never fails the delete: if the write fails, the host logs
 `<name>-<id>: not archived to …` and the folder in `.deleted` is all there is.
 
 To take a session over by hand (a host agent's), stop the agent in agency, then in its folder:
@@ -172,8 +171,7 @@ podman. The host keeps the Agent SDK and the socket, and only Claude Code runs
 in the container:
 
 - **Mounts:** the agent's folder at `/agent`, with its home at `/agent/home`
-  and its Claude Code at `/agent/home/.claude`, and `/cellar` where the host has
-  it. Nothing else of the host's.
+  and its Claude Code at `/agent/home/.claude`. Nothing else of the host's.
 - **Network:** its own network namespace (pasta). DNS goes to the host's
   resolver, so tailnet names resolve as they do on the host.
 - **Limits:** the CPUs and memory in its role's `role.json` (`cpus`,
