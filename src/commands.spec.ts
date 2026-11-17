@@ -24,7 +24,7 @@ describe("a command", () => {
   it("of a kind the host does not handle is reported, not dropped; one without its fields says which", async () => {
     const { agents } = host();
     expect(await act(c({ id: "c1", kind: "reboot" }), agents)).toEqual({ commandId: "c1", ok: false, error: 'this host does not handle "reboot" commands' });
-    for (const kind of ["create", "start", "message", "interrupt", "stop", "delete"]) {
+    for (const kind of ["create", "start", "message", "interrupt", "configure", "stop", "delete"]) {
       expect((await act(c({ id: "c1", kind, text: "hi" }), agents)).error).toBe(`"${kind}" needs an agentId`);
     }
     expect((await act(c({ id: "c1", kind: "create", agentId: "w1" }), agents)).error).toMatch(/needs a name/);
@@ -49,6 +49,26 @@ describe("a command", () => {
     expect(await act(c({ id: "c3", kind: "start", agentId: "w1", sessionId: "s1", resume: false }), agents)).toEqual({ commandId: "c3", ok: true });
     expect(await act(c({ id: "c4", kind: "message", agentId: "w1", text: "hi" }), agents)).toEqual({ commandId: "c4", ok: true });
     expect(sdk.last.sent.at(-1)!.text).toBe("hi");
+  });
+});
+
+describe("model and effort", () => {
+  it("a start carries to the session; one with an effort Claude Code does not know is refused", async () => {
+    const { sdk, agents } = host();
+    await act(c({ id: "c1", kind: "create", agentId: "w1", name: "ana" }), agents);
+    expect((await act(c({ id: "c2", kind: "start", agentId: "w1", sessionId: "s1", resume: false, model: "claude-haiku-5-5", effort: "huge" }), agents)).error).toMatch(/"huge" is not an effort/);
+    expect(await act(c({ id: "c3", kind: "start", agentId: "w1", sessionId: "s1", resume: false, model: "claude-haiku-5-5", effort: "low" }), agents)).toEqual({ commandId: "c3", ok: true });
+    expect(sdk.last.options).toMatchObject({ model: "claude-haiku-5-5", effort: "low" });
+  });
+
+  it("configure switches a live session, and is refused with none, so the next start carries it", async () => {
+    const { sdk, agents } = host();
+    await act(c({ id: "c1", kind: "create", agentId: "w1", name: "ana" }), agents);
+    expect((await act(c({ id: "c2", kind: "configure", agentId: "w1", model: "claude-sonnet-5-5", effort: null }), agents)).error).toMatch(/no live session/);
+    await act(c({ id: "c3", kind: "start", agentId: "w1", sessionId: "s1", resume: false, model: "claude-haiku-5-5" }), agents);
+    expect((await act(c({ id: "c4", kind: "configure", agentId: "w1" }), agents)).error).toBe("a configure needs a model");
+    expect(await act(c({ id: "c5", kind: "configure", agentId: "w1", model: "claude-sonnet-5-5", effort: null }), agents)).toEqual({ commandId: "c5", ok: true });
+    expect(sdk.last.configured).toEqual([{ model: "claude-sonnet-5-5", effort: null }]);
   });
 });
 

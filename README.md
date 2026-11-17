@@ -131,6 +131,16 @@ mode, which wait on a person at a terminal.
 An agent whose last turn a usage limit ended is reported with `limitedUntil`,
 when that limit resets, until its next turn begins.
 
+A session runs on the `model` and `effort` its `start` names, new or resumed;
+a start that names none runs on Claude Code's defaults. A `configure` command
+switches a live session to another model and effort from its next request to
+the model, without a restart. Each agent is reported with `contextTokens`, the
+size of its session's context as of its last request.
+
+Each agent's Claude Code has its own `Explore` subagent
+(`home/.claude/agents/Explore.md`), which takes the built-in's place: a
+read-only search on Haiku, without the write tools.
+
 ## Develop it
 
 ```sh

@@ -53,6 +53,9 @@ export interface Session {
   ended: boolean;
   /** Closed by a drain between its turns, and not resumed since: it lost nothing. */
   drained?: boolean;
+  /** The model and effort its start named, or a `configure` since did; absent, Claude Code's defaults. Kept so the session resumes on them. */
+  model?: string;
+  effort?: string;
 }
 
 /** An agent name as the service allows it, which is also all that keeps a name from reaching outside the agents folder. */
@@ -147,6 +150,8 @@ export class Home {
           from: typeof e.from === "number" ? e.from : 0,
           stream: e.stream === true,
           ...(typeof e.opening === "string" ? { opening: e.opening } : {}),
+          ...(typeof e.model === "string" ? { model: e.model } : {}),
+          ...(typeof e.effort === "string" ? { effort: e.effort } : {}),
           stopped: false,
           ended: false,
         });
@@ -159,6 +164,13 @@ export class Home {
           if (s.sessionId !== id) continue;
           if (e.drained) s.drained = true;
           else delete s.drained;
+        }
+      } else if (e.configured === true && typeof e.model === "string") {
+        for (const s of sessions) {
+          if (s.sessionId !== id) continue;
+          s.model = e.model;
+          if (typeof e.effort === "string") s.effort = e.effort;
+          else delete s.effort;
         }
       } else if (e.withdrawn === true) {
         for (let i = sessions.length - 1; i >= 0; i--) if (sessions[i]!.sessionId === id) sessions.splice(i, 1);
@@ -182,6 +194,11 @@ export class Home {
 
   ended(sessionId: string): void {
     this.append({ sessionId, ended: true });
+  }
+
+  /** Records the model and effort (null: the model's default) a `configure` switched the session to. */
+  configured(sessionId: string, model: string, effort: string | null): void {
+    this.append({ sessionId, configured: true, model, ...(effort ? { effort } : {}) });
   }
 
   /** Marks a session closed between its turns by a drain, or, with false, resumed since. */

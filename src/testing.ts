@@ -8,6 +8,7 @@ export class FakeSession implements SessionHandle {
   readonly options: SessionOptions;
   readonly sent: { text: string; uuid: string }[] = [];
   interrupts = 0;
+  readonly configured: { model: string; effort: string | null }[] = [];
   closed = false;
   private readonly out = new Inbox<Message | Error>();
   /** What the session does with each message: by default it takes it and answers, as a turn. */
@@ -26,6 +27,11 @@ export class FakeSession implements SessionHandle {
   async interrupt(): Promise<void> {
     this.interrupts++;
     this.emit({ type: "result", subtype: "error_during_execution", is_error: true });
+  }
+
+  async configure(model: string, effort: string | null): Promise<void> {
+    if (this.closed) throw new Error("closed");
+    this.configured.push({ model, effort });
   }
 
   close(): void {

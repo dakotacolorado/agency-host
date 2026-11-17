@@ -6,6 +6,7 @@
  */
 import type { Agents, Start } from "./agents.ts";
 import type { Context } from "./context.ts";
+import type { Effort } from "./sdk.ts";
 import { errorText } from "./sys.ts";
 
 export interface CommandReport {
@@ -98,7 +99,15 @@ function contextOf(v: unknown): Context | undefined {
   return { key: c.key, version: c.version, files };
 }
 
-const KINDS = new Set(["create", "start", "message", "interrupt", "stop", "delete"]);
+const EFFORTS: readonly string[] = ["low", "medium", "high", "xhigh", "max"];
+/** An effort Claude Code does not know is refused rather than passed on, where it would fail the session. */
+function effortOf(v: unknown): Effort | undefined {
+  if (v === undefined || v === null) return undefined;
+  if (typeof v !== "string" || !EFFORTS.includes(v)) throw new Error(`${JSON.stringify(v)} is not an effort: ${EFFORTS.join(", ")}`);
+  return v as Effort;
+}
+
+const KINDS = new Set(["create", "start", "message", "interrupt", "configure", "stop", "delete"]);
 
 /** A kind the host does not handle is reported by name rather than dropped, so the sender learns the command went nowhere. */
 export async function act(c: Command, agents: Agents): Promise<CommandReport> {
@@ -121,6 +130,8 @@ export async function act(c: Command, agents: Agents): Promise<CommandReport> {
         const ctx = contextOf(c.context);
         const env = record(c.env);
         const secrets = record(c.secrets);
+        const model = str(c.model) || undefined;
+        const effort = effortOf(c.effort);
         const mcp = c.mcpServers && typeof c.mcpServers === "object" ? (c.mcpServers as { [k: string]: unknown }) : undefined;
         const s: Start = {
           commandId: c.id,
@@ -133,6 +144,8 @@ export async function act(c: Command, agents: Agents): Promise<CommandReport> {
           ...(env ? { env } : {}),
           ...(secrets ? { secrets } : {}),
           ...(mcp ? { mcpServers: mcp } : {}),
+          ...(model ? { model } : {}),
+          ...(effort ? { effort } : {}),
         };
         agents.start(s);
         break;
@@ -144,6 +157,12 @@ export async function act(c: Command, agents: Agents): Promise<CommandReport> {
       case "interrupt":
         await agents.interrupt(agentId, c.id, text);
         break;
+      case "configure": {
+        const model = str(c.model);
+        if (!model) return report(c.id, "a configure needs a model");
+        await agents.configure(agentId, model, effortOf(c.effort) ?? null);
+        break;
+      }
       case "stop":
         await agents.stop(agentId);
         break;

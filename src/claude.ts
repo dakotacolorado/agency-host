@@ -97,7 +97,29 @@ export function prepare(state: string, dir: string, rules: string): void {
     for (const tool of DENIED) if (!deny.includes(tool)) deny.push(tool);
   });
   writeFileSync(join(state, "CLAUDE.md"), rules);
+  mkdirSync(join(state, "agents"), { recursive: true });
+  writeFileSync(join(state, "agents", "Explore.md"), EXPLORE);
 }
+
+/**
+ * A user subagent named Explore takes the built-in's place, which runs on the
+ * session's own model: searching needs no more than Haiku.
+ */
+export const EXPLORE = `---
+name: Explore
+description: Read-only search agent. Use to find where something is in a codebase or its docs (files, symbols, call sites, config) when you need the answer, not the file dumps. Say how broad to search.
+model: haiku
+disallowedTools: Write, Edit, NotebookEdit
+---
+
+You search and report; you change nothing. Find what you were asked for with
+Glob, Grep and Read (and read-only shell commands such as \`git log\` or
+\`ls\`), reading excerpts rather than whole files.
+
+Answer with a compact summary of a few hundred words at most: what you found,
+each finding cited as \`path:line\`, and what you looked for and did not find.
+Quote only the lines that matter.
+`;
 
 /**
  * Changes the JSON object in `path`, or a new one, and writes it aside and
@@ -237,6 +259,8 @@ export interface Read {
    * on, `ends` for a `result`.
    */
   turn?: "begins" | "continues" | "ends";
+  /** The size of the main thread's context as of this request to the model: its input, cache read and cache write tokens, when it is a main-thread assistant message that says. */
+  contextTokens?: number;
   /** What its turn used, subagents included, when it is a `result` that says. */
   tokens?: Tokens;
   /** For the host's own record of a message it sent: that message's uuid and the command it carried. */
@@ -355,6 +379,11 @@ export function read(line: string): Read {
   // A subagent's own conversation, and lines Claude Code adds for itself.
   if (v.isSidechain === true || v.isMeta === true || typeof v.parent_tool_use_id === "string") return out;
   const message = obj(v.message);
+  // Claude Code's own notices name the model `<synthetic>` and used nothing.
+  if (v.type === "assistant" && message.model !== "<synthetic>" && message.usage && typeof message.usage === "object") {
+    const u = obj(message.usage);
+    out.contextTokens = count(u.input_tokens) + count(u.cache_read_input_tokens) + count(u.cache_creation_input_tokens);
+  }
   if (v.type === "system" && v.subtype === "init") out.turn = "begins";
   // The limit's own notice is an assistant message Claude Code makes up, not the agent working on.
   else if (v.type === "user" || (v.type === "assistant" && message.model !== "<synthetic>")) out.turn = "continues";

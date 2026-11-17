@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSyn
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { Agents, CARRY_ON, DRAINED, NOTHING_YET, RESUMED, START, type Cursor, type Line } from "./agents.ts";
+import { EXPLORE } from "./claude.ts";
 import { EVERY_TOOL, type Permissions } from "./config.ts";
 import { FakeSdk, LIMIT_STOP, scratch, settle, type FakeSession } from "./testing.ts";
 
@@ -43,6 +44,9 @@ describe("creating an agent", () => {
     agents.create(AGENT, "ana");
     expect(JSON.parse(readFileSync(join(dir, "ana/agent.json"), "utf8"))).toEqual({ id: AGENT, name: "ana" });
     expect(readFileSync(join(dir, "ana/home/.claude/CLAUDE.md"), "utf8")).toContain(`You are agent \`ana\`, and your folder is \`${join(dir, "ana")}\``);
+    const explore = readFileSync(join(dir, "ana/home/.claude/agents/Explore.md"), "utf8");
+    expect(explore).toBe(EXPLORE);
+    expect(explore).toMatch(/^---\nname: Explore\n[^]*\nmodel: haiku\ndisallowedTools: Write, Edit, NotebookEdit\n---\n/);
     expect(readAll(agents).report).toEqual({ id: AGENT, state: "idle", sessionId: null, tasks: 0, limitedUntil: null });
     expect(() => agents.create(AGENT, "bob")).toThrow(/here already, named ana/);
     expect(() => agents.create("w2", "Ana")).toThrow(/not an agent name/);
@@ -352,6 +356,82 @@ describe("permissions", () => {
     expect(permit("mcp__github__create_pr")).toBe(true);
     expect(permit("mcp__github__merge_pr")).toBe("mcp__github__merge_pr is not allowed on this host (agency-host's permissions)");
     expect(permit("Bash")).toMatch(/not allowed/);
+  });
+});
+
+describe("the model a session runs on", () => {
+  it("is the one its start names, with its effort, new or resumed; a start that names none runs on Claude Code's defaults", async () => {
+    const { sdk, agents } = host();
+    agents.create(AGENT, "ana");
+    agents.start({ agentId: AGENT, sessionId: S1, resume: false, model: "claude-haiku-5-5", effort: "low" });
+    expect(sdk.last.options).toMatchObject({ model: "claude-haiku-5-5", effort: "low" });
+    await agents.stop(AGENT);
+    agents.start({ agentId: AGENT, sessionId: S2, resume: true, model: "claude-sonnet-5-5" });
+    expect(sdk.last.options).toMatchObject({ resume: S1, model: "claude-sonnet-5-5" });
+    expect(sdk.last.options.effort).toBeUndefined();
+    await agents.stop(AGENT);
+    agents.start({ agentId: AGENT, sessionId: "s3", resume: true });
+    expect(sdk.last.options.model).toBeUndefined();
+    expect(sdk.last.options.effort).toBeUndefined();
+  });
+
+  it("is switched live by configure, with no restart, and a host that restarts resumes it on the new one", async () => {
+    const first = host();
+    first.agents.create(AGENT, "ana");
+    first.agents.start({ agentId: AGENT, sessionId: S1, resume: false, text: "go", model: "claude-haiku-5-5" });
+    await settle();
+    await first.agents.configure(AGENT, "claude-sonnet-5-5", "high");
+    expect(first.sdk.sessions).toHaveLength(1);
+    expect(first.sdk.last.configured).toEqual([{ model: "claude-sonnet-5-5", effort: "high" }]);
+    expect(first.sdk.last.closed).toBe(false);
+    await first.agents.configure(AGENT, "claude-sonnet-5-5", null);
+    expect(first.sdk.last.configured.at(-1)).toEqual({ model: "claude-sonnet-5-5", effort: null });
+    const state = join(first.dir, "ana/home/.claude");
+    mkdirSync(join(state, "projects/-x"), { recursive: true });
+    writeFileSync(join(state, "projects/-x", `${S1}.jsonl`), "{}\n");
+
+    const again = host(first.dir);
+    again.agents.reconcile();
+    expect(again.sdk.last.options).toMatchObject({ resume: S1, model: "claude-sonnet-5-5" });
+    expect(again.sdk.last.options.effort).toBeUndefined();
+  });
+
+  it("is recorded by configure for a session a drain closed, which resumes on it; with no session, configure says so", async () => {
+    const { sdk, agents } = host();
+    agents.create(AGENT, "ana");
+    await expect(agents.configure(AGENT, "claude-haiku-5-5", null)).rejects.toThrow(/no live session on this host: its next start names the model/);
+    agents.start({ agentId: AGENT, sessionId: S1, resume: false, text: "go", model: "claude-opus-5-5" });
+    await settle();
+    await agents.drain();
+    await agents.configure(AGENT, "claude-haiku-5-5", "medium");
+    expect(sdk.last.configured).toEqual([]);
+    agents.message(AGENT, C2, "more");
+    expect(sdk.sessions).toHaveLength(2);
+    expect(sdk.last.options).toMatchObject({ resume: S1, model: "claude-haiku-5-5", effort: "medium" });
+  });
+});
+
+describe("the context size", () => {
+  it("is reported from the main thread's last request, not a subagent's or Claude Code's own notice, and stands once idle", async () => {
+    const { sdk, agents } = host();
+    agents.create(AGENT, "ana");
+    agents.start({ agentId: AGENT, sessionId: S1, resume: false });
+    await settle();
+    expect(readAll(agents).report.contextTokens).toBeUndefined();
+    const assistant = (usage: object, extra: object = {}) =>
+      sdk.last.emit({ type: "assistant", message: { model: "claude-haiku-5-5", content: [{ type: "text", text: "hi" }], stop_reason: null, usage }, parent_tool_use_id: null, ...extra });
+    assistant({ input_tokens: 5, cache_read_input_tokens: 1000, cache_creation_input_tokens: 200, output_tokens: 50 });
+    assistant({ input_tokens: 3, cache_read_input_tokens: 1200, cache_creation_input_tokens: 40, output_tokens: 9 });
+    assistant({ input_tokens: 99999, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, { parent_tool_use_id: "toolu_1" });
+    sdk.last.emit({ type: "assistant", message: { model: "<synthetic>", content: [{ type: "text", text: "limit" }], usage: { input_tokens: 0 } }, parent_tool_use_id: null });
+    await settle();
+    expect(readAll(agents).report.contextTokens).toBe(1243);
+    await agents.stop(AGENT);
+    expect(readAll(agents).report).toMatchObject({ state: "idle", contextTokens: 1243 });
+    // A new session begins with none.
+    agents.start({ agentId: AGENT, sessionId: S2, resume: false });
+    await settle();
+    expect(readAll(agents).report.contextTokens).toBeUndefined();
   });
 });
 
