@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { zstdDecompressSync } from "node:zlib";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { Agents } from "./agents.ts";
@@ -11,9 +12,16 @@ const AGENT = "3b0f6c1e-9a52-4c1d-8f43-2a6e1c7d9b10";
 const S1 = "9d6a1f0e-4b7c-4e21-a3f8-0c5d2e7b4a19";
 const mounted = async () => true;
 
+/** A .tar.zst unpacked to a plain .tar beside it: the checks' machines need not have the zstd program. */
+function untar(path: string): string {
+  const tar = `${path}.tar`;
+  writeFileSync(tar, zstdDecompressSync(readFileSync(path)));
+  return tar;
+}
+
 /** The member names of a .tar.zst, as `tar -tf` lists them. */
 function members(path: string): string[] {
-  return execFileSync("tar", ["--zstd", "-tf", path], { encoding: "utf8" }).split("\n").filter(Boolean).sort();
+  return execFileSync("tar", ["-tf", untar(path)], { encoding: "utf8" }).split("\n").filter(Boolean).sort();
 }
 
 function host(o: { archiveDir?: string; mounted?: (p: string) => Promise<boolean> }) {
@@ -52,7 +60,7 @@ describe("archiving a deleted agent", () => {
     }
     expect(names.filter((n) => /credentials|mcp\.json|^repo|notes\.md/.test(n))).toEqual([]);
     const out = scratch("out");
-    execFileSync("tar", ["--zstd", "-xf", join(archiveDir, `ana-${AGENT}.tar.zst`), "-C", out]);
+    execFileSync("tar", ["-xf", untar(join(archiveDir, `ana-${AGENT}.tar.zst`)), "-C", out]);
     expect(JSON.parse(readFileSync(join(out, "agent.json"), "utf8"))).toEqual({ id: AGENT, name: "ana" });
     expect(existsSync(join(dir, ".deleted", `ana-${AGENT}`, "agent.json"))).toBe(true);
   });

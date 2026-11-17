@@ -116,7 +116,7 @@ With `archive_dir` set, a delete also writes `<archive_dir>/<name>-<id>.tar.zst`
 holding `agent.json`, `sessions.jsonl`, `prompt.md`, `logs/` and
 `home/.claude/` (its transcripts), and never its `credentials.env`,
 `mcp.json`, Claude login (`.credentials*`) or anything else in the folder, such
-as what it cloned. List one with `tar --zstd -tf <file>`. The archive is
+as what it cloned. List one with `tar -tf <file>` (GNU tar with the `zstd` program installed). The archive is
 written in the background and never fails the delete: if `archive_dir` is not on
 a FUSE mount (the drive is not mounted) or the write fails, the host logs
 `<name>-<id>: not archived to …` and the folder in `.deleted` is all there is.
