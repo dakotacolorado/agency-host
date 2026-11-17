@@ -1,0 +1,75 @@
+# The image an agent's Claude Code session runs in when it runs in a
+# container: the same tools on every host. The agent's folder is mounted at
+# /agent and its home is /agent/home; run it with --userns=keep-id, so files
+# it writes there stay the host user's.
+#
+# Everything it fetches is pinned: the base by digest, the rest by version
+# and checksum. The Claude Code binary is the one the Agent SDK in
+# ../package-lock.json bundles, which is what spawnClaudeCodeProcess runs;
+# src/image.spec.ts fails when the two drift apart.
+FROM docker.io/library/ubuntu:24.04@sha256:73b999393d07f2bf65a40373778a44dc9a6d54ad7718d29247d8ff9413c4d6a8
+
+# Ubuntu's archive as it stood on this day, so a build on any host, on any
+# day, installs the same packages. The snapshot is served over HTTPS only, so
+# ca-certificates comes first, from the archive as it is now.
+ARG APT_SNAPSHOT=20261115T000000Z
+ARG NODE_TARBALL=https://nodejs.org/dist/v24.22.2/node-v24.22.2-linux-x64.tar.xz
+ARG NODE_TARBALL_SHA256=48cc0e21e048790e54c0cf5749c2725005313d652651c40b7a21feb9697aaf75
+ARG GH_VERSION=2.104.0
+ARG GH_SHA256=98cb101ad87dbbd3f6b2f2bfcbd43197ccd07643140121d8a9cfaa91eadbc24e
+ARG CLAUDE_SDK_VERSION=0.3.323
+ARG CLAUDE_SDK_INTEGRITY=sha512-9M0rnLcCa9sJdZoRCPbjyMOv3raoJm39u348t2ozCgE35Y9e/jGgxy+rG2jfRTaCBILDDrR57ClRQVRlpNeLpQ==
+ARG RUSTUP_VERSION=1.29.3
+ARG RUSTUP_SHA256=b1c8cb14e30889e7e2999e6b69e62d9e9b9ffc0f4df8180564d306d9680e6c55
+ARG RUST_VERSION=1.100.0
+ARG UV_VERSION=0.13.8
+ARG UV_SHA256=5acfd9177cfecf0bf87578f059728215ccc884388988f55f7a65041b57387d91
+
+ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates \
+ && apt-get update --snapshot "$APT_SNAPSHOT" \
+ && apt-get install -y --no-install-recommends --snapshot "$APT_SNAPSHOT" \
+      ca-certificates curl git openssh-client jq ripgrep python3 build-essential \
+      pkg-config zstd unzip xz-utils sqlite3 shellcheck less procps \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN set -eu; cd /tmp \
+ && curl -fsSL -o node.tar.xz "$NODE_TARBALL" \
+ && echo "$NODE_TARBALL_SHA256  node.tar.xz" | sha256sum -c --quiet - \
+ && mkdir -p /opt/node && tar -C /opt/node --strip-components=1 -xJf node.tar.xz \
+ && rm node.tar.xz \
+ && curl -fsSL -o gh.tar.gz "https://github.com/cli/cli/releases/download/v$GH_VERSION/gh_${GH_VERSION}_linux_amd64.tar.gz" \
+ && echo "$GH_SHA256  gh.tar.gz" | sha256sum -c --quiet - \
+ && tar -xzf gh.tar.gz && install -m 755 "gh_${GH_VERSION}_linux_amd64/bin/gh" /usr/local/bin/gh \
+ && rm -rf gh.tar.gz "gh_${GH_VERSION}_linux_amd64" \
+ && curl -fsSL -o claude.tgz "https://registry.npmjs.org/@anthropic-ai/claude-agent-sdk-linux-x64/-/claude-agent-sdk-linux-x64-$CLAUDE_SDK_VERSION.tgz" \
+ && want=$(printf %s "${CLAUDE_SDK_INTEGRITY#sha512-}" | base64 -d | od -An -v -tx1 | tr -d ' \n') \
+ && echo "$want  claude.tgz" | sha512sum -c --quiet - \
+ && mkdir -p /opt/claude && tar -C /opt/claude --strip-components=1 -xzf claude.tgz package/claude \
+ && ln -s /opt/claude/claude /usr/local/bin/claude \
+ && rm claude.tgz \
+ && curl -fsSL -o uv.tar.gz "https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-x86_64-unknown-linux-gnu.tar.gz" \
+ && echo "$UV_SHA256  uv.tar.gz" | sha256sum -c --quiet - \
+ && tar -xzf uv.tar.gz && install -m 755 uv-x86_64-unknown-linux-gnu/uv uv-x86_64-unknown-linux-gnu/uvx /usr/local/bin/ \
+ && rm -rf uv.tar.gz uv-x86_64-unknown-linux-gnu
+
+# Rust, with clippy and rustfmt (the Rust repos' checks run both), read-only
+# under /opt; cargo's downloads and builds go to the agent's
+# own CARGO_HOME (~/.cargo).
+ENV RUSTUP_HOME=/opt/rustup
+RUN set -eu; cd /tmp \
+ && curl -fsSL -o rustup-init "https://static.rust-lang.org/rustup/archive/$RUSTUP_VERSION/x86_64-unknown-linux-gnu/rustup-init" \
+ && echo "$RUSTUP_SHA256  rustup-init" | sha256sum -c --quiet - \
+ && chmod 755 rustup-init \
+ && CARGO_HOME=/opt/cargo ./rustup-init -y -q --no-modify-path --profile minimal --default-toolchain "$RUST_VERSION" --component clippy,rustfmt \
+ && rm rustup-init && chmod -R a+rX /opt/rustup /opt/cargo
+
+# The agent: Ubuntu's uid 1000 user, renamed. keep-id maps the host user
+# onto it where the host user is 1000, and adds an entry for it otherwise.
+RUN usermod -l agent -d /agent/home -G "" ubuntu && groupmod -n agent ubuntu \
+ && mkdir -p /agent/home && chown -R agent:agent /agent
+ENV HOME=/agent/home \
+    PATH=/opt/node/bin:/opt/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+USER agent
+WORKDIR /agent
