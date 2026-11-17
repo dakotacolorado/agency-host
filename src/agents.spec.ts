@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync, appendFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync, utimesSync, writeFileSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { Agents, CARRY_ON, DRAINED, NOTHING_YET, RESUMED, START, type Cursor, type Line } from "./agents.ts";
@@ -389,11 +389,14 @@ describe("the model a session runs on", () => {
     const state = join(first.dir, "ana/home/.claude");
     mkdirSync(join(state, "projects/-x"), { recursive: true });
     writeFileSync(join(state, "projects/-x", `${S1}.jsonl`), "{}\n");
+    unlinkSync(join(state, "agents/Explore.md"));
 
     const again = host(first.dir);
     again.agents.reconcile();
     expect(again.sdk.last.options).toMatchObject({ resume: S1, model: "claude-sonnet-5-5" });
     expect(again.sdk.last.options.effort).toBeUndefined();
+    // An agent made before the host wrote its Explore is given it as its session is resumed.
+    expect(readFileSync(join(state, "agents/Explore.md"), "utf8")).toBe(EXPLORE);
   });
 
   it("is recorded by configure for a session a drain closed, which resumes on it; with no session, configure says so", async () => {

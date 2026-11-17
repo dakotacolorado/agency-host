@@ -97,6 +97,11 @@ export function prepare(state: string, dir: string, rules: string): void {
     for (const tool of DENIED) if (!deny.includes(tool)) deny.push(tool);
   });
   writeFileSync(join(state, "CLAUDE.md"), rules);
+  subagents(state);
+}
+
+/** Writes the host's own subagents into `state`; done before every session, a resumed one too, which `prepare` is not. */
+export function subagents(state: string): void {
   mkdirSync(join(state, "agents"), { recursive: true });
   writeFileSync(join(state, "agents", "Explore.md"), EXPLORE);
 }

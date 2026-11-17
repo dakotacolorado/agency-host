@@ -266,6 +266,7 @@ export class Agents {
     const events = h.events(session.sessionId);
     mkdirSync(dirname(events), { recursive: true });
     this.append(events, claude.started(now()));
+    claude.subagents(h.claude());
     const env: Record<string, string> = {
       ...this.o.baseEnv,
       ...context.readCredentials(h.credentials()),
