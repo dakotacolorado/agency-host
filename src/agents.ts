@@ -13,7 +13,7 @@ import { allows, type Permissions } from "./config.ts";
 import * as context from "./context.ts";
 import * as home from "./home.ts";
 import type { Home, Record as AgentRecord, Session } from "./home.ts";
-import type { Message, SessionHandle, StartSession } from "./sdk.ts";
+import type { Effort, Message, SessionHandle, StartSession } from "./sdk.ts";
 import { errorText, isInstant, log, now } from "./sys.ts";
 
 /** Claude Code does nothing until it is told something, so a session always opens with words. */
@@ -52,6 +52,8 @@ export interface AgentReport {
   told?: boolean;
   /** When the usage limit that ended its last turn resets; null once a turn has begun since, or when none did. */
   limitedUntil: string | null;
+  /** The size of its session's context as of its last request to the model, once it has made one. */
+  contextTokens?: number;
 }
 
 export interface Line {
@@ -88,6 +90,7 @@ export interface Cursor {
   pending: { [uuid: string]: string | null };
   limitedUntil?: string;
   rejected?: string;
+  contextTokens?: number;
 }
 
 export const START: Cursor = { file: 0, offset: 0, seq: 0, waiting: false, tasks: 0, tokens: claude.NO_TOKENS, pending: {} };
@@ -112,6 +115,8 @@ export interface Start {
   env?: { [k: string]: string };
   secrets?: { [k: string]: string };
   mcpServers?: { [k: string]: unknown };
+  model?: string;
+  effort?: Effort;
 }
 
 interface Live {
@@ -221,6 +226,9 @@ export class Agents {
       from: 0,
       stream: true,
       ...(opening ? { opening } : {}),
+      // Only what this start names: one that names none runs on Claude Code's defaults, as before there were any.
+      ...(s.model ? { model: s.model } : {}),
+      ...(s.effort ? { effort: s.effort } : {}),
       stopped: false,
       ended: false,
     };
@@ -276,6 +284,8 @@ export class Agents {
       env,
       ...("resume" in begin ? { resume: begin.resume } : { sessionId: begin.fresh }),
       ...(mcpServers ? { mcpServers } : {}),
+      ...(session.model ? { model: session.model } : {}),
+      ...(session.effort ? { effort: session.effort as Effort } : {}),
       permit: (tool) => (allows(this.o.permissions, tool) ? true : `${tool} is not allowed on this host (agency-host's permissions)`),
       stderr: (t) => {
         try {
@@ -362,6 +372,28 @@ export class Agents {
     const live = this.running(id);
     await live.handle.interrupt();
     if (text !== undefined) this.say(live, this.find(id).home.events(live.sessionId), text, claude.uuid(commandId), commandId);
+  }
+
+  /**
+   * Switches the agent's session to `model` and `effort` from its next
+   * request to the model, and records it, so the session resumes on them. A
+   * session a drain closed, to be resumed by the next host, is recorded alone.
+   * With none to switch, the next start names the model.
+   */
+  async configure(id: string, model: string, effort: Effort | null): Promise<void> {
+    const { home: h } = this.find(id);
+    const live = this.live.get(id);
+    if (live) {
+      await live.handle.configure(model, effort);
+      h.configured(live.sessionId, model, effort);
+      return;
+    }
+    const latest = h.latest();
+    if (latest?.drained && !latest.stopped && !latest.ended) {
+      h.configured(latest.sessionId, model, effort);
+      return;
+    }
+    throw new Error(`agent ${id} has no live session on this host: its next start names the model`);
   }
 
   private running(id: string): Live {
@@ -530,12 +562,21 @@ export class Agents {
         tasks: Math.min(at.tasks, MOST_TASKS),
         ...(at.told !== undefined ? { told: at.told } : {}),
         limitedUntil,
+        ...(at.contextTokens !== undefined ? { contextTokens: at.contextTokens } : {}),
       };
     }
     const latest = h.latest();
     // Closed by a drain between turns: it waits, for the next host to resume it.
     if (latest?.drained && !latest.stopped && !latest.ended) {
-      return { id, state: "waiting", sessionId: latest.sessionId, tasks: 0, ...(at.told !== undefined ? { told: at.told } : {}), limitedUntil };
+      return {
+        id,
+        state: "waiting",
+        sessionId: latest.sessionId,
+        tasks: 0,
+        ...(at.told !== undefined ? { told: at.told } : {}),
+        limitedUntil,
+        ...(at.contextTokens !== undefined ? { contextTokens: at.contextTokens } : {}),
+      };
     }
     const interrupted = latest && !latest.stopped;
     return {
@@ -547,6 +588,7 @@ export class Agents {
       ...(at.told !== undefined ? { told: at.told } : {}),
       // A stopped agent is not to be resumed when its limit resets.
       limitedUntil: interrupted ? limitedUntil : null,
+      ...(at.contextTokens !== undefined ? { contextTokens: at.contextTokens } : {}),
     };
   }
 
@@ -566,7 +608,7 @@ export class Agents {
     let size = 0;
     let usage: Usage | undefined;
     const tokens: Batch["tokens"] = [];
-    const onTo = (c: Cursor): Cursor => ({ ...c, file: c.file + 1, offset: 0, tasks: 0, told: undefined, tokens: claude.NO_TOKENS, pending: {}, limitedUntil: undefined, rejected: undefined });
+    const onTo = (c: Cursor): Cursor => ({ ...c, file: c.file + 1, offset: 0, tasks: 0, told: undefined, tokens: claude.NO_TOKENS, pending: {}, limitedUntil: undefined, rejected: undefined, contextTokens: undefined });
     files: while (next.file < sources.length) {
       const sessionId = sources[next.file]!;
       const last = next.file + 1 === sources.length;
@@ -615,6 +657,7 @@ export class Agents {
           told: r.told ?? next.told,
           pending,
           ...limitAfter(next, r),
+          ...(r.contextTokens !== undefined ? { contextTokens: r.contextTokens } : {}),
         };
         if (r.tokens) {
           next = { ...next, tokens: claude.addTokens(next.tokens, r.tokens) };

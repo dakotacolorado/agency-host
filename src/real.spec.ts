@@ -20,15 +20,23 @@ describe.skipIf(!real)("a real session", () => {
     expect(sdk.version).toBe(CHECKED_SDK);
   });
 
-  it("says one word, its lines name the start, and it waits, then stops", { timeout: 180_000 }, async () => {
+  it("says one word on the model its start names, its lines name the start, and it waits; configured, it answers on the new model, then stops", { timeout: 300_000 }, async () => {
     const dir = scratch("real");
     const env = Object.fromEntries(Object.entries(process.env).filter((e): e is [string, string] => e[1] !== undefined && e[0] !== "CLAUDE_CONFIG_DIR"));
     const agents = new Agents({ dir, startSession: startSdkSession, permissions: EVERY_TOOL, login: loginDir(process.env.CLAUDE_CONFIG_DIR, dir), baseEnv: env, changed: () => {} });
     const id = "6a1c2f3e-0000-4000-8000-00000000a9e1";
     const command = "6a1c2f3e-0000-4000-8000-00000000c001";
     agents.create(id, "real");
-    agents.start({ commandId: command, agentId: id, sessionId: "6a1c2f3e-0000-4000-8000-00000000500e", resume: false, text: "Reply with the single word: pong. Use no tools." });
+    const session = "6a1c2f3e-0000-4000-8000-00000000500e";
+    agents.start({ commandId: command, agentId: id, sessionId: session, resume: false, text: "Reply with the single word: pong. Use no tools.", model: "claude-haiku-5-5", effort: "low" });
     const { home } = agents.all()[0]!;
+    const models = () =>
+      readFileSync(home.events(session), "utf8")
+        .split("\n")
+        .filter(Boolean)
+        .map((l) => JSON.parse(l) as { type?: string; parent_tool_use_id?: unknown; message?: { model?: string } })
+        .filter((m) => m.type === "assistant" && !m.parent_tool_use_id && m.message?.model !== "<synthetic>")
+        .map((m) => m.message?.model);
     let at: Cursor = START;
     const lines: Line[] = [];
     const tokens: number[] = [];
@@ -49,6 +57,14 @@ describe.skipIf(!real)("a real session", () => {
       expect(lines[0]).toMatchObject({ seq: 0, from: "instruction", text: "Reply with the single word: pong. Use no tools.", commandId: command });
       expect(lines.some((l) => l.from === "agent" && /pong/i.test(l.text))).toBe(true);
       expect(tokens.at(-1)).toBeGreaterThan(0);
+      expect(report.contextTokens).toBeGreaterThan(0);
+      expect(new Set(models())).toEqual(new Set(["claude-haiku-5-5"]));
+      const answered = models().length;
+      await agents.configure(id, "claude-sonnet-5-5", null);
+      agents.message(id, "6a1c2f3e-0000-4000-8000-00000000c002", "Reply with the single word: ping. Use no tools.");
+      await until(() => models().length > answered && readOn().state === "waiting", 150_000);
+      expect(new Set(models().slice(answered))).toEqual(new Set(["claude-sonnet-5-5"]));
+      console.log(`real session: models ${models().join(", ")}, context ${readOn().contextTokens} tokens`);
       console.log(`real session: ${lines.length} lines, usage ${usage ? "read" : "not said"}`);
     } finally {
       await agents.stop(id);

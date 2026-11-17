@@ -4,7 +4,9 @@
  * and what it says comes out as SDK messages. The rest of the host sees only
  * `SessionHandle`, so tests drive a stand-in that emits scripted messages.
  */
-import { query, type CanUseTool, type McpServerConfig, type Query, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import { query, type CanUseTool, type EffortLevel, type McpServerConfig, type Query, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+
+export type Effort = EffortLevel;
 
 /** An SDK message as the host keeps it: plain JSON, read by `claude.read`. */
 export type Message = { [k: string]: unknown };
@@ -18,6 +20,9 @@ export interface SessionOptions {
   /** ...or this one carried on. */
   resume?: string;
   mcpServers?: Record<string, unknown>;
+  /** The model it runs on, and its effort; absent, Claude Code's defaults. */
+  model?: string;
+  effort?: Effort;
   /** Answers each tool's permission request: true to allow it, or why not. */
   permit: (tool: string) => true | string;
   /** Whatever the session writes on its stderr. */
@@ -29,6 +34,8 @@ export interface SessionHandle {
   send(text: string, uuid: string): void;
   /** Stops the turn under way, as Escape does: the session goes on. */
   interrupt(): Promise<void>;
+  /** Runs it on `model` and `effort` (null: the model's default) from its next request to the model; a subagent already running keeps its own. */
+  configure(model: string, effort: Effort | null): Promise<void>;
   /** Ends the session and its Claude Code. */
   close(): void;
   /** What the session says, until it ends; throws if it ends by failing. */
@@ -80,6 +87,8 @@ export const startSdkSession: StartSession = (o) => {
       cwd: o.cwd,
       env: o.env,
       ...(o.resume ? { resume: o.resume } : { sessionId: o.sessionId }),
+      ...(o.model ? { model: o.model } : {}),
+      ...(o.effort ? { effort: o.effort } : {}),
       ...(o.mcpServers ? { mcpServers: o.mcpServers as Record<string, McpServerConfig> } : {}),
       // As `claude` itself loads them: the agent's own settings, rules and
       // skills from its CLAUDE_CONFIG_DIR, and those of whatever it works in.
@@ -100,6 +109,9 @@ export const startSdkSession: StartSession = (o) => {
     },
     async interrupt() {
       await q.interrupt();
+    },
+    async configure(model, effort) {
+      await q.applyFlagSettings({ model, effortLevel: effort });
     },
     close() {
       inbox.close();
