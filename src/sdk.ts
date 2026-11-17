@@ -4,7 +4,8 @@
  * and what it says comes out as SDK messages. The rest of the host sees only
  * `SessionHandle`, so tests drive a stand-in that emits scripted messages.
  */
-import { query, type CanUseTool, type EffortLevel, type McpServerConfig, type Query, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import { query, type CanUseTool, type EffortLevel, type McpServerConfig, type Query, type SDKUserMessage, type SpawnedProcess } from "@anthropic-ai/claude-agent-sdk";
+import { run as runInContainer, type ContainerRun } from "./container.ts";
 
 export type Effort = EffortLevel;
 
@@ -12,6 +13,7 @@ export type Effort = EffortLevel;
 export type Message = { [k: string]: unknown };
 
 export interface SessionOptions {
+  /** On the host, or with `container`, inside it. */
   cwd: string;
   /** The whole environment of the session's Claude Code: the SDK replaces the subprocess's with it. */
   env: Record<string, string>;
@@ -27,6 +29,8 @@ export interface SessionOptions {
   permit: (tool: string) => true | string;
   /** Whatever the session writes on its stderr. */
   stderr: (text: string) => void;
+  /** Runs its Claude Code in this container rather than on the host. */
+  container?: ContainerRun;
 }
 
 export interface SessionHandle {
@@ -101,6 +105,8 @@ export const startSdkSession: StartSession = (o) => {
       // which is how a line names the command it carried.
       extraArgs: { "replay-user-messages": null },
       stderr: o.stderr,
+      // The image's own `claude`, which is the binary this SDK bundles (src/image.spec.ts).
+      ...(o.container ? { spawnClaudeCodeProcess: (s) => runInContainer(o.container!, ["claude", ...s.args], s.env, s.signal, o.stderr) as SpawnedProcess } : {}),
     },
   });
   return {

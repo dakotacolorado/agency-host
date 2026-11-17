@@ -1,8 +1,9 @@
 #!/usr/bin/env node
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { loginDir } from "./claude.ts";
 import { banner, wantsColor } from "./banner.ts";
 import { load } from "./config.ts";
+import { CELLAR, releaseImage, SLICE, type Containers } from "./container.ts";
 import { Host } from "./host.ts";
 import { hold } from "./lock.ts";
 import { startSdkSession } from "./sdk.ts";
@@ -20,12 +21,27 @@ Every setting is in the file: service_url, token, host_id (default the hostname)
 capacity, labels, agents_dir (default ~/agents), [permissions] allow and deny
 (default every tool allowed), drain_seconds (default 1800).
 
+A session whose agent runs in a container runs in AGENCY_HOST_IMAGE (default
+localhost/agency-agent:<release>, from releases/<release>/), under the slice
+AGENCY_HOST_SLICE (default agencyagents.slice).
+
 SIGTERM or SIGINT stops it now: its sessions are resumed when it starts again,
 the turn each was in cut off. SIGUSR2 drains it: each session is closed once its
 turn is over, and it exits once none is live, or at drain_seconds.`;
 
 /** Read by agency-host and by its releases as agent-host, and never given to a session. */
-const CONFIG_VARS = ["AGENCY_HOST_CONFIG", "AGENT_HOST_CONFIG"];
+const CONFIG_VARS = ["AGENCY_HOST_CONFIG", "AGENT_HOST_CONFIG", "AGENCY_HOST_IMAGE", "AGENCY_HOST_SLICE"];
+
+/**
+ * How container sessions run: in AGENCY_HOST_IMAGE, or the image of the
+ * release this is (`localhost/agency-agent:<release>`), under
+ * AGENCY_HOST_SLICE or agencyagents.slice. With neither image, none run here.
+ */
+function containers(env: { [k: string]: string }): Containers | undefined {
+  const image = process.env.AGENCY_HOST_IMAGE || releaseImage(new URL(".", import.meta.url).pathname);
+  if (!image) return undefined;
+  return { podman: "podman", image, slice: process.env.AGENCY_HOST_SLICE || SLICE, cellar: existsSync(CELLAR) ? CELLAR : null, env };
+}
 
 export function parseArgs(args: string[], env: NodeJS.ProcessEnv, color = false): { config: string | null } | { exit: number; say: string } {
   let config = env.AGENCY_HOST_CONFIG || env.AGENT_HOST_CONFIG || null;
@@ -80,12 +96,16 @@ async function main(): Promise<number | null> {
       : "no capacity set: the service will put no agent here until one is",
   );
   log(`agents are in ${config.agentsDir}`);
+  const env = baseEnv();
+  const boxes = containers(env);
+  log(boxes ? `container sessions run in ${boxes.image}, in ${boxes.slice}` : "no agent image: no session runs in a container here");
   const host = new Host({
     config,
     version: VERSION,
     startSession: startSdkSession,
     login: loginDir(process.env.CLAUDE_CONFIG_DIR, config.agentsDir, log),
-    baseEnv: baseEnv(),
+    baseEnv: env,
+    ...(boxes ? { containers: boxes } : {}),
   });
   let stopping = false;
   let draining = false;

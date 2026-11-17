@@ -72,12 +72,13 @@ export function claudeEnv(state: string, login: string | null): Record<string, s
  * beforehand, so a person who takes the session over by hand is not asked
  * either. Answers already there are kept, so what an agent changes for
  * itself stays changed. `rules` are its standing instructions, Claude Code's
- * user memory, which it reads at the start of every session.
+ * user memory, which it reads at the start of every session. `inside` is
+ * where `dir` is to a Claude Code that runs in a container.
  */
-export function prepare(state: string, dir: string, rules: string): void {
+export function prepare(state: string, dir: string, rules: string, inside?: string): void {
   mkdirSync(state, { recursive: true });
-  // Claude Code keys a folder by the path it finds itself in, symlinks resolved.
-  const project = realpathSync(dir);
+  // Claude Code keys a folder by the path it finds itself in, symlinks resolved: in a container, where it is mounted.
+  const project = inside ?? realpathSync(dir);
   merge(join(state, ".claude.json"), (config) => {
     config.hasCompletedOnboarding ??= true;
     // Asked on every start once a Chrome extension is installed.

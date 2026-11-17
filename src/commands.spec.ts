@@ -52,6 +52,18 @@ describe("a command", () => {
   });
 });
 
+describe("a start's runtime", () => {
+  it("runs a container agent's session in a container, a host one on the host, and refuses one it does not know", async () => {
+    const { sdk, agents } = host();
+    await act(c({ id: "c1", kind: "create", agentId: "w1", name: "ana" }), agents);
+    expect((await act(c({ id: "c2", kind: "start", agentId: "w1", sessionId: "s1", resume: false, runtime: "vm" }), agents)).error).toMatch(/"vm" is not a runtime/);
+    // This host was made with no agent image.
+    expect((await act(c({ id: "c3", kind: "start", agentId: "w1", sessionId: "s1", resume: false, runtime: "container" }), agents)).error).toMatch(/no agent image/);
+    expect(await act(c({ id: "c4", kind: "start", agentId: "w1", sessionId: "s1", resume: false, runtime: "host" }), agents)).toEqual({ commandId: "c4", ok: true });
+    expect(sdk.last.options.container).toBeUndefined();
+  });
+});
+
 describe("model and effort", () => {
   it("a start carries to the session; one with an effort Claude Code does not know is refused", async () => {
     const { sdk, agents } = host();

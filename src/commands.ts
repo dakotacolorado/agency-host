@@ -107,6 +107,13 @@ function effortOf(v: unknown): Effort | undefined {
   return v as Effort;
 }
 
+/** Where its session runs; absent, from an agency that does not say, on the host. A runtime the host does not know is refused, rather than run where it was not meant to. */
+function runtimeOf(v: unknown): Start["runtime"] {
+  if (v === undefined || v === null) return undefined;
+  if (v !== "container" && v !== "host") throw new Error(`${JSON.stringify(v)} is not a runtime: container, host`);
+  return v;
+}
+
 const KINDS = new Set(["create", "start", "message", "interrupt", "configure", "stop", "delete"]);
 
 /** A kind the host does not handle is reported by name rather than dropped, so the sender learns the command went nowhere. */
@@ -132,6 +139,7 @@ export async function act(c: Command, agents: Agents): Promise<CommandReport> {
         const secrets = record(c.secrets);
         const model = str(c.model) || undefined;
         const effort = effortOf(c.effort);
+        const runtime = runtimeOf(c.runtime);
         const mcp = c.mcpServers && typeof c.mcpServers === "object" ? (c.mcpServers as { [k: string]: unknown }) : undefined;
         const s: Start = {
           commandId: c.id,
@@ -146,6 +154,7 @@ export async function act(c: Command, agents: Agents): Promise<CommandReport> {
           ...(mcp ? { mcpServers: mcp } : {}),
           ...(model ? { model } : {}),
           ...(effort ? { effort } : {}),
+          ...(runtime ? { runtime } : {}),
         };
         agents.start(s);
         break;
