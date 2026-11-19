@@ -68,7 +68,16 @@ describe.skipIf(!real)("a real session", () => {
       const before = readOn().contextTokens!;
       const seen = lines.length;
       agents.message(id, "6a1c2f3e-0000-4000-8000-00000000c003", "/compact");
+      // From the send the agent is working, though a compaction says nothing until it ends.
+      expect(readOn().state).toBe("working");
+      // A second /compact, 2 s on, while the first is under way, is dropped.
+      await new Promise((r) => setTimeout(r, 2000));
+      expect(() => agents.message(id, "6a1c2f3e-0000-4000-8000-00000000c004", "/compact")).toThrow("already compacting: this /compact was dropped");
       await until(() => readOn().state === "waiting" && lines.slice(seen).some((l) => l.from === "agent" && l.text.startsWith("Compacted the conversation")), 150_000);
+      const said = lines.slice(seen).filter((l) => l.from === "agent").map((l) => l.text);
+      console.log(`real session: agent lines ${JSON.stringify(said)}`);
+      expect(said.findIndex((t) => t.startsWith("Compacting the conversation"))).toBeGreaterThanOrEqual(0);
+      expect(said.findIndex((t) => t.startsWith("Compacting the conversation"))).toBeLessThan(said.findIndex((t) => t.startsWith("Compacted the conversation")));
       const compacted = lines.slice(seen).filter((l) => l.text.startsWith("Compacted the conversation"));
       expect(compacted).toHaveLength(1);
       console.log(`real session: ${compacted[0]!.text}; context ${before} -> ${readOn().contextTokens}`);

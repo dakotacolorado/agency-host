@@ -278,6 +278,12 @@ export interface Read {
   contextTokens?: number;
   /** True for a compaction that gives no size after it: the context stands at none known until the next main-thread message says. */
   contextUnknown?: boolean;
+  /** True for a main-thread request to the model, whose `contextTokens` is the size it was made with. */
+  request?: boolean;
+  /** True for a compaction's end and for a new process: the request before has no successor to be measured against. */
+  resetsGrowth?: boolean;
+  /** True once a compaction begins, false once one ends (its boundary, or a failed one): absent when it says neither. */
+  compacting?: boolean;
   /** What its turn used, subagents included, when it is a `result` that says. */
   tokens?: Tokens;
   /** The same by model id, when the `result` names the models; its sum is `tokens`. */
@@ -302,6 +308,7 @@ export function sent(at: string, u: string, commandId: string | undefined): obje
 
 type Json = { [k: string]: unknown };
 const obj = (v: unknown): Json => (v && typeof v === "object" && !Array.isArray(v) ? (v as Json) : {});
+const kilo = (n: number) => (n >= 1000 ? `${Math.round(n / 1000)}k` : `${n}`);
 const count = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.floor(v) : 0);
 
 /** A window whose numbers are missing or out of range is left out: the service refuses a whole report over one. */
@@ -378,8 +385,8 @@ function echoed(v: Json): string | undefined {
   return v.type === "user" && v.isReplay === true && v.origin === undefined && typeof v.uuid === "string" ? v.uuid : undefined;
 }
 
-/** A line that is not JSON, or of a kind not read here, says nothing, and the lines after it are read as usual. */
-export function read(line: string): Read {
+/** A line that is not JSON, or of a kind not read here (`context`: the size of the context as it stood, to say in a compaction's start), says nothing, and the lines after it are read as usual. */
+export function read(line: string, context?: number): Read {
   let parsed: unknown;
   try {
     parsed = JSON.parse(line);
@@ -404,6 +411,8 @@ export function read(line: string): Read {
     out.sent = { uuid: v.uuid, ...(typeof v.commandId === "string" ? { commandId: v.commandId } : {}) };
     // The host's own message to a session it resumed is not one: a limit that still holds ends the turn it begins again.
     if (out.sent.commandId) out.turn = "begins";
+    // From the send the session is in a turn, though a `/compact` says nothing until it ends.
+    out.waiting = false;
     return out;
   }
   // A subagent's own conversation, and lines Claude Code adds for itself.
@@ -413,6 +422,7 @@ export function read(line: string): Read {
   if (v.type === "assistant" && message.model !== "<synthetic>" && message.usage && typeof message.usage === "object") {
     const u = obj(message.usage);
     out.contextTokens = count(u.input_tokens) + count(u.cache_read_input_tokens) + count(u.cache_creation_input_tokens);
+    out.request = true;
   }
   if (v.type === "system" && v.subtype === "init") out.turn = "begins";
   // The limit's own notice is an assistant message Claude Code makes up, not the agent working on.
@@ -422,6 +432,7 @@ export function read(line: string): Read {
   if (v.type === "agent_host" && v.subtype === "process_started") {
     out.tasks = 0;
     out.waiting = false;
+    out.resetsGrowth = true;
   }
   const echo = echoed(v);
   if (v.type === "system" && v.subtype === "init") out.told = false;
@@ -476,9 +487,22 @@ export function read(line: string): Read {
       }
     }
   }
+  if (v.type === "system" && v.subtype === "status") {
+    if (v.status === "compacting") {
+      const how = v.trigger === "auto" ? " automatically" : "";
+      const size = context !== undefined ? ` (${kilo(context)} tokens of context)` : "";
+      out.entries.push({ from: "agent", text: `Compacting the conversation${how}${size}…` });
+      out.compacting = true;
+    }
+    if (v.compact_result === "failed") {
+      out.entries.push({ from: "agent", text: `Compaction failed: ${typeof v.compact_error === "string" ? v.compact_error : "no reason given"}` });
+      out.compacting = false;
+    out.resetsGrowth = true;
+    }
+  }
   if (v.type === "system" && v.subtype === "compact_boundary") {
+    out.compacting = false;
     const m = obj(v.compact_metadata);
-    const kilo = (n: number) => (n >= 1000 ? `${Math.round(n / 1000)}k` : `${n}`);
     const before = typeof m.pre_tokens === "number" ? count(m.pre_tokens) : undefined;
     const after = typeof m.post_tokens === "number" ? count(m.post_tokens) : undefined;
     const how = m.trigger === "auto" ? " automatically" : "";

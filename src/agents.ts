@@ -59,6 +59,8 @@ export interface AgentReport {
   activeMs?: number;
   /** The size of its session's context as of its last request to the model, once it has made one. */
   contextTokens?: number;
+  /** How much its last request added to the context, when the request before it in the session is known. */
+  contextAddedTokens?: number;
   /** Held but not run, for want of the secrets a start gives; the service answers with a start that resumes it. */
   needsStart?: boolean;
 }
@@ -102,6 +104,9 @@ export interface Cursor {
   limitedUntil?: string;
   rejected?: string;
   contextTokens?: number;
+  /** The size of the last main-thread request's context, as the next is measured against: none after a compaction or in a new file. */
+  contextBase?: number;
+  contextAdded?: number;
 }
 
 export const START: Cursor = { file: 0, offset: 0, seq: 0, waiting: false, tasks: 0, tokens: claude.NO_TOKENS, pending: {} };
@@ -142,6 +147,8 @@ interface Live {
   /** As of the last message it gave, as a read's cursor has them: whether its turn has ended, and its background tasks open. */
   waiting: boolean;
   tasks: number;
+  /** From a compaction's start, or a `/compact` sent, until its end. */
+  compacting?: boolean;
   /** The messages sent to it that it has not yet taken, oldest first. */
   unechoed: { uuid: string; text: string }[];
 }
@@ -384,6 +391,9 @@ export class Agents {
   private say(live: Live, events: string, text: string, uuid: string, commandId: string | undefined): void {
     this.append(events, claude.sent(now(), uuid, commandId));
     live.unechoed.push({ uuid, text });
+    // From the send the session is in a turn: a `/compact` gives no line until it ends.
+    live.waiting = false;
+    if (compactText(text)) live.compacting = true;
     live.handle.send(text, uuid);
   }
 
@@ -423,6 +433,7 @@ export class Agents {
       return;
     }
     const live = this.running(id);
+    if (live.compacting && compactText(text)) throw new Error("already compacting: this /compact was dropped");
     this.say(live, this.find(id).home.events(live.sessionId), text, claude.uuid(commandId), commandId);
   }
 
@@ -649,6 +660,7 @@ export class Agents {
         turns: at.turns ?? 0,
         activeMs: at.activeMs ?? 0,
         ...(at.contextTokens !== undefined ? { contextTokens: at.contextTokens } : {}),
+        ...(at.contextAdded !== undefined ? { contextAddedTokens: at.contextAdded } : {}),
       };
     }
     const latest = h.latest();
@@ -662,6 +674,7 @@ export class Agents {
         ...(at.told !== undefined ? { told: at.told } : {}),
         limitedUntil,
         ...(at.contextTokens !== undefined ? { contextTokens: at.contextTokens } : {}),
+        ...(at.contextAdded !== undefined ? { contextAddedTokens: at.contextAdded } : {}),
       };
     }
     // Closed by a drain between turns: it waits, for the next host to resume it.
@@ -674,6 +687,7 @@ export class Agents {
         ...(at.told !== undefined ? { told: at.told } : {}),
         limitedUntil,
         ...(at.contextTokens !== undefined ? { contextTokens: at.contextTokens } : {}),
+        ...(at.contextAdded !== undefined ? { contextAddedTokens: at.contextAdded } : {}),
       };
     }
     const interrupted = latest && !latest.stopped;
@@ -687,6 +701,7 @@ export class Agents {
       // A stopped agent is not to be resumed when its limit resets.
       limitedUntil: interrupted ? limitedUntil : null,
       ...(at.contextTokens !== undefined ? { contextTokens: at.contextTokens } : {}),
+        ...(at.contextAdded !== undefined ? { contextAddedTokens: at.contextAdded } : {}),
     };
   }
 
@@ -706,7 +721,7 @@ export class Agents {
     let size = 0;
     let usage: Usage | undefined;
     const tokens: Batch["tokens"] = [];
-    const onTo = (c: Cursor): Cursor => ({ ...c, file: c.file + 1, offset: 0, tasks: 0, told: undefined, tokens: claude.NO_TOKENS, byModel: undefined, turns: undefined, activeMs: undefined, pending: {}, limitedUntil: undefined, rejected: undefined, contextTokens: undefined });
+    const onTo = (c: Cursor): Cursor => ({ ...c, file: c.file + 1, offset: 0, tasks: 0, told: undefined, tokens: claude.NO_TOKENS, byModel: undefined, turns: undefined, activeMs: undefined, pending: {}, limitedUntil: undefined, rejected: undefined, contextTokens: undefined, contextBase: undefined, contextAdded: undefined });
     files: while (next.file < sources.length) {
       const sessionId = sources[next.file]!;
       const last = next.file + 1 === sources.length;
@@ -725,7 +740,7 @@ export class Agents {
           break files;
         }
         if (!whole && (last || limited)) break files;
-        const r = claude.read(bytes.toString("utf8"));
+        const r = claude.read(bytes.toString("utf8"), next.contextTokens);
         const at = isInstant(r.at) ? r.at : now();
         let pending = next.pending;
         if (r.sent) pending = { ...pending, [r.sent.uuid]: r.sent.commandId ?? null };
@@ -757,6 +772,8 @@ export class Agents {
           ...limitAfter(next, r),
           ...(r.contextTokens !== undefined ? { contextTokens: r.contextTokens } : {}),
           ...(r.contextUnknown ? { contextTokens: undefined } : {}),
+          ...(r.request ? contextGrowth(next, r.contextTokens!) : {}),
+          ...(r.resetsGrowth ? { contextBase: undefined, contextAdded: undefined } : {}),
         };
         if (r.durationMs !== undefined) next = { ...next, turns: (next.turns ?? 0) + 1, activeMs: (next.activeMs ?? 0) + r.durationMs };
         if (r.tokens) {
@@ -824,11 +841,25 @@ function limitAfter(c: Cursor, r: claude.Read): Pick<Cursor, "limitedUntil" | "r
   return { limitedUntil, rejected };
 }
 
+/** What a main-thread request of `size` adds to the context, measured against the request before it. */
+function contextGrowth(c: Cursor, size: number): Pick<Cursor, "contextBase" | "contextAdded"> {
+  const base = c.contextBase;
+  return { contextBase: size, contextAdded: base !== undefined && size >= base ? size - base : undefined };
+}
+
+/** A message that tells the session to compact. */
+function compactText(text: string): boolean {
+  return /^\/compact(\s|$)/.test(text.trim());
+}
+
 /** Keeps `live`'s turn, tasks and messages not yet taken as of `m`, as a read of its events would. */
 function follow(live: Live, m: Message): void {
   const r = claude.read(JSON.stringify(m));
   if (r.waiting !== undefined) live.waiting = r.waiting;
   if (r.tasks !== undefined) live.tasks = r.tasks;
+  if (r.compacting !== undefined) live.compacting = r.compacting;
+  // A turn that ends has no compaction left in it.
+  if (r.turn === "ends") live.compacting = false;
   for (const e of r.entries) {
     if (e.from === "instruction" && e.uuid) live.unechoed = live.unechoed.filter((u) => u.uuid !== e.uuid);
   }
