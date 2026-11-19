@@ -52,6 +52,17 @@ describe("a command", () => {
   });
 });
 
+describe("a /compact while compacting", () => {
+  it("settles with the error that it was dropped, and is not sent", async () => {
+    const { sdk, agents } = host();
+    await act(c({ id: "c1", kind: "create", agentId: "w1", name: "ana" }), agents);
+    await act(c({ id: "c2", kind: "start", agentId: "w1", sessionId: "s1", resume: false }), agents);
+    expect(await act(c({ id: "c3", kind: "message", agentId: "w1", text: "/compact" }), agents)).toEqual({ commandId: "c3", ok: true });
+    expect(await act(c({ id: "c4", kind: "message", agentId: "w1", text: "/compact" }), agents)).toEqual({ commandId: "c4", ok: false, error: "already compacting: this /compact was dropped" });
+    expect(sdk.last.sent.filter((m) => m.text === "/compact")).toHaveLength(1);
+  });
+});
+
 describe("a start's runtime", () => {
   it("runs a container agent's session in a container, a host one on the host, and refuses one it does not know", async () => {
     const { sdk, agents } = host();

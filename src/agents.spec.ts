@@ -762,4 +762,76 @@ describe("tokens by model, turns and active time", () => {
     await settle();
     expect(readAll(agents).report.contextTokens).toBe(22000);
   });
+
+  it("carries how much the last request added, left out for the first after a compaction or a new process", async () => {
+    const { sdk, agents } = host();
+    agents.create(AGENT, "ana");
+    agents.start({ agentId: AGENT, sessionId: S1, resume: false });
+    await settle();
+    const assistant = (input: number) =>
+      sdk.last.emit({ type: "assistant", message: { model: "claude-haiku-5-5", content: [{ type: "text", text: "hi" }], stop_reason: null, usage: { input_tokens: input } }, parent_tool_use_id: null });
+    assistant(1000);
+    await settle();
+    expect(readAll(agents).report.contextAddedTokens).toBeUndefined();
+    assistant(1300);
+    await settle();
+    expect(readAll(agents).report.contextAddedTokens).toBe(300);
+    assistant(1200);
+    await settle();
+    expect(readAll(agents).report.contextAddedTokens).toBeUndefined();
+    assistant(1500);
+    await settle();
+    expect(readAll(agents).report.contextAddedTokens).toBe(300);
+    sdk.last.emit({ type: "system", subtype: "compact_boundary", compact_metadata: { trigger: "manual", pre_tokens: 1500, post_tokens: 100 } });
+    assistant(400);
+    await settle();
+    expect(readAll(agents).report.contextAddedTokens).toBeUndefined();
+    assistant(450);
+    await settle();
+    expect(readAll(agents).report.contextAddedTokens).toBe(50);
+  });
+});
+
+describe("a compaction", () => {
+  it("shows the agent working from the send, says it begins at once, and drops a second /compact until it ends", async () => {
+    const { sdk, agents } = host();
+    agents.create(AGENT, "ana");
+    agents.start({ agentId: AGENT, sessionId: S1, resume: false });
+    await settle();
+    sdk.last.emit({ type: "assistant", message: { model: "claude-haiku-5-5", content: [{ type: "text", text: "ok" }], stop_reason: "end_turn", usage: { input_tokens: 426029 } }, parent_tool_use_id: null });
+    sdk.last.emit({ type: "result", subtype: "success" });
+    await settle();
+    expect(readAll(agents).report.state).toBe("waiting");
+    agents.message(AGENT, C1, " /compact focus on code ");
+    expect(readAll(agents).report.state).toBe("working");
+    sdk.last.emit({ type: "system", subtype: "status", status: "compacting" });
+    await settle();
+    expect(() => agents.message(AGENT, C2, "/compact")).toThrow("already compacting: this /compact was dropped");
+    // Anything else goes through.
+    agents.message(AGENT, "aaaaaaaa-0000-4000-8000-000000000003", "and this");
+    expect(sdk.last.sent.slice(1).map((m) => m.text)).toEqual([" /compact focus on code ", "and this"]);
+    const all = readAll(agents);
+    expect(all.lines.at(-1)).toMatchObject({ from: "agent", text: "Compacting the conversation (426k tokens of context)…" });
+    expect(all.report.state).toBe("working");
+    sdk.last.emit({ type: "system", subtype: "compact_boundary", compact_metadata: { trigger: "manual", pre_tokens: 426029, post_tokens: 8699 } });
+    sdk.last.emit({ type: "result", subtype: "success" });
+    await settle();
+    const done = readAll(agents);
+    expect(done.report.state).toBe("waiting");
+    expect(done.lines.map((l) => l.text).filter((t) => /^Compact/.test(t))).toEqual(["Compacting the conversation (426k tokens of context)…", "Compacted the conversation: 426k → 9k tokens of context"]);
+    // Compacted, a /compact is sent on.
+    agents.message(AGENT, "aaaaaaaa-0000-4000-8000-000000000004", "/compact");
+  });
+
+  it("says a failed one failed and takes a /compact again", async () => {
+    const { sdk, agents } = host();
+    agents.create(AGENT, "ana");
+    agents.start({ agentId: AGENT, sessionId: S1, resume: false });
+    await settle();
+    sdk.last.emit({ type: "system", subtype: "status", status: "compacting" });
+    sdk.last.emit({ type: "system", subtype: "status", status: null, compact_result: "failed", compact_error: "too little to compact" });
+    await settle();
+    expect(readAll(agents).lines.map((l) => l.text).filter((t) => /^Compact/.test(t))).toEqual(["Compacting the conversation…", "Compaction failed: too little to compact"]);
+    agents.message(AGENT, C2, "/compact");
+  });
 });
