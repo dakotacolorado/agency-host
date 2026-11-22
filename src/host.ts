@@ -179,8 +179,8 @@ export class Host {
       if (!out) return;
       if (await this.socket.send(out.text)) {
         out.sent();
-        // A read stops at its budget: there may be more.
-        if (out.lines) this.soon();
+        // A read stops at its budget, and a report at its count of agents: there may be more.
+        if (out.more) this.soon();
       }
     }).catch((e: unknown) => log(`report: ${(e as Error).message}`));
     return this.flushing;
