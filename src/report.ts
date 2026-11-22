@@ -29,6 +29,11 @@ export const MOST_RESULTS = 1000;
 export const MOST_TOKENS = 256;
 /** The most agents the service takes in one report; those not told go in the next. */
 export const MOST_AGENTS = 256;
+/**
+ * After a refusal, everything is sent again at most this often, so a report
+ * the service refuses every time is not resent in a loop.
+ */
+export const REWIND_MS = 60_000;
 
 export interface TokenReport extends Tokens {
   agentId: string;
@@ -77,6 +82,11 @@ export class Totals {
       .map(([, t]) => t);
   }
 
+  /** Nothing counted as told: after a refusal, every total goes again. */
+  forget(): void {
+    this.told = null;
+  }
+
   sent(opened: number, sent: TokenReport[]): void {
     if (this.told?.on !== opened) this.told = { on: opened, was: new Map() };
     for (const t of sent) this.told.was.set(`${t.agentId}\n${t.sessionId}`, JSON.stringify(t));
@@ -94,10 +104,39 @@ export class Reporter {
   private usage: Usage | null = null;
   private readonly totals = new Totals();
   private readonly limit: number;
+  /** Results written since the last rewind, the newest `MOST_RESULTS`: a refused report's go again. */
+  private recent: CommandReport[] = [];
+  private rewoundAt = Number.NEGATIVE_INFINITY;
+  private rewindDue = false;
 
   constructor(agents: Agents, limit = REPORT_LIMIT) {
     this.agents = agents;
     this.limit = limit;
+  }
+
+  /**
+   * The service refused a message. A written report is counted sent, so what
+   * a refused one carried would be lost; the service does not say which it
+   * refused, so everything is sent again: every agent's lines from the start
+   * (the service keeps a line once, by its seq), every state and total, and
+   * the results written lately (one for a command no longer pending is passed
+   * over). At most once in `REWIND_MS`; the ms until it is done is returned.
+   */
+  refused(now = Date.now()): number {
+    this.rewindDue = true;
+    return Math.max(0, this.rewoundAt + REWIND_MS - now);
+  }
+
+  private rewind(now: number): void {
+    if (!this.rewindDue || now - this.rewoundAt < REWIND_MS) return;
+    this.rewindDue = false;
+    this.rewoundAt = now;
+    log("agency refused a message: sending everything again");
+    this.sentAt.clear();
+    this.told = null;
+    this.totals.forget();
+    for (const r of this.recent) if (!this.unsent.some((u) => u.commandId === r.commandId)) this.unsent.push(r);
+    this.recent = [];
   }
 
   /** A result to report, in place of any not yet sent for the same command. */
@@ -115,7 +154,8 @@ export class Reporter {
    * something first. The agents take turns at being read first, so one with
    * much to say holds none of the others up for long.
    */
-  next(opened: number): Outgoing | null {
+  next(opened: number, now = Date.now()): Outgoing | null {
+    this.rewind(now);
     const all = this.agents.all();
     const first = all.length ? this.turn % all.length : 0;
     this.turn++;
@@ -199,6 +239,7 @@ export class Reporter {
       more: said || more,
       sent: () => {
         this.unsent = this.unsent.filter((u) => !results.includes(u));
+        this.recent = [...this.recent.filter((r) => !results.some((u) => u.commandId === r.commandId)), ...results].slice(-MOST_RESULTS);
         if (this.usage === usage) this.usage = null;
         this.totals.sent(opened, tokens);
         for (const r of reads.values()) this.sentAt.set(r.id, r.next);

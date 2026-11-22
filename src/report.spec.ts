@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { Agents } from "./agents.ts";
 import { EVERY_TOOL } from "./config.ts";
-import { MOST_AGENTS, MOST_TOKENS, REPORT_LIMIT, Reporter, Totals } from "./report.ts";
+import { MOST_AGENTS, MOST_TOKENS, REPORT_LIMIT, REWIND_MS, Reporter, Totals } from "./report.ts";
 import { FakeSdk, LIMIT_STOP, scratch, settle } from "./testing.ts";
 
 function host() {
@@ -152,6 +152,39 @@ describe("a report", () => {
     expect(n).toBeLessThan(20);
     first.sent();
     expect(parsed(reporter.next(1)!.text).commandResults).toHaveLength(Math.min(20 - n, n));
+  });
+});
+
+describe("a refusal", () => {
+  it("sends again what was counted sent: lines from the start, states and results", async () => {
+    const { agents, reporter } = host();
+    agents.create("w1", "ana");
+    agents.start({ commandId: "c1", agentId: "w1", sessionId: "s1", resume: false, text: "go" });
+    reporter.result({ commandId: "c1", ok: true });
+    await settle();
+    const first = reporter.next(1, 0)!;
+    first.sent();
+    expect(reporter.next(1, 0)).toBeNull();
+    expect(reporter.refused(REWIND_MS)).toBe(0);
+    const again = parsed(reporter.next(1, REWIND_MS)!.text);
+    const body = parsed(first.text);
+    expect(again.lines).toEqual(body.lines);
+    expect(again.agents).toEqual(body.agents);
+    expect(again.commandResults).toEqual([{ commandId: "c1", ok: true }]);
+  });
+
+  it("rewinds at most once in REWIND_MS, and the one held back is done once that has passed", async () => {
+    const { agents, reporter } = host();
+    agents.create("w1", "ana");
+    agents.start({ agentId: "w1", sessionId: "s1", resume: false, text: "go" });
+    await settle();
+    reporter.next(1, 0)!.sent();
+    reporter.refused(REWIND_MS);
+    reporter.next(1, REWIND_MS)!.sent();
+    expect(reporter.refused(REWIND_MS + 1000)).toBe(REWIND_MS - 1000);
+    expect(reporter.next(1, REWIND_MS + 1000)).toBeNull();
+    const later = reporter.next(1, 2 * REWIND_MS)!;
+    expect(parsed(later.text).lines.length).toBeGreaterThan(0);
   });
 });
 

@@ -135,6 +135,10 @@ export class Host {
       else this.commands.take(c);
     } else if (msg.type === "error") {
       log(`agency: ${String(msg.error)}`);
+      // What a refused report carried was counted sent: send it all again.
+      const wait = this.reporter.refused();
+      if (wait === 0) this.soon();
+      else setTimeout(() => this.soon(), wait).unref();
     }
     // Anything else is passed over, so the service can add a kind before the host reads it.
   }
