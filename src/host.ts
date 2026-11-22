@@ -135,6 +135,10 @@ export class Host {
       else this.commands.take(c);
     } else if (msg.type === "error") {
       log(`agency: ${String(msg.error)}`);
+      // What a refused report carried was counted sent: send it all again.
+      const wait = this.reporter.refused();
+      if (wait === 0) this.soon();
+      else setTimeout(() => this.soon(), wait).unref();
     }
     // Anything else is passed over, so the service can add a kind before the host reads it.
   }
@@ -179,8 +183,8 @@ export class Host {
       if (!out) return;
       if (await this.socket.send(out.text)) {
         out.sent();
-        // A read stops at its budget: there may be more.
-        if (out.lines) this.soon();
+        // A read stops at its budget, and a report at its count of agents: there may be more.
+        if (out.more) this.soon();
       }
     }).catch((e: unknown) => log(`report: ${(e as Error).message}`));
     return this.flushing;
