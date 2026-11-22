@@ -168,7 +168,8 @@ describe("a host draining", () => {
     sdk.last.turn("also", sdk.last.sent[1]!.uuid, "done too");
     await until(() => drained);
     expect(sdk.last.closed).toBe(true);
-    expect(service.last.ws.readyState).not.toBe(1);
+    // The host has closed its end; the service's sees it once the close frame lands.
+    await until(() => service.last.ws.readyState !== 1);
   });
 
   it("closes what is still in a turn at drain_seconds, and stops", async () => {
